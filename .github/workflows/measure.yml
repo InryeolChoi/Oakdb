@@ -1,0 +1,68 @@
+name: Measure
+
+# Benchmarks and A/B experiments on both OSes. Not part of CI: the numbers
+# are records (docs/benchmarks, docs/experiments), not pass/fail checks.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - crates/oakdb/benches/**
+      - crates/oakdb/examples/ab_commit_sync.rs
+      - .github/workflows/measure.yml
+
+jobs:
+  measure:
+    name: measure (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Environment
+        run: |
+          {
+            echo "## Environment (${{ matrix.os }})"
+            echo '```'
+            uname -a
+            rustc --version
+            if [ "$RUNNER_OS" = Linux ]; then
+              grep -m1 'model name' /proc/cpuinfo
+              nproc
+              df -T "${TMPDIR:-/tmp}"
+            else
+              sw_vers
+              sysctl -n machdep.cpu.brand_string hw.ncpu
+              df -h "${TMPDIR:-/tmp}"
+              diskutil info / | grep -E 'File System Personality|Solid State|Device / Media Name' || true
+            fi
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY" measure.txt
+      - name: Benchmarks
+        run: |
+          cargo bench -q --bench single_page 2>&1 | tee bench.txt
+          {
+            echo "## Benchmarks"
+            echo '```'
+            grep 'time:' bench.txt
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY" measure.txt
+      - name: A/B commit sync
+        run: |
+          cargo build -q --release --example ab_commit_sync
+          echo "## A/B commit sync (20 rounds each)" | tee -a "$GITHUB_STEP_SUMMARY" measure.txt
+          for pair in "full none" "full fsync" "fsync none" "full full"; do
+            {
+              echo "### $pair"
+              echo '```'
+              target/release/examples/ab_commit_sync 20 $pair
+              echo '```'
+            } | tee -a "$GITHUB_STEP_SUMMARY" measure.txt
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: measure-${{ matrix.os }}
+          path: measure.txt
