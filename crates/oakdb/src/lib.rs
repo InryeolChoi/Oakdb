@@ -4,4 +4,11 @@
 //! All file access goes through [`fs::Fs`], which is the only place that knows
 //! about the operating system.
 
+mod db;
+mod error;
 pub mod fs;
+mod meta;
+mod page;
+
+pub use db::{Db, Txn};
+pub use error::{Error, Result, MAX_KEY_LEN};

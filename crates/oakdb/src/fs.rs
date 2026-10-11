@@ -16,6 +16,10 @@ use std::path::Path;
 pub trait Fs {
     type File: FsFile;
 
+    /// Creates `path` and any missing parent directories, and makes every
+    /// directory it created durable. Succeeds if `path` already exists.
+    fn create_dir_all(&self, path: &Path) -> io::Result<()>;
+
     /// Opens a file for reading and writing, creating it if it does not exist.
     fn open(&self, path: &Path) -> io::Result<Self::File>;
 
@@ -55,6 +59,24 @@ pub struct StdFs;
 
 impl Fs for StdFs {
     type File = StdFile;
+
+    fn create_dir_all(&self, path: &Path) -> io::Result<()> {
+        if path.is_dir() {
+            return Ok(());
+        }
+        let parent = match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
+        self.create_dir_all(parent)?;
+        match std::fs::create_dir(path) {
+            Ok(()) => {}
+            // Someone else created it between our check and now.
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && path.is_dir() => {}
+            Err(e) => return Err(e),
+        }
+        self.sync_dir(parent)
+    }
 
     fn open(&self, path: &Path) -> io::Result<StdFile> {
         let file = OpenOptions::new()
@@ -156,6 +178,26 @@ mod tests {
         let mut buf = [0u8; 4];
         file.read_exact_at(&mut buf, 0).unwrap();
         assert_eq!(&buf, b"keep");
+    }
+
+    #[test]
+    fn create_dir_all_creates_missing_parents() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("a").join("b");
+
+        StdFs.create_dir_all(&dir).unwrap();
+        StdFs.create_dir_all(&dir).unwrap();
+
+        assert!(dir.is_dir());
+    }
+
+    #[test]
+    fn create_dir_all_fails_when_a_file_is_in_the_way() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("file");
+        std::fs::write(&file, b"").unwrap();
+
+        assert!(StdFs.create_dir_all(&file.join("db")).is_err());
     }
 
     #[test]
