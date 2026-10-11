@@ -124,14 +124,19 @@ impl LeafPage {
 
     /// Stores `value` under `key`, replacing any value already there.
     ///
-    /// On [`Error::PageFull`] the page is left unchanged.
+    /// Bytes left behind by replaced cells are reclaimed by compacting the
+    /// page when the new cell does not fit otherwise. On [`Error::PageFull`]
+    /// the page is left unchanged.
     pub(crate) fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         let cell_len = CELL_HEADER_SIZE + key.len() + value.len();
         let found = self.search(key);
-        // Replacing a cell gives back its slot. Its old bytes are not reused
-        // yet: that needs compaction, which comes with deletes.
-        let reused_slot = if found.is_ok() { SLOT_SIZE } else { 0 };
-        if SLOT_SIZE + cell_len > self.free_space() + reused_slot {
+        // Replacing a cell gives back its slot and its bytes.
+        let replaced = match found {
+            Ok(i) => SLOT_SIZE + self.slot(i).1,
+            Err(_) => 0,
+        };
+        let reclaimable = self.free_space() + self.read_u16(FRAG_BYTES) + replaced;
+        if SLOT_SIZE + cell_len > reclaimable {
             return Err(Error::PageFull);
         }
 
@@ -142,6 +147,9 @@ impl LeafPage {
             }
             Err(i) => i,
         };
+        if SLOT_SIZE + cell_len > self.free_space() {
+            self.compact();
+        }
 
         let offset = self.read_u16(FREE_END) - cell_len;
         self.write_u16(offset, key.len());
@@ -170,6 +178,23 @@ impl LeafPage {
         self.write_u16(FREE_START, free_start - SLOT_SIZE);
         self.write_u16(CELL_COUNT, self.cell_count() - 1);
         self.write_u16(FRAG_BYTES, self.read_u16(FRAG_BYTES) + len);
+    }
+
+    /// Moves every live cell to the end of the page, back to back, so the
+    /// fragments between them join the free space. Slots keep their order.
+    fn compact(&mut self) {
+        let old = self.buf.clone();
+        let mut end = PAGE_SIZE;
+        for i in 0..self.cell_count() {
+            let (offset, len) = self.slot(i);
+            end -= len;
+            self.buf[end..end + len].copy_from_slice(&old[offset..offset + len]);
+            self.write_u16(slot_pos(i), end);
+        }
+        let free_start = self.read_u16(FREE_START);
+        self.buf[free_start..end].fill(0);
+        self.write_u16(FREE_END, end);
+        self.write_u16(FRAG_BYTES, 0);
     }
 
     /// Binary search over the slots: `Ok(i)` if slot `i` holds `key`,
@@ -271,6 +296,72 @@ mod tests {
         assert_eq!(page.get(b"a"), Some(&b"newer"[..]));
         assert_eq!(page.read_u16(CELL_COUNT), 1);
         assert_eq!(page.read_u16(FRAG_BYTES), 8);
+    }
+
+    #[test]
+    fn compacting_reclaims_fragments_and_keeps_every_value() {
+        let mut page = LeafPage::empty();
+        for key in 0u8..10 {
+            page.put(&[key], &[key; 300]).unwrap();
+        }
+        for key in (0u8..10).step_by(2) {
+            page.put(&[key], &[key]).unwrap();
+        }
+        let fragments = page.read_u16(FRAG_BYTES);
+        let free = page.free_space();
+
+        page.compact();
+
+        assert_eq!(page.read_u16(FRAG_BYTES), 0);
+        assert_eq!(page.free_space(), free + fragments);
+        for key in 0u8..10 {
+            let len = if key % 2 == 0 { 1 } else { 300 };
+            assert_eq!(page.get(&[key]), Some(&vec![key; len][..]));
+        }
+        LeafPage::from_bytes(page.as_bytes().into()).unwrap();
+    }
+
+    #[test]
+    fn a_replaced_cell_makes_room_for_its_bigger_replacement() {
+        let mut page = LeafPage::empty();
+        page.put(b"a", &[1; 3000]).unwrap();
+        page.put(b"b", &[2; 900]).unwrap();
+
+        page.put(b"a", &[3; 3100]).unwrap();
+
+        assert_eq!(page.get(b"a"), Some(&[3; 3100][..]));
+        assert_eq!(page.get(b"b"), Some(&[2; 900][..]));
+    }
+
+    #[test]
+    fn random_puts_match_a_btreemap() {
+        let mut seed: u64 = 0x0a4b_d0b1;
+        let mut next = |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        let mut page = LeafPage::empty();
+        let mut model = std::collections::BTreeMap::new();
+        for step in 0..20_000 {
+            let key = [next(40) as u8];
+            let value = vec![step as u8; next(400) as usize];
+            let before = page.clone();
+            match page.put(&key, &value) {
+                Ok(()) => {
+                    model.insert(key, value);
+                }
+                Err(Error::PageFull) => assert_eq!(page.as_bytes(), before.as_bytes()),
+                Err(e) => panic!("{e}"),
+            }
+            if step % 500 == 0 {
+                page = LeafPage::from_bytes(page.as_bytes().into()).unwrap();
+            }
+        }
+        for key in 0..40u8 {
+            assert_eq!(page.get(&[key]), model.get(&[key]).map(Vec::as_slice));
+        }
     }
 
     #[test]

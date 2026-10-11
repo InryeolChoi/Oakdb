@@ -98,6 +98,9 @@ impl FsFile for ModeFile {
     fn set_len(&self, len: u64) -> io::Result<()> {
         self.0.set_len(len)
     }
+    fn try_lock(&self) -> io::Result<()> {
+        self.0.try_lock().map_err(io::Error::from)
+    }
     fn sync_data(&self) -> io::Result<()> {
         sync(&self.0, self.1)
     }

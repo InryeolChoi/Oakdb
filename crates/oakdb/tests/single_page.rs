@@ -116,6 +116,70 @@ fn keys_longer_than_512_bytes_are_rejected() {
 }
 
 #[test]
+fn reading_a_key_longer_than_512_bytes_is_rejected() {
+    let root = tempfile::tempdir().unwrap();
+    let db = Db::open(root.path()).unwrap();
+
+    let err = db.begin().get(&[7; MAX_KEY_LEN + 1]).unwrap_err();
+
+    assert!(matches!(err, Error::KeyTooLarge { len: 513, max: 512 }));
+}
+
+#[test]
+fn overwriting_one_key_again_and_again_never_fills_the_page() {
+    let root = tempfile::tempdir().unwrap();
+    let db = Db::open(root.path()).unwrap();
+
+    for i in 0..2000usize {
+        let mut txn = db.begin();
+        txn.put(b"counter", &vec![7; 100 + i % 50]).unwrap();
+        txn.commit().unwrap();
+    }
+
+    assert_eq!(db.begin().get(b"counter").unwrap(), Some(vec![7; 149]));
+}
+
+#[test]
+fn space_freed_by_shrinking_values_takes_new_keys_after_reopening() {
+    let root = tempfile::tempdir().unwrap();
+    let db = Db::open(root.path()).unwrap();
+    let mut txn = db.begin();
+    for key in 0u8..10 {
+        txn.put(&[key], &[key; 350]).unwrap();
+    }
+    txn.commit().unwrap();
+    let mut txn = db.begin();
+    for key in 0u8..10 {
+        txn.put(&[key], &[key]).unwrap();
+    }
+    txn.commit().unwrap();
+    db.close().unwrap();
+
+    let db = Db::open(root.path()).unwrap();
+    let mut txn = db.begin();
+    txn.put(b"new", &[1; 3000]).unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin();
+    assert_eq!(txn.get(b"new").unwrap(), Some(vec![1; 3000]));
+    for key in 0u8..10 {
+        assert_eq!(txn.get(&[key]).unwrap(), Some(vec![key]));
+    }
+}
+
+#[test]
+fn a_database_that_is_already_open_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    let db = Db::open(root.path()).unwrap();
+
+    let err = Db::open(root.path()).unwrap_err();
+
+    assert!(matches!(err, Error::AlreadyOpen));
+    db.close().unwrap();
+    Db::open(root.path()).unwrap();
+}
+
+#[test]
 fn a_commit_that_does_not_fit_in_the_page_fails_and_changes_nothing() {
     let root = tempfile::tempdir().unwrap();
     let db = Db::open(root.path()).unwrap();
