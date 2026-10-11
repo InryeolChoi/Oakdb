@@ -1,0 +1,13 @@
+[package]
+name = "oakdb"
+version = "0.1.0"
+description = "Oakdb storage engine: a B+Tree key-value engine with a simple relational layer"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,10 @@
+[package]
+name = "oakdb-server"
+version = "0.1.0"
+description = "Network server for Oakdb"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+oakdb = { path = "../oakdb" }
