@@ -32,6 +32,10 @@ pub enum Error {
     },
     /// The data file is damaged or is not an Oakdb file.
     Corrupt(String),
+    /// Another [`crate::Db`] already has this database open, in this process
+    /// or another one. Two of them writing the same file would silently
+    /// overwrite each other's commits.
+    AlreadyOpen,
 }
 
 /// Result type of the engine.
@@ -50,6 +54,7 @@ impl fmt::Display for Error {
                 "data file uses {found} byte pages, but this build uses {expected}"
             ),
             Error::Corrupt(reason) => write!(f, "data file is corrupt: {reason}"),
+            Error::AlreadyOpen => write!(f, "the database is already open"),
         }
     }
 }

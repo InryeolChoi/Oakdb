@@ -46,6 +46,11 @@ pub trait FsFile {
     /// Grows or shrinks the file to `len` bytes.
     fn set_len(&self, len: u64) -> io::Result<()>;
 
+    /// Takes an exclusive lock on the file without waiting, held until the
+    /// file is closed. Fails with [`io::ErrorKind::WouldBlock`] if another
+    /// open handle, in this process or another, already holds it.
+    fn try_lock(&self) -> io::Result<()>;
+
     /// Makes every write so far durable on the storage device.
     ///
     /// If this fails, the caller must not retry and treat the data as saved:
@@ -113,6 +118,12 @@ impl FsFile for StdFile {
 
     fn set_len(&self, len: u64) -> io::Result<()> {
         self.0.set_len(len)
+    }
+
+    fn try_lock(&self) -> io::Result<()> {
+        // `flock` on both platforms: the lock belongs to this open file, so
+        // a second open of the same path in the same process is refused too.
+        self.0.try_lock().map_err(io::Error::from)
     }
 
     fn sync_data(&self) -> io::Result<()> {
@@ -198,6 +209,21 @@ mod tests {
         std::fs::write(&file, b"").unwrap();
 
         assert!(StdFs.create_dir_all(&file.join("db")).is_err());
+    }
+
+    #[test]
+    fn a_locked_file_cannot_be_locked_again_until_it_is_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data");
+        let first = StdFs.open(&path).unwrap();
+        first.try_lock().unwrap();
+
+        let second = StdFs.open(&path).unwrap();
+        let err = second.try_lock().unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+
+        drop(first);
+        second.try_lock().unwrap();
     }
 
     #[test]

@@ -55,6 +55,10 @@ impl<F: Fs> Db<F> {
         let dir = path.as_ref();
         fs.create_dir_all(dir)?;
         let file = fs.open(&dir.join(DATA_FILE))?;
+        file.try_lock().map_err(|e| match e.kind() {
+            std::io::ErrorKind::WouldBlock => Error::AlreadyOpen,
+            _ => Error::Io(e),
+        })?;
         if file.size()? == 0 {
             Db::create(&fs, dir, file)
         } else {
@@ -112,7 +116,7 @@ impl<F: Fs> Db<F> {
     }
 
     /// Closes the database. Every committed transaction is already durable,
-    /// so this only releases the file.
+    /// so this only releases the file and its lock.
     pub fn close(self) -> Result<()> {
         Ok(())
     }
@@ -134,6 +138,7 @@ pub struct Txn<'db, F: Fs = StdFs> {
 impl<F: Fs> Txn<'_, F> {
     /// The value under `key`, including this transaction's own writes.
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        check_key(key)?;
         if let Some(value) = self.writes.get(key) {
             return Ok(Some(value.clone()));
         }
@@ -142,12 +147,7 @@ impl<F: Fs> Txn<'_, F> {
 
     /// Stores `value` under `key` when the transaction commits.
     pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
-        if key.len() > MAX_KEY_LEN {
-            return Err(Error::KeyTooLarge {
-                len: key.len(),
-                max: MAX_KEY_LEN,
-            });
-        }
+        check_key(key)?;
         self.writes.insert(key.to_vec(), value.to_vec());
         Ok(())
     }
@@ -177,6 +177,16 @@ impl<F: Fs> Txn<'_, F> {
 
     /// Throws away the writes.
     pub fn rollback(self) {}
+}
+
+fn check_key(key: &[u8]) -> Result<()> {
+    if key.len() > MAX_KEY_LEN {
+        return Err(Error::KeyTooLarge {
+            len: key.len(),
+            max: MAX_KEY_LEN,
+        });
+    }
+    Ok(())
 }
 
 fn page_offset(page_no: u64) -> u64 {
