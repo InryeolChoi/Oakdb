@@ -21,4 +21,6 @@ Each core feature goes through four steps, and each step leaves a Korean, blog-r
 3. **Verify**: code review (including Rust-specific design points), fault experiments in `docs/experiments/`, benchmarks in `docs/benchmarks/`.
 4. **Retrospective**: what was learned, in `docs/retros/`. Don't add interview Q&A sections.
 
+Each ticket is built on its own branch (`ticket/<NN>-<slug>`) and lands through a pull request whose description says `Closes #<issue>`. CI must pass on both OSes before the user merges it; never commit to `main` directly.
+
 Oakdb must build, pass tests and keep the same durability guarantees on both macOS and Linux (see `docs/adr/0003-support-macos-and-linux.md`). GitHub Actions runs the tests on both OSes on every push; set this up together with the Rust project skeleton.
