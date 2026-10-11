@@ -11,6 +11,10 @@
 //! Each round opens a fresh database and commits distinct small keys one per
 //! transaction until the single page is full. Rounds alternate A and B so slow
 //! drift in the machine hits both sides equally.
+//!
+//! Commits in one round are not independent samples, so with thousands of
+//! them the per-commit test calls even tiny drifts significant. The verdict
+//! comes from the per-round test, which compares the median of each round.
 
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -230,14 +234,19 @@ fn main() {
     round(ma);
     round(mb);
     let (mut a, mut b) = (Vec::new(), Vec::new());
+    let (mut round_a, mut round_b) = (Vec::new(), Vec::new());
     for r in 0..rounds {
-        if r % 2 == 0 {
-            a.extend(round(ma));
-            b.extend(round(mb));
+        let (ra, rb) = if r % 2 == 0 {
+            let ra = round(ma);
+            (ra, round(mb))
         } else {
-            b.extend(round(mb));
-            a.extend(round(ma));
-        }
+            let rb = round(mb);
+            (round(ma), rb)
+        };
+        round_a.push(median(&ra));
+        round_b.push(median(&rb));
+        a.extend(ra);
+        b.extend(rb);
     }
 
     println!("os={} rounds={rounds}", std::env::consts::OS);
@@ -245,9 +254,16 @@ fn main() {
     summary("B", mb, &b);
     let (u, z, p) = mann_whitney(&a, &b);
     let (lo, hi) = bootstrap_ratio(&a, &b, 2000);
-    println!("Mann-Whitney U={u:.0} z={z:.2} p={p:.3e}");
+    println!("per commit: Mann-Whitney U={u:.0} z={z:.2} p={p:.3e}");
     println!(
-        "median(A)/median(B) = {:.2}x, 95% bootstrap CI [{lo:.2}, {hi:.2}]",
+        "per commit: median(A)/median(B) = {:.2}x, 95% bootstrap CI [{lo:.2}, {hi:.2}]",
         median(&a) / median(&b)
+    );
+    let (u, z, p) = mann_whitney(&round_a, &round_b);
+    let (lo, hi) = bootstrap_ratio(&round_a, &round_b, 2000);
+    println!("per round: Mann-Whitney U={u:.0} z={z:.2} p={p:.3e}");
+    println!(
+        "per round: median(A)/median(B) = {:.2}x, 95% bootstrap CI [{lo:.2}, {hi:.2}]",
+        median(&round_a) / median(&round_b)
     );
 }
