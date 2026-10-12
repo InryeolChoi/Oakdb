@@ -9,6 +9,7 @@ mod error;
 pub mod fs;
 mod meta;
 mod page;
+mod tree;
 
 pub use db::{Db, Txn, DATA_FILE};
-pub use error::{Error, Result, MAX_KEY_LEN};
+pub use error::{Error, Result, MAX_ENTRY_LEN, MAX_KEY_LEN};

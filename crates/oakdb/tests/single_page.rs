@@ -157,11 +157,20 @@ fn space_freed_by_shrinking_values_takes_new_keys_after_reopening() {
 
     let db = Db::open(root.path()).unwrap();
     let mut txn = db.begin();
-    txn.put(b"new", &[1; 3000]).unwrap();
+    for new in [b"new0", b"new1", b"new2"] {
+        txn.put(new, &[1; 1000]).unwrap();
+    }
     txn.commit().unwrap();
 
+    // Still one leaf: the space was reused instead of splitting.
+    let size = std::fs::metadata(root.path().join(DATA_FILE))
+        .unwrap()
+        .len();
+    assert_eq!(size, 3 * 4096);
     let txn = db.begin();
-    assert_eq!(txn.get(b"new").unwrap(), Some(vec![1; 3000]));
+    for new in [b"new0", b"new1", b"new2"] {
+        assert_eq!(txn.get(new).unwrap(), Some(vec![1; 1000]));
+    }
     for key in 0u8..10 {
         assert_eq!(txn.get(&[key]).unwrap(), Some(vec![key]));
     }
@@ -177,29 +186,6 @@ fn a_database_that_is_already_open_is_refused() {
     assert!(matches!(err, Error::AlreadyOpen));
     db.close().unwrap();
     Db::open(root.path()).unwrap();
-}
-
-#[test]
-fn a_commit_that_does_not_fit_in_the_page_fails_and_changes_nothing() {
-    let root = tempfile::tempdir().unwrap();
-    let db = Db::open(root.path()).unwrap();
-    let mut txn = db.begin();
-    txn.put(b"kept", b"value").unwrap();
-    txn.commit().unwrap();
-
-    let mut txn = db.begin();
-    for i in 0u32..200 {
-        txn.put(&i.to_be_bytes(), &[0; 32]).unwrap();
-    }
-    let err = txn.commit().unwrap_err();
-
-    assert!(matches!(err, Error::PageFull));
-    assert_eq!(db.begin().get(&0u32.to_be_bytes()).unwrap(), None);
-    db.close().unwrap();
-    let db = Db::open(root.path()).unwrap();
-    let txn = db.begin();
-    assert_eq!(txn.get(b"kept").unwrap(), Some(b"value".to_vec()));
-    assert_eq!(txn.get(&0u32.to_be_bytes()).unwrap(), None);
 }
 
 #[test]

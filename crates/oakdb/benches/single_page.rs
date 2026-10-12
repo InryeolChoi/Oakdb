@@ -1,9 +1,11 @@
-//! Baseline benchmarks for the single-page engine (docs/benchmarks/0001).
+//! Benchmarks for one leaf (docs/benchmarks/0001) and a two-level tree
+//! (docs/benchmarks/0003).
 //!
-//! Reads run against a full page. Commits overwrite keys that are already
-//! there, so the page stays full and every few commits has to compact.
+//! Reads run against a full leaf. Commits overwrite keys that are already
+//! there, so the leaf stays full and every few commits has to compact.
 //! Commits are measured twice: on the real file system, and with syncs
-//! turned off to see what the engine itself costs.
+//! turned off to see what the engine itself costs. The `two_levels` cases
+//! do the same on a tree of about a hundred leaves under one root.
 
 use std::fs::{File, OpenOptions};
 use std::hint::black_box;
@@ -13,7 +15,7 @@ use std::path::Path;
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use oakdb::fs::{Fs, FsFile, StdFs};
-use oakdb::{Db, Error};
+use oakdb::Db;
 
 /// The real file system, except that syncs do nothing. Not durable: only
 /// for measuring the engine without the disk.
@@ -65,19 +67,32 @@ impl FsFile for NoSyncFile {
     }
 }
 
-/// Fills the page with 4-byte keys and values, one commit each, and
-/// returns how many fit.
+/// How many entries of a 4-byte key and value fill one leaf.
+const ONE_LEAF: u32 = 253;
+
+/// About a hundred leaves of such entries, all under the root.
+const TWO_LEVELS: u32 = 20_000;
+
+/// Fills a leaf with 4-byte keys and values, one commit each, and returns
+/// how many there are.
 fn fill<F: Fs>(db: &Db<F>) -> u32 {
-    for i in 0u32.. {
+    for i in 0..ONE_LEAF {
         let mut txn = db.begin();
         txn.put(&i.to_be_bytes(), &i.to_be_bytes()).unwrap();
-        match txn.commit() {
-            Ok(()) => {}
-            Err(Error::PageFull) => return i,
-            Err(e) => panic!("{e}"),
-        }
+        txn.commit().unwrap();
     }
-    unreachable!()
+    ONE_LEAF
+}
+
+/// Puts [`TWO_LEVELS`] 4-byte keys and values in one commit and returns how
+/// many there are.
+fn fill_two_levels<F: Fs>(db: &Db<F>) -> u32 {
+    let mut txn = db.begin();
+    for i in 0..TWO_LEVELS {
+        txn.put(&i.to_be_bytes(), &i.to_be_bytes()).unwrap();
+    }
+    txn.commit().unwrap();
+    TWO_LEVELS
 }
 
 fn reads(c: &mut Criterion) {
@@ -95,11 +110,20 @@ fn reads(c: &mut Criterion) {
     group.bench_function("miss", |b| {
         b.iter(|| black_box(db.begin().get(b"absent!").unwrap()))
     });
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open_with(NoSyncFs, dir.path()).unwrap();
+    let n = fill_two_levels(&db);
+    group.bench_function("hit_two_levels", |b| {
+        b.iter(|| {
+            i = (i + 7919) % n;
+            black_box(db.begin().get(&i.to_be_bytes()).unwrap())
+        })
+    });
     group.finish();
 }
 
-fn commit_overwrites<F: Fs>(c: &mut Criterion, name: &str, db: &Db<F>) {
-    let n = fill(db);
+fn commit_overwrites<F: Fs>(c: &mut Criterion, name: &str, db: &Db<F>, n: u32) {
     let mut i = 0u32;
     c.bench_function(name, |b| {
         b.iter(|| {
@@ -115,11 +139,18 @@ fn commit_overwrites<F: Fs>(c: &mut Criterion, name: &str, db: &Db<F>) {
 fn commits(c: &mut Criterion) {
     let dir = tempfile::tempdir().unwrap();
     let db = Db::open_with(NoSyncFs, dir.path()).unwrap();
-    commit_overwrites(c, "commit/no_sync", &db);
+    let n = fill(&db);
+    commit_overwrites(c, "commit/no_sync", &db, n);
 
     let dir = tempfile::tempdir().unwrap();
     let db = Db::open_with(StdFs, dir.path()).unwrap();
-    commit_overwrites(c, "commit/durable", &db);
+    let n = fill(&db);
+    commit_overwrites(c, "commit/durable", &db, n);
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open_with(NoSyncFs, dir.path()).unwrap();
+    let n = fill_two_levels(&db);
+    commit_overwrites(c, "commit/no_sync_two_levels", &db, n);
 }
 
 criterion_group!(benches, reads, commits);

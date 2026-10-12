@@ -1,4 +1,4 @@
-//! Fixed-size pages and the leaf page layout.
+//! Fixed-size pages and the layout of leaf and internal pages.
 //!
 //! The layout follows SQLite's b-tree pages (ADR 0008): a header, then a
 //! cell pointer array (slots) that grows forward in key order, then free
@@ -6,25 +6,30 @@
 //! Field details follow `docs/research/0005-btree-page-layout.md`. Every
 //! integer is little-endian.
 //!
+//! Leaf cells hold a key and its value. Internal cells hold a separator key
+//! and, as their value, the page number (u64) of the child holding the keys
+//! below it and at or above the previous separator. Keys at or above the
+//! last separator are in `rightmost_child`.
+//!
 //! ```text
 //! offset  size  field
 //! 0..4    u32   checksum         reserved for CRC-32C, 0 for now
 //! 4..12   u64   page_lsn         reserved for the WAL, 0 for now
-//! 12      u8    kind             1 = leaf
+//! 12      u8    kind             1 = leaf, 2 = internal
 //! 13      u8    flags            must be 0
 //! 14..16  u16   cell_count
 //! 16..18  u16   free_start       end of the slot array
 //! 18..20  u16   free_end         start of the cell content area
 //! 20..22  u16   frag_bytes       bytes freed by replaced or deleted cells
 //! 22..24  u16   reserved         0
-//! 24..32  u64   right_sibling    0 = none
-//! 32..40  u64   rightmost_child  internal pages only, 0 for leaves
+//! 24..32  u64   right_sibling    leaves only, 0 = none
+//! 32..40  u64   rightmost_child  internal pages only
 //! 40..    [offset u16, len u16] × cell_count
 //! ...     free space
 //! ...4096 cells: key_len u16 | value_len u16 | key | value
 //! ```
 
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, MAX_ENTRY_LEN, MAX_KEY_LEN};
 
 /// Size of every page in the data file.
 pub(crate) const PAGE_SIZE: usize = 4096;
@@ -34,6 +39,7 @@ const SLOT_SIZE: usize = 4;
 const CELL_HEADER_SIZE: usize = 4;
 
 const KIND_LEAF: u8 = 1;
+const KIND_INTERNAL: u8 = 2;
 
 const KIND: usize = 12;
 const FLAGS: usize = 13;
@@ -42,21 +48,48 @@ const FREE_START: usize = 16;
 const FREE_END: usize = 18;
 const FRAG_BYTES: usize = 20;
 const RESERVED: usize = 22;
+const RIGHT_SIBLING: usize = 24;
 const RIGHTMOST_CHILD: usize = 32;
 
-/// A leaf page holding sorted key-value cells.
+const CHILD_LEN: usize = 8;
+
+/// Space a cell takes in a page, its slot included.
+const fn footprint(key_len: usize, value_len: usize) -> usize {
+    SLOT_SIZE + CELL_HEADER_SIZE + key_len + value_len
+}
+
+// A full leaf plus one more entry always splits into two leaves that fit.
+const _: () = assert!(4 * footprint(MAX_ENTRY_LEN, 0) <= PAGE_SIZE - HEADER_SIZE);
+// Every separator fits in an internal page.
+const _: () = assert!(2 * footprint(MAX_KEY_LEN, CHILD_LEN) <= PAGE_SIZE - HEADER_SIZE);
+
+/// A leaf or internal page holding sorted cells.
 #[derive(Clone)]
-pub(crate) struct LeafPage {
+pub(crate) struct Page {
     buf: Box<[u8]>,
 }
 
-impl LeafPage {
+impl Page {
     /// A leaf page with no cells.
-    pub(crate) fn empty() -> Self {
-        let mut page = LeafPage {
+    pub(crate) fn empty_leaf() -> Self {
+        Page::empty(KIND_LEAF)
+    }
+
+    /// An internal page whose keys below `separator` are in `left` and the
+    /// rest in `right`.
+    pub(crate) fn new_internal(left: u64, separator: &[u8], right: u64) -> Self {
+        let mut page = Page::empty(KIND_INTERNAL);
+        page.write_u64(RIGHTMOST_CHILD, right);
+        page.put(separator, &left.to_le_bytes())
+            .expect("one separator fits in an empty page");
+        page
+    }
+
+    fn empty(kind: u8) -> Self {
+        let mut page = Page {
             buf: vec![0; PAGE_SIZE].into_boxed_slice(),
         };
-        page.buf[KIND] = KIND_LEAF;
+        page.buf[KIND] = kind;
         page.write_u16(FREE_START, HEADER_SIZE);
         page.write_u16(FREE_END, PAGE_SIZE);
         page
@@ -68,15 +101,18 @@ impl LeafPage {
         if buf.len() != PAGE_SIZE {
             return Err(corrupt("page has the wrong size"));
         }
-        let page = LeafPage { buf };
-        if page.buf[KIND] != KIND_LEAF {
-            return Err(corrupt("page is not a leaf page"));
+        let page = Page { buf };
+        if page.buf[KIND] != KIND_LEAF && page.buf[KIND] != KIND_INTERNAL {
+            return Err(corrupt("page is neither a leaf nor an internal page"));
         }
-        if page.buf[FLAGS] != 0 {
+        if page.buf[FLAGS] != 0 || page.read_u16(RESERVED) != 0 {
             return Err(corrupt("page has unknown flags"));
         }
-        if page.read_u16(RESERVED) != 0 || page.buf[RIGHTMOST_CHILD..HEADER_SIZE] != [0; 8] {
-            return Err(corrupt("leaf page uses fields only internal pages have"));
+        if page.is_leaf() && page.read_u64(RIGHTMOST_CHILD) != 0 {
+            return Err(corrupt("leaf page has a child"));
+        }
+        if !page.is_leaf() && page.read_u64(RIGHT_SIBLING) != 0 {
+            return Err(corrupt("internal page has a sibling"));
         }
         let free_start = page.read_u16(FREE_START);
         let free_end = page.read_u16(FREE_END);
@@ -98,6 +134,9 @@ impl LeafPage {
             if CELL_HEADER_SIZE + key_len + value_len != len {
                 return Err(corrupt("cell length does not match its slot"));
             }
+            if !page.is_leaf() && value_len != CHILD_LEN {
+                return Err(corrupt("internal cell does not hold a page number"));
+            }
         }
         // Every byte of the cell area is either a live cell or a fragment.
         // This also keeps later fragment counts from overflowing.
@@ -114,6 +153,103 @@ impl LeafPage {
 
     pub(crate) fn as_bytes(&self) -> &[u8] {
         &self.buf
+    }
+
+    pub(crate) fn is_leaf(&self) -> bool {
+        self.buf[KIND] == KIND_LEAF
+    }
+
+    pub(crate) fn cell_count(&self) -> usize {
+        self.read_u16(CELL_COUNT)
+    }
+
+    pub(crate) fn key_at(&self, index: usize) -> &[u8] {
+        let (offset, _) = self.slot(index);
+        let start = offset + CELL_HEADER_SIZE;
+        &self.buf[start..start + self.read_u16(offset)]
+    }
+
+    /// The next leaf to the right, if any. Leaves only.
+    pub(crate) fn right_sibling(&self) -> Option<u64> {
+        Some(self.read_u64(RIGHT_SIBLING)).filter(|&page_no| page_no != 0)
+    }
+
+    pub(crate) fn set_right_sibling(&mut self, page_no: Option<u64>) {
+        self.write_u64(RIGHT_SIBLING, page_no.unwrap_or(0));
+    }
+
+    /// Which child of this internal page `key` belongs in: an index into
+    /// its cells, or [`Page::cell_count`] for the rightmost child.
+    pub(crate) fn child_index(&self, key: &[u8]) -> usize {
+        match self.search(key) {
+            // A key equal to a separator sorts at or above it.
+            Ok(i) => i + 1,
+            Err(i) => i,
+        }
+    }
+
+    /// The page number of child `index`; see [`Page::child_index`].
+    pub(crate) fn child_at(&self, index: usize) -> u64 {
+        if index == self.cell_count() {
+            return self.read_u64(RIGHTMOST_CHILD);
+        }
+        let value = self.value_at(index);
+        u64::from_le_bytes(value.try_into().expect("checked when the page was read"))
+    }
+
+    /// Points child `index` at another page, keeping its key range.
+    pub(crate) fn set_child_at(&mut self, index: usize, page_no: u64) {
+        if index == self.cell_count() {
+            self.write_u64(RIGHTMOST_CHILD, page_no);
+        } else {
+            let (offset, len) = self.slot(index);
+            self.write_u64(offset + len - CHILD_LEN, page_no);
+        }
+    }
+
+    /// Adds a separator to this internal page: keys below `separator`, down
+    /// to the previous separator, are in `child`.
+    pub(crate) fn insert_child(&mut self, separator: &[u8], child: u64) -> Result<()> {
+        self.put(separator, &child.to_le_bytes())
+    }
+
+    /// Splits this leaf, with `key` and `value` added, into a left and a
+    /// right leaf with about the same number of bytes each. Returns them
+    /// with the first key of the right leaf, which separates the two.
+    ///
+    /// Siblings are left for the caller to set.
+    pub(crate) fn split_leaf(&self, key: &[u8], value: &[u8]) -> (Page, Vec<u8>, Page) {
+        debug_assert!(key.len() + value.len() <= MAX_ENTRY_LEN);
+        let mut entries: Vec<(&[u8], &[u8])> = (0..self.cell_count())
+            .map(|i| (self.key_at(i), self.value_at(i)))
+            .collect();
+        match self.search(key) {
+            Ok(i) => entries[i] = (key, value),
+            Err(i) => entries.insert(i, (key, value)),
+        }
+        let total: usize = entries
+            .iter()
+            .map(|(k, v)| footprint(k.len(), v.len()))
+            .sum();
+        // The first `mid` entries go left. Pick the split that leaves the
+        // fuller leaf as empty as possible, with at least one entry on
+        // each side.
+        let (mut left, mut mid, mut fuller) = (0, 0, usize::MAX);
+        for (i, (k, v)) in entries[..entries.len() - 1].iter().enumerate() {
+            left += footprint(k.len(), v.len());
+            if left.max(total - left) < fuller {
+                (mid, fuller) = (i + 1, left.max(total - left));
+            }
+        }
+        let build = |entries: &[(&[u8], &[u8])]| {
+            let mut page = Page::empty_leaf();
+            for (k, v) in entries {
+                page.put(k, v).expect("half of a split fits in a page");
+            }
+            page
+        };
+        let separator = entries[mid].0.to_vec();
+        (build(&entries[..mid]), separator, build(&entries[mid..]))
     }
 
     /// The value stored under `key`, if any.
@@ -231,19 +367,9 @@ impl LeafPage {
         self.read_u16(FREE_END) - self.read_u16(FREE_START)
     }
 
-    fn cell_count(&self) -> usize {
-        self.read_u16(CELL_COUNT)
-    }
-
     fn slot(&self, index: usize) -> (usize, usize) {
         let slot = slot_pos(index);
         (self.read_u16(slot), self.read_u16(slot + 2))
-    }
-
-    fn key_at(&self, index: usize) -> &[u8] {
-        let (offset, _) = self.slot(index);
-        let start = offset + CELL_HEADER_SIZE;
-        &self.buf[start..start + self.read_u16(offset)]
     }
 
     fn value_at(&self, index: usize) -> &[u8] {
@@ -259,6 +385,14 @@ impl LeafPage {
     fn write_u16(&mut self, at: usize, value: usize) {
         let value = u16::try_from(value).expect("page offsets fit in u16");
         self.buf[at..at + 2].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn read_u64(&self, at: usize) -> u64 {
+        u64::from_le_bytes(self.buf[at..at + 8].try_into().unwrap())
+    }
+
+    fn write_u64(&mut self, at: usize, value: u64) {
+        self.buf[at..at + 8].copy_from_slice(&value.to_le_bytes());
     }
 }
 
@@ -277,7 +411,7 @@ mod tests {
 
     #[test]
     fn an_empty_leaf_has_all_space_free() {
-        let page = LeafPage::empty();
+        let page = Page::empty_leaf();
 
         assert_eq!(page.buf[KIND], 1);
         assert_eq!(page.read_u16(CELL_COUNT), 0);
@@ -287,7 +421,7 @@ mod tests {
 
     #[test]
     fn slots_grow_forward_in_key_order_and_cells_fill_from_the_end() {
-        let mut page = LeafPage::empty();
+        let mut page = Page::empty_leaf();
         page.put(b"b", b"22").unwrap();
         page.put(b"a", b"1").unwrap();
 
@@ -303,7 +437,7 @@ mod tests {
 
     #[test]
     fn replacing_a_value_counts_the_old_cell_as_fragmented() {
-        let mut page = LeafPage::empty();
+        let mut page = Page::empty_leaf();
         page.put(b"a", b"old").unwrap();
         page.put(b"a", b"newer").unwrap();
 
@@ -314,7 +448,7 @@ mod tests {
 
     #[test]
     fn compacting_reclaims_fragments_and_keeps_every_value() {
-        let mut page = LeafPage::empty();
+        let mut page = Page::empty_leaf();
         for key in 0u8..10 {
             page.put(&[key], &[key; 300]).unwrap();
         }
@@ -332,12 +466,12 @@ mod tests {
             let len = if key % 2 == 0 { 1 } else { 300 };
             assert_eq!(page.get(&[key]), Some(&vec![key; len][..]));
         }
-        LeafPage::from_bytes(page.as_bytes().into()).unwrap();
+        Page::from_bytes(page.as_bytes().into()).unwrap();
     }
 
     #[test]
     fn a_replaced_cell_makes_room_for_its_bigger_replacement() {
-        let mut page = LeafPage::empty();
+        let mut page = Page::empty_leaf();
         page.put(b"a", &[1; 3000]).unwrap();
         page.put(b"b", &[2; 900]).unwrap();
 
@@ -356,7 +490,7 @@ mod tests {
             seed ^= seed << 17;
             seed % n
         };
-        let mut page = LeafPage::empty();
+        let mut page = Page::empty_leaf();
         let mut model = std::collections::BTreeMap::new();
         for step in 0..20_000 {
             let key = [next(40) as u8];
@@ -370,7 +504,7 @@ mod tests {
                 Err(e) => panic!("{e}"),
             }
             if step % 500 == 0 {
-                page = LeafPage::from_bytes(page.as_bytes().into()).unwrap();
+                page = Page::from_bytes(page.as_bytes().into()).unwrap();
             }
         }
         for key in 0..40u8 {
@@ -380,7 +514,7 @@ mod tests {
 
     #[test]
     fn a_deleted_cell_is_gone_and_its_bytes_count_as_fragmented() {
-        let mut page = LeafPage::empty();
+        let mut page = Page::empty_leaf();
         page.put(b"a", b"1").unwrap();
         page.put(b"b", b"22").unwrap();
 
@@ -391,12 +525,12 @@ mod tests {
         assert_eq!(page.get(b"b"), Some(&b"22"[..]));
         assert_eq!(page.read_u16(CELL_COUNT), 1);
         assert_eq!(page.read_u16(FRAG_BYTES), 6);
-        LeafPage::from_bytes(page.as_bytes().into()).unwrap();
+        Page::from_bytes(page.as_bytes().into()).unwrap();
     }
 
     #[test]
     fn deleting_every_cell_frees_the_whole_page() {
-        let mut page = LeafPage::empty();
+        let mut page = Page::empty_leaf();
         for key in 0u8..10 {
             page.put(&[key], &[key; 350]).unwrap();
         }
@@ -411,7 +545,7 @@ mod tests {
 
     #[test]
     fn a_full_page_is_left_unchanged() {
-        let mut page = LeafPage::empty();
+        let mut page = Page::empty_leaf();
         page.put(b"a", &[0; 4000]).unwrap();
         let before = page.clone();
 
@@ -421,18 +555,18 @@ mod tests {
 
     #[test]
     fn a_value_bigger_than_a_page_does_not_fit() {
-        let mut page = LeafPage::empty();
+        let mut page = Page::empty_leaf();
 
         assert!(matches!(page.put(b"a", &[0; 70_000]), Err(Error::PageFull)));
     }
 
     #[test]
     fn a_page_round_trips_through_its_bytes() {
-        let mut page = LeafPage::empty();
+        let mut page = Page::empty_leaf();
         page.put(b"oak", b"tree").unwrap();
         page.put(b"acorn", b"seed").unwrap();
 
-        let read = LeafPage::from_bytes(page.as_bytes().into()).unwrap();
+        let read = Page::from_bytes(page.as_bytes().into()).unwrap();
 
         assert_eq!(read.get(b"oak"), Some(&b"tree"[..]));
         assert_eq!(read.get(b"acorn"), Some(&b"seed"[..]));
@@ -441,13 +575,13 @@ mod tests {
 
     fn assert_refused(mut bytes: Vec<u8>, break_it: impl FnOnce(&mut [u8])) {
         break_it(&mut bytes);
-        let result = LeafPage::from_bytes(bytes.into());
+        let result = Page::from_bytes(bytes.into());
         assert!(matches!(result, Err(Error::Corrupt(_))));
     }
 
     #[test]
     fn inconsistent_pages_are_refused() {
-        let mut page = LeafPage::empty();
+        let mut page = Page::empty_leaf();
         page.put(b"a", b"1").unwrap();
         page.put(b"b", b"2").unwrap();
         let bytes = page.as_bytes().to_vec();
@@ -478,11 +612,11 @@ mod tests {
 
     #[test]
     fn a_page_with_fragments_round_trips() {
-        let mut page = LeafPage::empty();
+        let mut page = Page::empty_leaf();
         page.put(b"a", b"old").unwrap();
         page.put(b"a", b"new").unwrap();
 
-        let mut read = LeafPage::from_bytes(page.as_bytes().into()).unwrap();
+        let mut read = Page::from_bytes(page.as_bytes().into()).unwrap();
         read.put(b"a", b"newest").unwrap();
 
         assert_eq!(read.get(b"a"), Some(&b"newest"[..]));
