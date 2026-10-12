@@ -15,7 +15,7 @@
 //! 14..16  u16   cell_count
 //! 16..18  u16   free_start       end of the slot array
 //! 18..20  u16   free_end         start of the cell content area
-//! 20..22  u16   frag_bytes       bytes freed by replaced cells
+//! 20..22  u16   frag_bytes       bytes freed by replaced or deleted cells
 //! 22..24  u16   reserved         0
 //! 24..32  u64   right_sibling    0 = none
 //! 32..40  u64   rightmost_child  internal pages only, 0 for leaves
@@ -167,6 +167,20 @@ impl LeafPage {
         self.write_u16(FREE_START, free_start + SLOT_SIZE);
         self.write_u16(CELL_COUNT, self.cell_count() + 1);
         Ok(())
+    }
+
+    /// Removes `key` and its value. Returns whether it was there.
+    ///
+    /// The cell's bytes count as fragmented until a later put compacts the
+    /// page.
+    pub(crate) fn delete(&mut self, key: &[u8]) -> bool {
+        match self.search(key) {
+            Ok(i) => {
+                self.remove_slot(i);
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     fn remove_slot(&mut self, index: usize) {
@@ -362,6 +376,37 @@ mod tests {
         for key in 0..40u8 {
             assert_eq!(page.get(&[key]), model.get(&[key]).map(Vec::as_slice));
         }
+    }
+
+    #[test]
+    fn a_deleted_cell_is_gone_and_its_bytes_count_as_fragmented() {
+        let mut page = LeafPage::empty();
+        page.put(b"a", b"1").unwrap();
+        page.put(b"b", b"22").unwrap();
+
+        assert!(page.delete(b"a"));
+        assert!(!page.delete(b"a"));
+
+        assert_eq!(page.get(b"a"), None);
+        assert_eq!(page.get(b"b"), Some(&b"22"[..]));
+        assert_eq!(page.read_u16(CELL_COUNT), 1);
+        assert_eq!(page.read_u16(FRAG_BYTES), 6);
+        LeafPage::from_bytes(page.as_bytes().into()).unwrap();
+    }
+
+    #[test]
+    fn deleting_every_cell_frees_the_whole_page() {
+        let mut page = LeafPage::empty();
+        for key in 0u8..10 {
+            page.put(&[key], &[key; 350]).unwrap();
+        }
+        for key in 0u8..10 {
+            assert!(page.delete(&[key]));
+        }
+
+        page.put(b"a", &[1; 4047]).unwrap();
+
+        assert_eq!(page.get(b"a"), Some(&[1; 4047][..]));
     }
 
     #[test]

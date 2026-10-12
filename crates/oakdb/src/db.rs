@@ -21,7 +21,7 @@ use crate::meta::{Meta, META_LEN};
 use crate::page::{LeafPage, PAGE_SIZE};
 
 /// Name of the data file inside the database directory.
-const DATA_FILE: &str = "oakdb.data";
+pub const DATA_FILE: &str = "oakdb.data";
 
 /// An open database.
 pub struct Db<F: Fs = StdFs> {
@@ -132,15 +132,17 @@ impl<F: Fs> Db<F> {
 /// without committing throws them away.
 pub struct Txn<'db, F: Fs = StdFs> {
     db: &'db Db<F>,
-    writes: BTreeMap<Vec<u8>, Vec<u8>>,
+    /// The last write to each key: `Some(value)` for a put, `None` for a
+    /// delete.
+    writes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
 }
 
 impl<F: Fs> Txn<'_, F> {
     /// The value under `key`, including this transaction's own writes.
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         check_key(key)?;
-        if let Some(value) = self.writes.get(key) {
-            return Ok(Some(value.clone()));
+        if let Some(write) = self.writes.get(key) {
+            return Ok(write.clone());
         }
         Ok(self.db.leaf().get(key).map(<[u8]>::to_vec))
     }
@@ -148,25 +150,42 @@ impl<F: Fs> Txn<'_, F> {
     /// Stores `value` under `key` when the transaction commits.
     pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         check_key(key)?;
-        self.writes.insert(key.to_vec(), value.to_vec());
+        self.writes.insert(key.to_vec(), Some(value.to_vec()));
+        Ok(())
+    }
+
+    /// Removes `key` and its value when the transaction commits. Deleting a
+    /// key that does not exist is not an error.
+    pub fn delete(&mut self, key: &[u8]) -> Result<()> {
+        check_key(key)?;
+        self.writes.insert(key.to_vec(), None);
         Ok(())
     }
 
     /// Makes the writes durable and visible.
     ///
-    /// If the writes do not fit ([`Error::PageFull`]), none of them take
-    /// effect. If writing or syncing the file fails ([`Error::Io`]), they are
-    /// not visible now but may already be on disk and reappear after
-    /// reopening: the outcome is unknown. Stopping the engine after such a
-    /// failure comes with the WAL.
+    /// A commit fits if the page it leaves behind fits, whatever order the
+    /// keys sort in. If it does not ([`Error::PageFull`]), none of its writes
+    /// take effect, deletes included. If writing or syncing the file fails
+    /// ([`Error::Io`]), the writes are not visible now but may already be on
+    /// disk and reappear after reopening: the outcome is unknown. Stopping
+    /// the engine after such a failure comes with the WAL.
     pub fn commit(self) -> Result<()> {
         if self.writes.is_empty() {
             return Ok(());
         }
         let mut leaf = self.db.leaf();
         let mut next = leaf.clone();
+        // Take out every key this transaction writes before putting any
+        // back, so space freed by a delete or a shrinking value is there for
+        // a put that sorts before it.
+        for key in self.writes.keys() {
+            next.delete(key);
+        }
         for (key, value) in &self.writes {
-            next.put(key, value)?;
+            if let Some(value) = value {
+                next.put(key, value)?;
+            }
         }
         let file = &self.db.file;
         file.write_all_at(next.as_bytes(), page_offset(self.db.meta.root_page))?;

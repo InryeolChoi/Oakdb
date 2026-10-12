@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use oakdb::fs::{Fs, StdFs};
-use oakdb::{Db, Error, MAX_KEY_LEN};
+use oakdb::{Db, Error, DATA_FILE, MAX_KEY_LEN};
 
 #[test]
 fn opening_creates_a_missing_directory() {
@@ -227,7 +227,7 @@ fn a_page_holds_many_small_entries() {
 #[test]
 fn a_file_that_is_not_an_oakdb_file_is_refused() {
     let root = tempfile::tempdir().unwrap();
-    std::fs::write(root.path().join("oakdb.data"), [0xAB; 8192]).unwrap();
+    std::fs::write(root.path().join(DATA_FILE), [0xAB; 8192]).unwrap();
 
     let err = Db::open(root.path()).unwrap_err();
 
@@ -281,7 +281,7 @@ fn file_access_goes_through_the_given_file_system() {
         *fs.0.borrow(),
         [
             Call::CreateDirAll(dir.clone()),
-            Call::Open(dir.join("oakdb.data")),
+            Call::Open(dir.join(DATA_FILE)),
             // A new file is only durable once its directory is synced.
             Call::SyncDir(dir.clone()),
         ]
