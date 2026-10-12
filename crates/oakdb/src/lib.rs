@@ -10,5 +10,5 @@ pub mod fs;
 mod meta;
 mod page;
 
-pub use db::{Db, Txn};
+pub use db::{Db, Txn, DATA_FILE};
 pub use error::{Error, Result, MAX_KEY_LEN};

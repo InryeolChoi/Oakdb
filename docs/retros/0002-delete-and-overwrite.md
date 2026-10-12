@@ -1,6 +1,6 @@
 # 0002. 삭제와 덮어쓰기: 회고
 
-이슈 #14. 설계는 `docs/design/0002-delete-and-overwrite.md`, 실험은 `docs/experiments/0003-deleted-bytes-on-disk.md`.
+이슈 #14. 설계는 `docs/design/0002-delete-and-overwrite.md`, 실험은 `docs/experiments/0003-deleted-bytes-on-disk.md`, 벤치마크는 `docs/benchmarks/0002-delete-and-overwrite.md`.
 
 ## 만든 것
 
@@ -9,6 +9,7 @@
 - 커밋을 "쓰는 키를 모두 뺀 다음 put만 다시 넣기"로 바꿔, 키 순서 때문에 생기던 가짜 `PageFull`을 없앴다.
 - 테스트 52개(단위 27, 통합 25). 이번에 12개를 더했다. 그중 하나는 `BTreeMap`과 비교하는 무작위 put/delete 400라운드이고, 중간중간 닫았다 다시 연다.
 - 실험 0003: 지운 값이 파일에 남는지 확인했다.
+- 벤치마크 0002: `main`과 번갈아 재서 느려지지 않았음을 확인했다.
 
 ## 배운 것
 

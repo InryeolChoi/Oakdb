@@ -103,7 +103,7 @@ fn deleting_a_key_longer_than_512_bytes_is_rejected() {
 }
 
 /// Fills most of the page with ten 350-byte values under keys 0..10.
-fn fill(db: &Db) {
+fn fill_with_ten_values(db: &Db) {
     let mut txn = db.begin();
     for key in 0u8..10 {
         txn.put(&[key], &[key; 350]).unwrap();
@@ -115,7 +115,7 @@ fn fill(db: &Db) {
 fn space_freed_by_deletes_takes_new_keys_after_reopening() {
     let root = tempfile::tempdir().unwrap();
     let db = Db::open(root.path()).unwrap();
-    fill(&db);
+    fill_with_ten_values(&db);
     let mut txn = db.begin();
     for key in 1u8..10 {
         txn.delete(&[key]).unwrap();
@@ -143,7 +143,7 @@ fn space_freed_by_deletes_takes_new_keys_after_reopening() {
 fn a_commit_fits_if_its_end_result_fits_whatever_the_key_order() {
     let root = tempfile::tempdir().unwrap();
     let db = Db::open(root.path()).unwrap();
-    fill(&db);
+    fill_with_ten_values(&db);
 
     // The new key sorts before every deleted or shrunk key, so it only fits
     // if their space is given back before it goes in.
@@ -169,7 +169,7 @@ fn a_commit_fits_if_its_end_result_fits_whatever_the_key_order() {
 fn a_commit_that_does_not_fit_keeps_its_deletes_out_too() {
     let root = tempfile::tempdir().unwrap();
     let db = Db::open(root.path()).unwrap();
-    fill(&db);
+    fill_with_ten_values(&db);
 
     let mut txn = db.begin();
     txn.delete(&[0]).unwrap();
@@ -195,7 +195,7 @@ impl Rng {
 
 /// Whether `entries` fit in the database's only page: each takes a 4-byte
 /// slot and a 4-byte cell header besides its key and value, out of the 4056
-/// bytes after the page header. Goes away once pages can split.
+/// bytes after the page header. Goes away once pages can split (#15).
 fn fits_in_one_page(entries: &BTreeMap<Vec<u8>, Vec<u8>>) -> bool {
     let bytes: usize = entries.iter().map(|(k, v)| 8 + k.len() + v.len()).sum();
     bytes <= 4096 - 40

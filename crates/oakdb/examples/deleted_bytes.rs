@@ -4,7 +4,7 @@
 //! reports after each step whether its bytes can still be found in the data
 //! file, even though the engine no longer returns it.
 
-use oakdb::Db;
+use oakdb::{Db, DATA_FILE};
 
 const SECRET: &[u8] = b"OAKDB-SECRET-VALUE-0123456789";
 
@@ -41,7 +41,7 @@ fn main() {
 
 fn report(db: &Db, dir: &str, step: &str) {
     let visible = db.begin().get(b"secret").unwrap().is_some();
-    let file = std::fs::read(std::path::Path::new(dir).join("oakdb.data")).unwrap();
+    let file = std::fs::read(std::path::Path::new(dir).join(DATA_FILE)).unwrap();
     let on_disk = file.windows(SECRET.len()).any(|w| w == SECRET);
     println!("{step:28} get: {visible:5}  bytes in file: {on_disk}");
 }

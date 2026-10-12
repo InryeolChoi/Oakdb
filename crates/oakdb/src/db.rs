@@ -21,7 +21,7 @@ use crate::meta::{Meta, META_LEN};
 use crate::page::{LeafPage, PAGE_SIZE};
 
 /// Name of the data file inside the database directory.
-const DATA_FILE: &str = "oakdb.data";
+pub const DATA_FILE: &str = "oakdb.data";
 
 /// An open database.
 pub struct Db<F: Fs = StdFs> {
@@ -166,10 +166,10 @@ impl<F: Fs> Txn<'_, F> {
     ///
     /// A commit fits if the page it leaves behind fits, whatever order the
     /// keys sort in. If it does not ([`Error::PageFull`]), none of its writes
-    /// take effect, deletes included. If writing or syncing the file fails ([`Error::Io`]), they are
-    /// not visible now but may already be on disk and reappear after
-    /// reopening: the outcome is unknown. Stopping the engine after such a
-    /// failure comes with the WAL.
+    /// take effect, deletes included. If writing or syncing the file fails
+    /// ([`Error::Io`]), the writes are not visible now but may already be on
+    /// disk and reappear after reopening: the outcome is unknown. Stopping
+    /// the engine after such a failure comes with the WAL.
     pub fn commit(self) -> Result<()> {
         if self.writes.is_empty() {
             return Ok(());
