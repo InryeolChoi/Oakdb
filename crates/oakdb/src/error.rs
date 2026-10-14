@@ -87,6 +87,11 @@ impl std::error::Error for Error {
     }
 }
 
+/// An [`Error::Corrupt`] that says what is wrong with the file.
+pub(crate) fn corrupt(reason: &str) -> Error {
+    Error::Corrupt(reason.to_owned())
+}
+
 impl From<io::Error> for Error {
     fn from(e: io::Error) -> Self {
         Error::Io(e)

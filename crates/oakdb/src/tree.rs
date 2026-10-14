@@ -7,7 +7,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use crate::error::{Error, Result};
+use crate::error::{corrupt, Error, Result};
 use crate::meta::Meta;
 use crate::page::Page;
 
@@ -176,6 +176,9 @@ impl Tree {
         depth: usize,
         walk: &mut Walk,
     ) -> Result<()> {
+        if depth > MAX_DEPTH {
+            return Err(corrupt("tree is too deep"));
+        }
         let seen = page_no
             .checked_sub(FIRST_PAGE)
             .and_then(|i| walk.seen.get_mut(i as usize))
@@ -216,6 +219,12 @@ impl Tree {
     }
 }
 
+/// Deeper than any tree Oakdb writes: every internal page it writes has at
+/// least two children, so a tree this deep would need more than 2^64 pages.
+/// Checking stops here, so a corrupt file of long page chains cannot
+/// overflow the stack.
+const MAX_DEPTH: usize = 64;
+
 /// What [`Tree::check`] has seen so far.
 struct Walk {
     /// Whether each page has been reached.
@@ -223,10 +232,6 @@ struct Walk {
     /// Leaves in key order.
     leaves: Vec<u64>,
     leaf_depth: Option<usize>,
-}
-
-fn corrupt(reason: &str) -> Error {
-    Error::Corrupt(reason.to_owned())
 }
 
 #[cfg(test)]
@@ -375,6 +380,20 @@ mod tests {
         tree.page_mut(3).set_right_sibling(Some(empty));
         let inner = tree.push(Page::new_internal(3, &u32::MAX.to_be_bytes(), empty));
         tree.page_mut(4).set_child_at(1, inner);
+
+        assert!(matches!(reload(&tree), Err(Error::Corrupt(_))));
+    }
+
+    #[test]
+    fn a_tree_deeper_than_any_oakdb_writes_is_refused() {
+        // A chain of internal pages with no cells, each over the next, down
+        // to the one leaf. Every other check passes.
+        let mut tree = Tree::new();
+        for _ in 0..=MAX_DEPTH {
+            let mut inner = Page::new_internal(0, b"k", tree.root);
+            inner.delete(b"k");
+            tree.root = tree.push(inner);
+        }
 
         assert!(matches!(reload(&tree), Err(Error::Corrupt(_))));
     }

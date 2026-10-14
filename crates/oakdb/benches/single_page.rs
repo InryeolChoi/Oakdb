@@ -5,7 +5,7 @@
 //! there, so the leaf stays full and every few commits has to compact.
 //! Commits are measured twice: on the real file system, and with syncs
 //! turned off to see what the engine itself costs. The `two_levels` cases
-//! do the same on a tree of about a hundred leaves under one root.
+//! do the same on a tree of about 160 leaves under one root.
 
 use std::fs::{File, OpenOptions};
 use std::hint::black_box;
@@ -70,7 +70,7 @@ impl FsFile for NoSyncFile {
 /// How many entries of a 4-byte key and value fill one leaf.
 const ONE_LEAF: u32 = 253;
 
-/// About a hundred leaves of such entries, all under the root.
+/// About 160 leaves of such entries, all under the root.
 const TWO_LEVELS: u32 = 20_000;
 
 /// Fills a leaf with 4-byte keys and values, one commit each, and returns

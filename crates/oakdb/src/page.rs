@@ -29,7 +29,7 @@
 //! ...4096 cells: key_len u16 | value_len u16 | key | value
 //! ```
 
-use crate::error::{Error, Result, MAX_ENTRY_LEN, MAX_KEY_LEN};
+use crate::error::{corrupt, Error, Result, MAX_ENTRY_LEN, MAX_KEY_LEN};
 
 /// Size of every page in the data file.
 pub(crate) const PAGE_SIZE: usize = 4096;
@@ -399,10 +399,6 @@ impl Page {
 /// Where slot `index` starts in the page.
 fn slot_pos(index: usize) -> usize {
     HEADER_SIZE + index * SLOT_SIZE
-}
-
-fn corrupt(reason: &str) -> Error {
-    Error::Corrupt(reason.to_owned())
 }
 
 #[cfg(test)]

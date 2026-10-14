@@ -170,10 +170,10 @@ impl<F: Fs> Txn<'_, F> {
     /// Leaves that fill up split in two. A leaf only splits if what the
     /// commit leaves in it does not fit, whatever order the keys sort in.
     /// If the root has no room for another leaf ([`Error::PageFull`]), none
-    /// of the writes take effect, deletes included. If writing or syncing the file fails
-    /// ([`Error::Io`]), the writes are not visible now but may already be on
-    /// disk and reappear after reopening: the outcome is unknown. Stopping
-    /// the engine after such a failure comes with the WAL.
+    /// of the writes take effect, deletes included. If writing or syncing
+    /// the file fails ([`Error::Io`]), the writes are not visible now but
+    /// may already be on disk and reappear after reopening: the outcome is
+    /// unknown. Stopping the engine after such a failure comes with the WAL.
     pub fn commit(self) -> Result<()> {
         if self.writes.is_empty() {
             return Ok(());

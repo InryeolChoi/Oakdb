@@ -2,8 +2,9 @@
 //!
 //! `commit_loop write <dir>` commits key i = value i (u32, big-endian) one
 //! transaction at a time and prints i after each commit returns, for as
-//! many keys as one page held before pages could split. `commit_loop check <dir> <last>` checks that keys 0..=last
-//! are all there with the right values and prints how many keys exist.
+//! many keys as one page held before pages could split.
+//! `commit_loop check <dir> <last>` checks that keys 0..=last are all there
+//! with the right values and prints how many keys exist.
 
 use oakdb::Db;
 
