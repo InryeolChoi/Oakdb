@@ -1,8 +1,9 @@
 //! Deleting keys and overwriting values through the engine API.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
-use oakdb::{Db, Error, MAX_KEY_LEN};
+use oakdb::{Db, Error, DATA_FILE, MAX_KEY_LEN};
 
 #[test]
 fn a_deleted_key_reads_as_missing() {
@@ -102,6 +103,11 @@ fn deleting_a_key_longer_than_512_bytes_is_rejected() {
     assert!(matches!(err, Error::KeyTooLarge { len: 513, max: 512 }));
 }
 
+/// How many 4 KB pages the data file has. A database of one leaf has 3.
+fn pages_in_file(dir: &Path) -> u64 {
+    std::fs::metadata(dir.join(DATA_FILE)).unwrap().len() / 4096
+}
+
 /// Fills most of the page with ten 350-byte values under keys 0..10.
 fn fill_with_ten_values(db: &Db) {
     let mut txn = db.begin();
@@ -125,14 +131,20 @@ fn space_freed_by_deletes_takes_new_keys_after_reopening() {
 
     let db = Db::open(root.path()).unwrap();
     let mut txn = db.begin();
-    // Only fits if the space of the nine deleted values is reused.
-    txn.put(b"new", &[1; 3000]).unwrap();
+    // Only fits without a split if the space of the nine deleted values is
+    // reused.
+    for new in [b"new0", b"new1", b"new2"] {
+        txn.put(new, &[1; 1000]).unwrap();
+    }
     txn.commit().unwrap();
     db.close().unwrap();
 
     let db = Db::open(root.path()).unwrap();
+    assert_eq!(pages_in_file(root.path()), 3);
     let txn = db.begin();
-    assert_eq!(txn.get(b"new").unwrap(), Some(vec![1; 3000]));
+    for new in [b"new0", b"new1", b"new2"] {
+        assert_eq!(txn.get(new).unwrap(), Some(vec![1; 1000]));
+    }
     assert_eq!(txn.get(&[0]).unwrap(), Some(vec![0; 350]));
     for key in 1u8..10 {
         assert_eq!(txn.get(&[key]).unwrap(), None);
@@ -145,10 +157,11 @@ fn a_commit_fits_if_its_end_result_fits_whatever_the_key_order() {
     let db = Db::open(root.path()).unwrap();
     fill_with_ten_values(&db);
 
-    // The new key sorts before every deleted or shrunk key, so it only fits
-    // if their space is given back before it goes in.
+    // The new keys sort before every deleted or shrunk key, so they only fit
+    // without a split if their space is given back before they go in.
     let mut txn = db.begin();
-    txn.put(b"\x00new", &[1; 2000]).unwrap();
+    txn.put(b"\x00new0", &[1; 1000]).unwrap();
+    txn.put(b"\x00new1", &[1; 1000]).unwrap();
     for key in 1u8..5 {
         txn.delete(&[key]).unwrap();
     }
@@ -159,25 +172,12 @@ fn a_commit_fits_if_its_end_result_fits_whatever_the_key_order() {
     db.close().unwrap();
 
     let db = Db::open(root.path()).unwrap();
+    assert_eq!(pages_in_file(root.path()), 3);
     let txn = db.begin();
-    assert_eq!(txn.get(b"\x00new").unwrap(), Some(vec![1; 2000]));
+    assert_eq!(txn.get(b"\x00new0").unwrap(), Some(vec![1; 1000]));
+    assert_eq!(txn.get(b"\x00new1").unwrap(), Some(vec![1; 1000]));
     assert_eq!(txn.get(&[2]).unwrap(), None);
     assert_eq!(txn.get(&[7]).unwrap(), Some(vec![7]));
-}
-
-#[test]
-fn a_commit_that_does_not_fit_keeps_its_deletes_out_too() {
-    let root = tempfile::tempdir().unwrap();
-    let db = Db::open(root.path()).unwrap();
-    fill_with_ten_values(&db);
-
-    let mut txn = db.begin();
-    txn.delete(&[0]).unwrap();
-    txn.put(b"huge", &[1; 4000]).unwrap();
-    let err = txn.commit().unwrap_err();
-
-    assert!(matches!(err, Error::PageFull));
-    assert_eq!(db.begin().get(&[0]).unwrap(), Some(vec![0; 350]));
 }
 
 /// A small deterministic random number generator (xorshift), so a failure
@@ -193,14 +193,6 @@ impl Rng {
     }
 }
 
-/// Whether `entries` fit in the database's only page: each takes a 4-byte
-/// slot and a 4-byte cell header besides its key and value, out of the 4056
-/// bytes after the page header. Goes away once pages can split (#15).
-fn fits_in_one_page(entries: &BTreeMap<Vec<u8>, Vec<u8>>) -> bool {
-    let bytes: usize = entries.iter().map(|(k, v)| 8 + k.len() + v.len()).sum();
-    bytes <= 4096 - 40
-}
-
 #[test]
 fn random_puts_and_deletes_match_a_btreemap() {
     let root = tempfile::tempdir().unwrap();
@@ -208,36 +200,29 @@ fn random_puts_and_deletes_match_a_btreemap() {
     let mut model: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
     let mut rng = Rng(0x0a4b_d0b1);
 
+    // Up to 200 keys of up to 300 bytes: enough for leaves to split, and
+    // for deletes to empty some of them again.
     for round in 0..400 {
         let mut txn = db.begin();
-        let mut pending = model.clone();
-        for _ in 0..1 + rng.below(8) {
-            let key = vec![rng.below(30) as u8];
+        for _ in 0..1 + rng.below(16) {
+            let key = vec![rng.below(200) as u8];
             if rng.below(3) == 0 {
                 txn.delete(&key).unwrap();
-                pending.remove(&key);
+                model.remove(&key);
             } else {
                 let value = vec![round as u8; rng.below(300) as usize];
                 txn.put(&key, &value).unwrap();
-                pending.insert(key, value);
+                model.insert(key, value);
             }
         }
-        match txn.commit() {
-            Ok(()) => model = pending,
-            Err(Error::PageFull) => {
-                assert!(
-                    !fits_in_one_page(&pending),
-                    "round {round}: spurious PageFull"
-                )
-            }
-            Err(e) => panic!("round {round}: {e}"),
-        }
+        txn.commit()
+            .unwrap_or_else(|e| panic!("round {round}: {e}"));
         if round % 50 == 49 {
             db.close().unwrap();
             db = Db::open(root.path()).unwrap();
         }
         let txn = db.begin();
-        for key in 0u8..30 {
+        for key in 0u8..200 {
             assert_eq!(
                 txn.get(&[key]).unwrap().as_ref(),
                 model.get(&vec![key]),
@@ -245,4 +230,5 @@ fn random_puts_and_deletes_match_a_btreemap() {
             );
         }
     }
+    assert!(pages_in_file(root.path()) > 10, "leaves never split");
 }

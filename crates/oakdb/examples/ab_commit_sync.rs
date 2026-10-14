@@ -9,7 +9,7 @@
 //! - `none`: no sync at all (not durable; the lower bound)
 //!
 //! Each round opens a fresh database and commits distinct small keys one per
-//! transaction until the single page is full. Rounds alternate A and B so slow
+//! transaction, as many as fill one leaf. Rounds alternate A and B so slow
 //! drift in the machine hits both sides equally.
 //!
 //! Commits in one round are not independent samples, so with thousands of
@@ -23,7 +23,10 @@ use std::path::Path;
 use std::time::Instant;
 
 use oakdb::fs::{Fs, FsFile};
-use oakdb::{Db, Error};
+use oakdb::Db;
+
+/// Entries of a 4-byte key and value that fill one leaf.
+const ONE_LEAF: u32 = 253;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Mode {
@@ -115,15 +118,12 @@ fn round(mode: Mode) -> Vec<f64> {
     let dir = tempfile::tempdir().unwrap();
     let db = Db::open_with(ModeFs(mode), dir.path()).unwrap();
     let mut out = Vec::new();
-    for i in 0u32.. {
+    for i in 0..ONE_LEAF {
         let mut txn = db.begin();
         txn.put(&i.to_be_bytes(), &i.to_be_bytes()).unwrap();
         let start = Instant::now();
-        match txn.commit() {
-            Ok(()) => out.push(start.elapsed().as_secs_f64() * 1e6),
-            Err(Error::PageFull) => break,
-            Err(e) => panic!("{e}"),
-        }
+        txn.commit().unwrap();
+        out.push(start.elapsed().as_secs_f64() * 1e6);
     }
     out
 }

@@ -32,9 +32,16 @@ fn main() {
     report(&db, &dir, "after 20 small puts");
 
     // The free gap is now 3504 bytes and the deleted cell left 39 bytes of
-    // fragments, so a 3520 byte value only fits by compacting the page.
+    // fragments. Three 1000-byte values take 3 x 1011 bytes of the gap,
+    // leaving 471, so a fourth entry of 505 bytes only fits by compacting
+    // the page. Everything still fits in one leaf, so nothing splits.
     let mut txn = db.begin();
-    txn.put(b"big", &[b'#'; 3520]).unwrap();
+    for key in [b"b0", b"b1", b"b2"] {
+        txn.put(key, &[b'#'; 1000]).unwrap();
+    }
+    txn.commit().unwrap();
+    let mut txn = db.begin();
+    txn.put(b"b3", &[b'#'; 495]).unwrap();
     txn.commit().unwrap();
     report(&db, &dir, "after a put that compacts");
 }
@@ -43,5 +50,6 @@ fn report(db: &Db, dir: &str, step: &str) {
     let visible = db.begin().get(b"secret").unwrap().is_some();
     let file = std::fs::read(std::path::Path::new(dir).join(DATA_FILE)).unwrap();
     let on_disk = file.windows(SECRET.len()).any(|w| w == SECRET);
-    println!("{step:28} get: {visible:5}  bytes in file: {on_disk}");
+    let pages = file.len() / 4096;
+    println!("{step:28} get: {visible:5}  bytes in file: {on_disk:5}  pages: {pages}");
 }

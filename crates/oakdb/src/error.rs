@@ -6,6 +6,12 @@ use std::io;
 /// Longest key the engine accepts, in bytes (ADR 0008).
 pub const MAX_KEY_LEN: usize = 512;
 
+/// Longest key plus value the engine accepts, in bytes.
+///
+/// Four entries this size fill a page, so a full leaf always splits into
+/// two that fit. Values longer than this will go to overflow pages (#18).
+pub const MAX_ENTRY_LEN: usize = 1006;
+
 /// Everything that can go wrong in the engine.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -19,9 +25,18 @@ pub enum Error {
         /// The limit, [`MAX_KEY_LEN`].
         max: usize,
     },
-    /// The committed data does not fit in the database's only page.
+    /// A key plus its value is longer than [`MAX_ENTRY_LEN`].
+    ValueTooLarge {
+        /// Length of the rejected value.
+        len: usize,
+        /// The longest value this key can have: [`MAX_ENTRY_LEN`] minus the
+        /// key's length.
+        max: usize,
+    },
+    /// A leaf had to split, but the root page has no room for another
+    /// child. Nothing of the commit takes effect.
     ///
-    /// Goes away once the tree can split pages.
+    /// Goes away once the tree can grow past two levels (#16).
     PageFull,
     /// The data file was made with a different page size.
     PageSizeMismatch {
@@ -48,7 +63,11 @@ impl fmt::Display for Error {
             Error::KeyTooLarge { len, max } => {
                 write!(f, "key is {len} bytes, longer than the {max} byte limit")
             }
-            Error::PageFull => write!(f, "the data does not fit in the page"),
+            Error::ValueTooLarge { len, max } => write!(
+                f,
+                "value is {len} bytes, longer than the {max} bytes left for it"
+            ),
+            Error::PageFull => write!(f, "the tree cannot grow past two levels yet"),
             Error::PageSizeMismatch { expected, found } => write!(
                 f,
                 "data file uses {found} byte pages, but this build uses {expected}"
@@ -66,6 +85,11 @@ impl std::error::Error for Error {
             _ => None,
         }
     }
+}
+
+/// An [`Error::Corrupt`] that says what is wrong with the file.
+pub(crate) fn corrupt(reason: &str) -> Error {
+    Error::Corrupt(reason.to_owned())
 }
 
 impl From<io::Error> for Error {

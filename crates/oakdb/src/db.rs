@@ -1,24 +1,27 @@
 //! The engine API: open a database, run transactions, close it.
 //!
-//! For now the whole database is one leaf page in one data file:
+//! The database is one data file of B+Tree pages, at most two levels deep
+//! for now:
 //!
 //! ```text
-//! page 0  meta slot A
-//! page 1  meta slot B (same content as A for now)
-//! page 2  root leaf
+//! page 0   meta slot A: root page and page count
+//! page 1   meta slot B (same content as A for now)
+//! page 2.. tree pages; new pages go at the end
 //! ```
 //!
-//! A commit writes the changed leaf straight into the data file and syncs
-//! it. The WAL (ADR 0007) will replace that later.
+//! A commit writes the pages it changed straight into the data file and
+//! syncs them. If it added pages, it then writes the meta page and syncs
+//! again. The WAL (ADR 0007) will replace that later.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use crate::error::{Error, Result, MAX_KEY_LEN};
+use crate::error::{Error, Result, MAX_ENTRY_LEN, MAX_KEY_LEN};
 use crate::fs::{Fs, FsFile, StdFs};
 use crate::meta::{Meta, META_LEN};
-use crate::page::{LeafPage, PAGE_SIZE};
+use crate::page::{Page, PAGE_SIZE};
+use crate::tree::Tree;
 
 /// Name of the data file inside the database directory.
 pub const DATA_FILE: &str = "oakdb.data";
@@ -26,17 +29,14 @@ pub const DATA_FILE: &str = "oakdb.data";
 /// An open database.
 pub struct Db<F: Fs = StdFs> {
     file: F::File,
-    meta: Meta,
-    /// The committed root leaf. Commits hold the lock while they write, so
-    /// they happen one at a time.
-    leaf: Mutex<LeafPage>,
+    /// The committed tree. Commits hold the lock while they write, so they
+    /// happen one at a time.
+    tree: Mutex<Tree>,
 }
 
 impl<F: Fs> std::fmt::Debug for Db<F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Db")
-            .field("meta", &self.meta)
-            .finish_non_exhaustive()
+        f.debug_struct("Db").finish_non_exhaustive()
     }
 }
 
@@ -67,20 +67,16 @@ impl<F: Fs> Db<F> {
     }
 
     fn create(fs: &F, dir: &Path, file: F::File) -> Result<Self> {
-        let meta = Meta {
-            root_page: 2,
-            page_count: 3,
-        };
-        let leaf = LeafPage::empty();
-        file.write_all_at(&meta.encode(), 0)?;
-        file.write_all_at(&meta.encode(), PAGE_SIZE as u64)?;
-        file.write_all_at(leaf.as_bytes(), page_offset(meta.root_page))?;
+        let mut tree = Tree::new();
+        for page_no in tree.take_dirty() {
+            file.write_all_at(tree.page(page_no).as_bytes(), page_offset(page_no))?;
+        }
+        write_meta(&file, tree.meta())?;
         file.sync_data()?;
         fs.sync_dir(dir)?;
         Ok(Db {
             file,
-            meta,
-            leaf: Mutex::new(leaf),
+            tree: Mutex::new(tree),
         })
     }
 
@@ -97,13 +93,14 @@ impl<F: Fs> Db<F> {
                 "data file is shorter than its meta page says".into(),
             ));
         }
-        let mut buf = vec![0; PAGE_SIZE].into_boxed_slice();
-        file.read_exact_at(&mut buf, page_offset(meta.root_page))?;
-        let leaf = LeafPage::from_bytes(buf)?;
+        let tree = Tree::load(meta, |page_no| {
+            let mut buf = vec![0; PAGE_SIZE].into_boxed_slice();
+            file.read_exact_at(&mut buf, page_offset(page_no))?;
+            Page::from_bytes(buf)
+        })?;
         Ok(Db {
             file,
-            meta,
-            leaf: Mutex::new(leaf),
+            tree: Mutex::new(tree),
         })
     }
 
@@ -121,10 +118,10 @@ impl<F: Fs> Db<F> {
         Ok(())
     }
 
-    fn leaf(&self) -> MutexGuard<'_, LeafPage> {
-        // A panic while holding the lock cannot leave the leaf half changed:
+    fn tree(&self) -> MutexGuard<'_, Tree> {
+        // A panic while holding the lock cannot leave the tree half changed:
         // commits change a copy and swap it in at the end.
-        self.leaf.lock().unwrap_or_else(PoisonError::into_inner)
+        self.tree.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -144,12 +141,18 @@ impl<F: Fs> Txn<'_, F> {
         if let Some(write) = self.writes.get(key) {
             return Ok(write.clone());
         }
-        Ok(self.db.leaf().get(key).map(<[u8]>::to_vec))
+        Ok(self.db.tree().get(key).map(<[u8]>::to_vec))
     }
 
     /// Stores `value` under `key` when the transaction commits.
     pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         check_key(key)?;
+        if key.len() + value.len() > MAX_ENTRY_LEN {
+            return Err(Error::ValueTooLarge {
+                len: value.len(),
+                max: MAX_ENTRY_LEN - key.len(),
+            });
+        }
         self.writes.insert(key.to_vec(), Some(value.to_vec()));
         Ok(())
     }
@@ -164,18 +167,19 @@ impl<F: Fs> Txn<'_, F> {
 
     /// Makes the writes durable and visible.
     ///
-    /// A commit fits if the page it leaves behind fits, whatever order the
-    /// keys sort in. If it does not ([`Error::PageFull`]), none of its writes
-    /// take effect, deletes included. If writing or syncing the file fails
-    /// ([`Error::Io`]), the writes are not visible now but may already be on
-    /// disk and reappear after reopening: the outcome is unknown. Stopping
-    /// the engine after such a failure comes with the WAL.
+    /// Leaves that fill up split in two. A leaf only splits if what the
+    /// commit leaves in it does not fit, whatever order the keys sort in.
+    /// If the root has no room for another leaf ([`Error::PageFull`]), none
+    /// of the writes take effect, deletes included. If writing or syncing
+    /// the file fails ([`Error::Io`]), the writes are not visible now but
+    /// may already be on disk and reappear after reopening: the outcome is
+    /// unknown. Stopping the engine after such a failure comes with the WAL.
     pub fn commit(self) -> Result<()> {
         if self.writes.is_empty() {
             return Ok(());
         }
-        let mut leaf = self.db.leaf();
-        let mut next = leaf.clone();
+        let mut tree = self.db.tree();
+        let mut next = tree.clone();
         // Take out every key this transaction writes before putting any
         // back, so space freed by a delete or a shrinking value is there for
         // a put that sorts before it.
@@ -188,9 +192,18 @@ impl<F: Fs> Txn<'_, F> {
             }
         }
         let file = &self.db.file;
-        file.write_all_at(next.as_bytes(), page_offset(self.db.meta.root_page))?;
+        for page_no in next.take_dirty() {
+            file.write_all_at(next.page(page_no).as_bytes(), page_offset(page_no))?;
+        }
         file.sync_data()?;
-        *leaf = next;
+        // The meta page goes last, so it only points at pages already on
+        // disk. A crash before it still loses the keys a split moved off
+        // an overwritten leaf, until the WAL comes.
+        if next.meta() != tree.meta() {
+            write_meta(file, next.meta())?;
+            file.sync_data()?;
+        }
+        *tree = next;
         Ok(())
     }
 
@@ -205,6 +218,13 @@ fn check_key(key: &[u8]) -> Result<()> {
             max: MAX_KEY_LEN,
         });
     }
+    Ok(())
+}
+
+/// Writes `meta` to both meta slots.
+fn write_meta(file: &impl FsFile, meta: Meta) -> Result<()> {
+    file.write_all_at(&meta.encode(), 0)?;
+    file.write_all_at(&meta.encode(), PAGE_SIZE as u64)?;
     Ok(())
 }
 
