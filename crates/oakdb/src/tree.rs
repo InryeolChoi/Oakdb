@@ -263,9 +263,9 @@ impl Tree {
 
 /// Deeper than any tree Oakdb writes. The tree only grows a level when its
 /// root splits, which takes a full root over pages that split before it,
-/// so each level takes at least twice the pages of the one below it, and
-/// pages are never reused: a tree this deep would need more than 2^64
-/// pages. Checking stops here, so a corrupt file of long page chains cannot
+/// so growing one level more takes at least twice the pages it took to get
+/// this far. Pages are never reused, so a tree this deep would need a file
+/// of more than 2^64 pages. Checking stops here, so a corrupt file of long page chains cannot
 /// overflow the stack.
 const MAX_DEPTH: usize = 64;
 
@@ -339,13 +339,7 @@ mod tests {
 
     #[test]
     fn a_leaf_split_in_the_middle_keeps_the_leaves_in_a_chain() {
-        // The first split leaves keys 0..18 on the left. 19 more keys that
-        // sort among them make it split too.
-        let mut tree = tree_with(0..37);
-        for (i, suffix) in (0..18).map(|i| (i, b"+")).chain([(0, b"-")]) {
-            let (key, value) = entry(i);
-            tree.put(&[&key[..], suffix].concat(), &value);
-        }
+        let tree = three_leaves();
 
         assert_eq!(tree.meta().page_count, 6);
         assert_eq!(tree.page(2).right_sibling(), Some(5));
@@ -355,6 +349,18 @@ mod tests {
         let children: Vec<u64> = (0..=root.cell_count()).map(|i| root.child_at(i)).collect();
         assert_eq!(children, [2, 5, 3]);
         reload(&tree).unwrap();
+    }
+
+    /// Leaves 2, 5 and 3 under the root, in key order. The first split
+    /// leaves keys 0..18 on the left; 19 more keys that sort among them make
+    /// it split too.
+    fn three_leaves() -> Tree {
+        let mut tree = tree_with(0..37);
+        for (i, suffix) in (0..18).map(|i| (i, b"+")).chain([(0, b"-")]) {
+            let (key, value) = entry(i);
+            tree.put(&[&key[..], suffix].concat(), &value);
+        }
+        tree
     }
 
     #[test]
@@ -389,6 +395,20 @@ mod tests {
             height += 1;
         }
         height
+    }
+
+    /// How many internal pages the tree reaches from its root.
+    fn internal_pages(tree: &Tree) -> usize {
+        let mut count = 0;
+        let mut pages = vec![tree.root];
+        while let Some(page_no) = pages.pop() {
+            let page = tree.page(page_no);
+            if !page.is_leaf() {
+                count += 1;
+                pages.extend((0..=page.cell_count()).map(|i| page.child_at(i)));
+            }
+        }
+        count
     }
 
     /// Entry `i` of the biggest size: four fill a leaf, and an internal
@@ -438,17 +458,18 @@ mod tests {
     #[test]
     fn an_internal_page_in_the_middle_splits_and_its_parent_takes_the_new_half() {
         let mut tree = big_tree(0..200);
-        let before = height(&tree);
+        let (height_before, internal_before) = (height(&tree), internal_pages(&tree));
         // Keys sorting between 0 and 1 all land under the leftmost pages.
         for i in 0..100u32 {
-            let (key, value) = big_entry(0);
-            let mut key = key;
+            let (mut key, value) = big_entry(0);
             key[4..8].copy_from_slice(&i.to_be_bytes());
             key[8] = 1;
             tree.put(&key, &value);
         }
 
-        assert_eq!(height(&tree), before);
+        // More internal pages at the same height: one below the root split.
+        assert_eq!(height(&tree), height_before);
+        assert!(internal_pages(&tree) > internal_before);
         reload(&tree).unwrap();
     }
 
@@ -469,12 +490,7 @@ mod tests {
 
     #[test]
     fn an_emptied_leaf_leaves_its_parent_and_the_leaf_before_points_past_it() {
-        let mut tree = tree_with(0..37);
-        // Three leaves 2, 5, 3 from the test above, then empty leaf 5.
-        for (i, suffix) in (0..18).map(|i| (i, b"+")).chain([(0, b"-")]) {
-            let (key, value) = entry(i);
-            tree.put(&[&key[..], suffix].concat(), &value);
-        }
+        let mut tree = three_leaves();
         let children = |tree: &Tree| {
             let root = tree.page(tree.root);
             (0..=root.cell_count())

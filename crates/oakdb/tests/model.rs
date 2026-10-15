@@ -6,8 +6,8 @@
 //! mostly puts, so the tree grows four levels deep; the other deletes long
 //! runs of keys, so leaves empty out and the root hands over to its last
 //! child. Failing cases
-//! proptest finds are saved under `proptest-regressions/` and run first
-//! every time; the ones that taught us something also get a named test in
+//! proptest finds are saved in `model.proptest-regressions` beside this file
+//! and run first every time; the ones that taught us something also get a named test in
 //! `multi_level.rs`.
 
 use std::collections::BTreeMap;

@@ -74,6 +74,9 @@ const _: () = assert!(2 * footprint(MAX_KEY_LEN, CHILD_LEN) <= PAGE_SIZE - HEADE
 #[derive(Debug, PartialEq)]
 pub(crate) struct Full;
 
+/// Whether a cell went into a page.
+pub(crate) type Fit = std::result::Result<(), Full>;
+
 /// A leaf or internal page holding sorted cells.
 #[derive(Clone)]
 pub(crate) struct Page {
@@ -236,12 +239,7 @@ impl Page {
     /// Records that child `index` of this internal page split: it keeps the
     /// keys below `separator`, and `right` holds the rest of its range. On
     /// [`Full`] the page is left unchanged; see [`Page::split_internal`].
-    pub(crate) fn insert_split_child(
-        &mut self,
-        index: usize,
-        separator: &[u8],
-        right: u64,
-    ) -> std::result::Result<(), Full> {
+    pub(crate) fn insert_split_child(&mut self, index: usize, separator: &[u8], right: u64) -> Fit {
         let left = self.child_at(index);
         // The separator sorts between the keys around child `index`, so its
         // cell becomes cell `index` and the old child moves to `index + 1`.
@@ -353,7 +351,7 @@ impl Page {
     /// Bytes left behind by replaced cells are reclaimed by compacting the
     /// page when the new cell does not fit otherwise. On [`Full`] the page
     /// is left unchanged.
-    pub(crate) fn put(&mut self, key: &[u8], value: &[u8]) -> std::result::Result<(), Full> {
+    pub(crate) fn put(&mut self, key: &[u8], value: &[u8]) -> Fit {
         let cell_len = CELL_HEADER_SIZE + key.len() + value.len();
         let found = self.search(key);
         // Replacing a cell gives back its slot and its bytes.

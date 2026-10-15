@@ -147,8 +147,9 @@ fn deleting_and_putting_in_one_commit_across_many_leaves_takes_effect_together()
 
 #[test]
 fn a_tree_that_shrank_does_not_reuse_or_lose_pages_in_the_file() {
-    // Pages that leave the tree stay in the file for now; reusing them
-    // comes later. The file must never shrink under the tree.
+    // Pages that leave the tree stay in the file for now. The file must
+    // never shrink under the tree. Change this test when a free list
+    // starts reusing those pages.
     let root = tempfile::tempdir().unwrap();
     let db = Db::open(root.path()).unwrap();
     put_big(&db, 0..300);
