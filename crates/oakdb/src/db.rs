@@ -1,7 +1,6 @@
 //! The engine API: open a database, run transactions, close it.
 //!
-//! The database is one data file of B+Tree pages, at most two levels deep
-//! for now:
+//! The database is one data file of B+Tree pages:
 //!
 //! ```text
 //! page 0   meta slot A: root page and page count
@@ -167,10 +166,10 @@ impl<F: Fs> Txn<'_, F> {
 
     /// Makes the writes durable and visible.
     ///
-    /// Leaves that fill up split in two. A leaf only splits if what the
-    /// commit leaves in it does not fit, whatever order the keys sort in.
-    /// If the root has no room for another leaf ([`Error::PageFull`]), none
-    /// of the writes take effect, deletes included. If writing or syncing
+    /// Pages that fill up split in two, and the tree grows a level when the
+    /// root splits. A leaf only splits if what the commit leaves in it does
+    /// not fit, whatever order the keys sort in. Leaves the commit empties
+    /// leave the tree. If writing or syncing
     /// the file fails ([`Error::Io`]), the writes are not visible now but
     /// may already be on disk and reappear after reopening: the outcome is
     /// unknown. Stopping the engine after such a failure comes with the WAL.
@@ -188,7 +187,7 @@ impl<F: Fs> Txn<'_, F> {
         }
         for (key, value) in &self.writes {
             if let Some(value) = value {
-                next.put(key, value)?;
+                next.put(key, value);
             }
         }
         let file = &self.db.file;
