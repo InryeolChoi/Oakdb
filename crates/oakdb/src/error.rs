@@ -33,11 +33,6 @@ pub enum Error {
         /// key's length.
         max: usize,
     },
-    /// A leaf had to split, but the root page has no room for another
-    /// child. Nothing of the commit takes effect.
-    ///
-    /// Goes away once the tree can grow past two levels (#16).
-    PageFull,
     /// The data file was made with a different page size.
     PageSizeMismatch {
         /// Page size of this build.
@@ -67,7 +62,6 @@ impl fmt::Display for Error {
                 f,
                 "value is {len} bytes, longer than the {max} bytes left for it"
             ),
-            Error::PageFull => write!(f, "the tree cannot grow past two levels yet"),
             Error::PageSizeMismatch { expected, found } => write!(
                 f,
                 "data file uses {found} byte pages, but this build uses {expected}"
