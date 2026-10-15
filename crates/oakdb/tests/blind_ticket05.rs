@@ -132,7 +132,7 @@ fn range_syntax_forms() {
         k(collect(txn.scan(b"d".to_vec()..b"f".to_vec()))),
         vec![s("d")]
     );
-    assert_eq!(k(collect(txn.scan([b'h']..=[b'j']))), vec![s("h"), s("j")]);
+    assert_eq!(k(collect(txn.scan(*b"h"..=*b"j"))), vec![s("h"), s("j")]);
     // Values come with keys.
     assert_eq!(collect(txn.scan("f"..="f")), vec![(s("f"), s("F"))]);
 }
