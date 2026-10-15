@@ -6,6 +6,7 @@
 //! pages it touches.
 
 use std::collections::BTreeSet;
+use std::ops::Bound;
 use std::sync::Arc;
 
 use crate::error::{corrupt, Result};
@@ -90,6 +91,42 @@ impl Tree {
         self.page_mut(leaf).delete(key);
         if self.page(leaf).cell_count() == 0 && !path.is_empty() {
             self.remove_leaf(&path, leaf);
+        }
+    }
+
+    /// Where the first entry not below `start` is, for
+    /// [`Tree::next_entry`] to read from.
+    pub(crate) fn seek(&self, start: Bound<&[u8]>) -> Cursor {
+        let leaf = match start {
+            Bound::Included(key) | Bound::Excluded(key) => self.descend(key).1,
+            Bound::Unbounded => {
+                let mut page_no = self.root;
+                while !self.page(page_no).is_leaf() {
+                    page_no = self.page(page_no).child_at(0);
+                }
+                page_no
+            }
+        };
+        Cursor {
+            leaf,
+            index: self.page(leaf).start_index(start),
+        }
+    }
+
+    /// The entry at `cursor`, moving `cursor` on to the next one. Past the
+    /// end of a leaf, follows its pointer to the next leaf; past the last
+    /// leaf, returns `None`.
+    pub(crate) fn next_entry(&self, cursor: &mut Cursor) -> Option<(&[u8], &[u8])> {
+        loop {
+            let page = self.page(cursor.leaf);
+            if cursor.index < page.cell_count() {
+                cursor.index += 1;
+                return Some(page.entry_at(cursor.index - 1));
+            }
+            *cursor = Cursor {
+                leaf: page.right_sibling()?,
+                index: 0,
+            };
         }
     }
 
@@ -268,6 +305,13 @@ impl Tree {
 /// of more than 2^64 pages. Checking stops here, so a corrupt file of long page chains cannot
 /// overflow the stack.
 const MAX_DEPTH: usize = 64;
+
+/// A place among the entries of the leaves: entry `index` of leaf `leaf`,
+/// or the end of that leaf.
+pub(crate) struct Cursor {
+    leaf: u64,
+    index: usize,
+}
 
 /// What [`Tree::check`] has seen so far.
 struct Walk {
@@ -571,6 +615,33 @@ mod tests {
 
         assert_eq!(height(&tree), 1);
         assert_eq!(tree.page(tree.root).cell_count(), 0);
+    }
+
+    /// The keys a cursor from `start` reads, to the end.
+    fn keys_from(tree: &Tree, start: Bound<&[u8]>) -> Vec<Vec<u8>> {
+        let mut cursor = tree.seek(start);
+        std::iter::from_fn(|| tree.next_entry(&mut cursor).map(|(key, _)| key.to_vec())).collect()
+    }
+
+    #[test]
+    fn a_cursor_starting_at_the_end_of_a_leaf_moves_on_to_the_next_leaf() {
+        let tree = tree_with(0..37);
+        let left = tree.page(2);
+        let last = left.key_at(left.cell_count() - 1).to_vec();
+        let first_right = tree.page(3).key_at(0).to_vec();
+
+        assert_eq!(keys_from(&tree, Bound::Excluded(&last))[0], first_right);
+        assert_eq!(
+            keys_from(&tree, Bound::Included(&last))[..2],
+            [last, first_right]
+        );
+        assert_eq!(keys_from(&tree, Bound::Unbounded).len(), 37);
+        assert!(keys_from(&tree, Bound::Excluded(&entry(36).0)).is_empty());
+    }
+
+    #[test]
+    fn a_cursor_on_an_empty_tree_reads_nothing() {
+        assert!(keys_from(&Tree::new(), Bound::Unbounded).is_empty());
     }
 
     /// `tree` with its page `page_no` changed by `break_it`.

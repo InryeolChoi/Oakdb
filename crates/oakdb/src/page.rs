@@ -35,6 +35,8 @@
 //! ...4096 cells: key_len u16 | value_len u16 | key | value
 //! ```
 
+use std::ops::Bound;
+
 use crate::error::{corrupt, Result, MAX_ENTRY_LEN, MAX_KEY_LEN};
 
 /// Size of every page in the data file.
@@ -337,6 +339,23 @@ impl Page {
         };
         let separator = entries[mid].0.to_vec();
         (build(&entries[..mid]), separator, build(&entries[mid..]))
+    }
+
+    /// The key and value of entry `index`. Leaves only.
+    pub(crate) fn entry_at(&self, index: usize) -> (&[u8], &[u8]) {
+        debug_assert!(self.is_leaf());
+        (self.key_at(index), self.value_at(index))
+    }
+
+    /// The index of the first entry that is not below `start`: the first
+    /// at or after an included key, or after an excluded one. Leaves only.
+    pub(crate) fn start_index(&self, start: Bound<&[u8]>) -> usize {
+        debug_assert!(self.is_leaf());
+        match start {
+            Bound::Unbounded => 0,
+            Bound::Included(key) => self.search(key).unwrap_or_else(|i| i),
+            Bound::Excluded(key) => self.search(key).map_or_else(|i| i, |i| i + 1),
+        }
     }
 
     /// The value stored under `key`, if any. Leaves only.
