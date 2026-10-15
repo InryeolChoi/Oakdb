@@ -152,6 +152,8 @@ fn many_leaves(db: &Db, n: u32, len: usize) {
     }
 }
 
+/// The indexes of the keys of length `len` that `txn` scans from `from` to
+/// `to`, checking each value on the way.
 fn indexes(txn: &Txn<'_>, from: Bound<u32>, to: Bound<u32>, len: usize) -> Vec<u32> {
     let bound = |b: Bound<u32>| b.map(|i| long_key(i, len));
     txn.scan((bound(from), bound(to)))
@@ -189,7 +191,7 @@ fn a_range_over_many_leaves_follows_them_from_left_to_right() {
 }
 
 #[test]
-fn a_range_skips_leaves_that_deletes_emptied() {
+fn a_range_runs_across_the_gap_left_by_deleted_leaves() {
     let root = tempfile::tempdir().unwrap();
     let db = Db::open(root.path()).unwrap();
     many_leaves(&db, 400, MAX_KEY_LEN);

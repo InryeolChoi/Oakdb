@@ -13,7 +13,7 @@
 //! again. The WAL (ADR 0007) will replace that later.
 
 use std::collections::{btree_map, BTreeMap};
-use std::iter::Peekable;
+use std::iter::{FusedIterator, Peekable};
 use std::ops::{Bound, RangeBounds};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -157,19 +157,10 @@ impl<F: Fs> Txn<'_, F> {
     /// The scan reads the tree committed when it starts; commits made while
     /// it runs do not change what it yields.
     pub fn scan<K: AsRef<[u8]>>(&self, range: impl RangeBounds<K>) -> Scan<'_> {
-        let mut start = range.start_bound().map(AsRef::as_ref);
-        let mut end = range.end_bound().map(AsRef::as_ref);
-        if let (
-            Bound::Included(from) | Bound::Excluded(from),
-            Bound::Included(to) | Bound::Excluded(to),
-        ) = (start, end)
-        {
-            let both_included = matches!((start, end), (Bound::Included(_), Bound::Included(_)));
-            if from > to || (from == to && !both_included) {
-                // `BTreeMap::range` panics on these; this empty range does not.
-                (start, end) = (Bound::Included(from), Bound::Excluded(from));
-            }
-        }
+        let (start, end) = empty_if_backwards(
+            range.start_bound().map(AsRef::as_ref),
+            range.end_bound().map(AsRef::as_ref),
+        );
         let tree = Arc::clone(&self.db.tree());
         let mut scan = Scan {
             cursor: tree.seek(start),
@@ -249,11 +240,32 @@ impl<F: Fs> Txn<'_, F> {
     pub fn rollback(self) {}
 }
 
+/// The range from `start` to `end`, or, if it holds no key because its
+/// start is past its end, an empty range that starts and ends at `start`.
+/// `BTreeMap::range` panics on such ranges; it does not on this one.
+fn empty_if_backwards<'k>(
+    start: Bound<&'k [u8]>,
+    end: Bound<&'k [u8]>,
+) -> (Bound<&'k [u8]>, Bound<&'k [u8]>) {
+    if let (
+        Bound::Included(from) | Bound::Excluded(from),
+        Bound::Included(to) | Bound::Excluded(to),
+    ) = (start, end)
+    {
+        let both_included = matches!((start, end), (Bound::Included(_), Bound::Included(_)));
+        if from > to || (from == to && !both_included) {
+            return (Bound::Included(from), Bound::Excluded(from));
+        }
+    }
+    (start, end)
+}
+
 /// The entries in a range, from [`Txn::scan`].
 ///
 /// Merges two sorted streams: the committed tree, leaf by leaf, and the
 /// transaction's own writes. Where both have a key, the write wins, and a
 /// delete hides the key.
+#[must_use = "a scan reads nothing until it is iterated"]
 pub struct Scan<'txn> {
     tree: Arc<Tree>,
     cursor: Cursor,
@@ -282,6 +294,9 @@ impl Scan<'_> {
             .map(|(key, value)| (key.to_vec(), value.to_vec()));
     }
 }
+
+// Once both streams run out, `next` keeps returning `None`.
+impl FusedIterator for Scan<'_> {}
 
 impl Iterator for Scan<'_> {
     /// Always `Ok` while every page is in memory. Reading pages from disk
