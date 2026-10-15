@@ -1,11 +1,12 @@
-//! Benchmarks for one leaf (docs/benchmarks/0001) and a two-level tree
-//! (docs/benchmarks/0003).
+//! Benchmarks for one leaf (docs/benchmarks/0001), a two-level tree
+//! (docs/benchmarks/0003) and range scans (docs/benchmarks/0005).
 //!
 //! Reads run against a full leaf. Commits overwrite keys that are already
 //! there, so the leaf stays full and every few commits has to compact.
 //! Commits are measured twice: on the real file system, and with syncs
 //! turned off to see what the engine itself costs. The `two_levels` cases
-//! do the same on a tree of about 160 leaves under one root.
+//! do the same on a tree of about 160 leaves under one root. Scans read 100
+//! entries from a moving start, and the whole of that tree.
 
 use std::fs::{File, OpenOptions};
 use std::hint::black_box;
@@ -153,5 +154,38 @@ fn commits(c: &mut Criterion) {
     commit_overwrites(c, "commit/no_sync_two_levels", &db, n);
 }
 
-criterion_group!(benches, reads, commits);
+fn scans(c: &mut Criterion) {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open_with(NoSyncFs, dir.path()).unwrap();
+    let n = fill_two_levels(&db);
+    let mut group = c.benchmark_group("scan");
+    let mut i = 0u32;
+    group.bench_function("100_two_levels", |b| {
+        b.iter(|| {
+            i = (i + 7919) % (n - 100);
+            let txn = db.begin();
+            let count = txn
+                .scan(i.to_be_bytes()..)
+                .take(100)
+                .fold(0, |count, item| {
+                    black_box(item.unwrap());
+                    count + 1
+                });
+            assert_eq!(count, 100);
+        })
+    });
+    group.bench_function("all_two_levels", |b| {
+        b.iter(|| {
+            let txn = db.begin();
+            let count = txn.scan::<&[u8]>(..).fold(0, |count, item| {
+                black_box(item.unwrap());
+                count + 1
+            });
+            assert_eq!(count, n as usize);
+        })
+    });
+    group.finish();
+}
+
+criterion_group!(benches, reads, commits, scans);
 criterion_main!(benches);

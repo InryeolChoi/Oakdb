@@ -12,15 +12,17 @@
 //! syncs them. If it added pages, it then writes the meta page and syncs
 //! again. The WAL (ADR 0007) will replace that later.
 
-use std::collections::BTreeMap;
+use std::collections::{btree_map, BTreeMap};
+use std::iter::Peekable;
+use std::ops::{Bound, RangeBounds};
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::error::{Error, Result, MAX_ENTRY_LEN, MAX_KEY_LEN};
 use crate::fs::{Fs, FsFile, StdFs};
 use crate::meta::{Meta, META_LEN};
 use crate::page::{Page, PAGE_SIZE};
-use crate::tree::Tree;
+use crate::tree::{Cursor, Tree};
 
 /// Name of the data file inside the database directory.
 pub const DATA_FILE: &str = "oakdb.data";
@@ -29,8 +31,9 @@ pub const DATA_FILE: &str = "oakdb.data";
 pub struct Db<F: Fs = StdFs> {
     file: F::File,
     /// The committed tree. Commits hold the lock while they write, so they
-    /// happen one at a time.
-    tree: Mutex<Tree>,
+    /// happen one at a time, and swap in a new tree when done. A scan keeps
+    /// the tree it started on, so commits never change it under the scan.
+    tree: Mutex<Arc<Tree>>,
 }
 
 impl<F: Fs> std::fmt::Debug for Db<F> {
@@ -75,7 +78,7 @@ impl<F: Fs> Db<F> {
         fs.sync_dir(dir)?;
         Ok(Db {
             file,
-            tree: Mutex::new(tree),
+            tree: Mutex::new(Arc::new(tree)),
         })
     }
 
@@ -99,7 +102,7 @@ impl<F: Fs> Db<F> {
         })?;
         Ok(Db {
             file,
-            tree: Mutex::new(tree),
+            tree: Mutex::new(Arc::new(tree)),
         })
     }
 
@@ -117,7 +120,7 @@ impl<F: Fs> Db<F> {
         Ok(())
     }
 
-    fn tree(&self) -> MutexGuard<'_, Tree> {
+    fn tree(&self) -> MutexGuard<'_, Arc<Tree>> {
         // A panic while holding the lock cannot leave the tree half changed:
         // commits change a copy and swap it in at the end.
         self.tree.lock().unwrap_or_else(PoisonError::into_inner)
@@ -141,6 +144,42 @@ impl<F: Fs> Txn<'_, F> {
             return Ok(write.clone());
         }
         Ok(self.db.tree().get(key).map(<[u8]>::to_vec))
+    }
+
+    /// The entries whose keys are in `range`, in key order, including this
+    /// transaction's own writes. Each end of the range can include or
+    /// exclude its key, or be left open: `txn.scan("a".."m")`,
+    /// `txn.scan::<&[u8]>((Bound::Excluded(from), Bound::Included(to)))`,
+    /// or `txn.scan::<&[u8]>(..)` for every entry. The key type has to be
+    /// named where the range alone does not say it. A range whose start is
+    /// past its end is empty.
+    ///
+    /// The scan reads the tree committed when it starts; commits made while
+    /// it runs do not change what it yields.
+    pub fn scan<K: AsRef<[u8]>>(&self, range: impl RangeBounds<K>) -> Scan<'_> {
+        let mut start = range.start_bound().map(AsRef::as_ref);
+        let mut end = range.end_bound().map(AsRef::as_ref);
+        if let (
+            Bound::Included(from) | Bound::Excluded(from),
+            Bound::Included(to) | Bound::Excluded(to),
+        ) = (start, end)
+        {
+            let both_included = matches!((start, end), (Bound::Included(_), Bound::Included(_)));
+            if from > to || (from == to && !both_included) {
+                // `BTreeMap::range` panics on these; this empty range does not.
+                (start, end) = (Bound::Included(from), Bound::Excluded(from));
+            }
+        }
+        let tree = Arc::clone(&self.db.tree());
+        let mut scan = Scan {
+            cursor: tree.seek(start),
+            tree,
+            end: end.map(<[u8]>::to_vec),
+            committed: None,
+            writes: self.writes.range::<[u8], _>((start, end)).peekable(),
+        };
+        scan.read_committed();
+        scan
     }
 
     /// Stores `value` under `key` when the transaction commits.
@@ -178,7 +217,7 @@ impl<F: Fs> Txn<'_, F> {
             return Ok(());
         }
         let mut tree = self.db.tree();
-        let mut next = tree.clone();
+        let mut next = Tree::clone(&tree);
         // Take out every key this transaction writes before putting any
         // back, so space freed by a delete or a shrinking value is there for
         // a put that sorts before it.
@@ -202,12 +241,79 @@ impl<F: Fs> Txn<'_, F> {
             write_meta(file, next.meta())?;
             file.sync_data()?;
         }
-        *tree = next;
+        *tree = Arc::new(next);
         Ok(())
     }
 
     /// Throws away the writes.
     pub fn rollback(self) {}
+}
+
+/// The entries in a range, from [`Txn::scan`].
+///
+/// Merges two sorted streams: the committed tree, leaf by leaf, and the
+/// transaction's own writes. Where both have a key, the write wins, and a
+/// delete hides the key.
+pub struct Scan<'txn> {
+    tree: Arc<Tree>,
+    cursor: Cursor,
+    end: Bound<Vec<u8>>,
+    /// The next committed entry in the range, if any, read ahead to compare
+    /// with the next write.
+    committed: Option<(Vec<u8>, Vec<u8>)>,
+    writes: Peekable<btree_map::Range<'txn, Vec<u8>, Option<Vec<u8>>>>,
+}
+
+impl std::fmt::Debug for Scan<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Scan").finish_non_exhaustive()
+    }
+}
+
+impl Scan<'_> {
+    /// Reads the next committed entry into `committed`, or `None` past the
+    /// end of the range.
+    fn read_committed(&mut self) {
+        let end = self.end.as_ref().map(Vec::as_slice);
+        self.committed = self
+            .tree
+            .next_entry(&mut self.cursor)
+            .filter(|&(key, _)| (Bound::Unbounded, end).contains(key))
+            .map(|(key, value)| (key.to_vec(), value.to_vec()));
+    }
+}
+
+impl Iterator for Scan<'_> {
+    /// Always `Ok` while every page is in memory. Reading pages from disk
+    /// on demand will make `Err` possible.
+    type Item = Result<(Vec<u8>, Vec<u8>)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let write_first = match (&self.committed, self.writes.peek()) {
+                (None, None) => return None,
+                (Some(_), None) => false,
+                (None, Some(_)) => true,
+                (Some((committed, _)), Some((written, _))) => written <= &committed,
+            };
+            if !write_first {
+                let entry = self.committed.take();
+                self.read_committed();
+                return entry.map(Ok);
+            }
+            let (key, write) = self.writes.next().expect("peeked");
+            if self
+                .committed
+                .as_ref()
+                .is_some_and(|(committed, _)| committed == key)
+            {
+                self.read_committed();
+            }
+            if let Some(value) = write {
+                return Some(Ok((key.clone(), value.clone())));
+            }
+        }
+    }
 }
 
 fn check_key(key: &[u8]) -> Result<()> {
