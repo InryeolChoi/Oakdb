@@ -1,0 +1,1226 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DB 그림책</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#f7f5f0; --surface:#ffffff; --surface2:#f0ede6; --ink:#1d1b18; --muted:#6b665d; --line:#ddd7cc;
+  --oak:#8a5a2b; --oak-soft:#f3e7d8; --leaf:#2f7d4f; --leaf-soft:#e2f1e7; --inner:#3b5ea8; --inner-soft:#e3eaf8;
+  --warn:#b8461f; --warn-soft:#fbe6dc; --ok:#2f7d4f; --hl:#e0a21a; --hl-soft:#fdf1d2; --hole:#c9c2b4; --violet:#7a4fb0; --violet-soft:#efe6f8;
+  --shadow:0 1px 2px rgba(0,0,0,.05),0 4px 16px rgba(0,0,0,.05);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#151412; --surface:#1f1d1a; --surface2:#2a2723; --ink:#eeeae2; --muted:#a39d92; --line:#3a3631;
+    --oak:#d9a066; --oak-soft:#3a2c1e; --leaf:#6fcf97; --leaf-soft:#1d3527; --inner:#8fb0f0; --inner-soft:#1f2a42;
+    --warn:#f08a65; --warn-soft:#3f2219; --ok:#6fcf97; --hl:#f2c14e; --hl-soft:#3d3218; --hole:#5a544b; --violet:#c3a1ef; --violet-soft:#2e2340;
+    --shadow:0 1px 2px rgba(0,0,0,.3),0 4px 16px rgba(0,0,0,.25);
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#151412; --surface:#1f1d1a; --surface2:#2a2723; --ink:#eeeae2; --muted:#a39d92; --line:#3a3631;
+  --oak:#d9a066; --oak-soft:#3a2c1e; --leaf:#6fcf97; --leaf-soft:#1d3527; --inner:#8fb0f0; --inner-soft:#1f2a42;
+  --warn:#f08a65; --warn-soft:#3f2219; --ok:#6fcf97; --hl:#f2c14e; --hl-soft:#3d3218; --hole:#5a544b; --violet:#c3a1ef; --violet-soft:#2e2340;
+  --shadow:0 1px 2px rgba(0,0,0,.3),0 4px 16px rgba(0,0,0,.25);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:"Noto Sans KR",system-ui,sans-serif;line-height:1.75;font-size:16px}
+code,.mono{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:.88em}
+code{background:var(--surface2);padding:1px 6px;border-radius:5px}
+.wrap{max-width:1000px;margin:0 auto;padding:0 16px}
+a{color:var(--oak)}
+.hero{padding:64px 0 36px;position:relative;overflow:hidden}
+.hero h1{font-size:clamp(32px,5.4vw,54px);line-height:1.15;margin:10px 0 14px;font-weight:900;letter-spacing:-.02em}
+.hero .lead{font-size:18px;color:var(--muted);max-width:700px}
+.eyebrow{color:var(--oak);font-weight:700;letter-spacing:.08em;font-size:13px}
+.parts{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:26px}
+@media (max-width:760px){.parts{grid-template-columns:1fr 1fr}}
+.parts a{display:block;text-decoration:none;color:inherit;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px;transition:transform .2s,border-color .2s}
+.parts a:hover{transform:translateY(-3px);border-color:var(--oak)}
+.parts .pn{font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--oak);font-weight:600}
+.parts .pt{font-weight:700;font-size:16px}
+.parts .pd{font-size:13px;color:var(--muted);line-height:1.5}
+nav.toc{position:sticky;top:0;z-index:30;background:color-mix(in srgb,var(--bg) 90%,transparent);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+nav.toc .wrap{display:flex;gap:6px;overflow-x:auto;padding-top:9px;padding-bottom:9px;scrollbar-width:none}
+nav.toc a{flex:none;text-decoration:none;color:var(--muted);font-size:13px;padding:3px 10px;border-radius:99px;border:1px solid var(--line);background:var(--surface)}
+nav.toc a.part{color:var(--oak);font-weight:700;border-color:var(--oak)}
+.partbanner{padding:70px 0 20px;text-align:left}
+.partbanner .num{font-family:"JetBrains Mono",monospace;color:var(--oak);font-weight:600;font-size:14px}
+.partbanner h2{font-size:clamp(28px,4.5vw,42px);margin:4px 0;font-weight:900;letter-spacing:-.01em}
+.partbanner p{color:var(--muted);max-width:720px}
+section.ch{padding:34px 0 40px;border-bottom:1px dashed var(--line)}
+.ch h3{font-size:clamp(21px,3vw,27px);margin:0 0 6px;line-height:1.35}
+.chno{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:12px;font-weight:600;padding:2px 9px;border-radius:99px;background:var(--oak-soft);color:var(--oak);margin-bottom:8px}
+h4{font-size:17px;margin:22px 0 6px}
+p{margin:8px 0}
+.small{font-size:13px;color:var(--muted)}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:18px;box-shadow:var(--shadow);margin:16px 0}
+.analogy{border-left:4px solid var(--oak);background:var(--oak-soft);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+.analogy b:first-child{color:var(--oak)}
+.term{border-left:4px solid var(--inner);background:var(--inner-soft);padding:10px 16px;border-radius:0 10px 10px 0;margin:14px 0;font-size:15px}
+.term b:first-child{color:var(--inner)}
+.warnbox{border-left:4px solid var(--warn);background:var(--warn-soft);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+@media (max-width:760px){.grid2,.grid3{grid-template-columns:1fr}}
+button{font:inherit;font-size:14px;border:1px solid var(--line);background:var(--surface);color:var(--ink);padding:6px 13px;border-radius:9px;cursor:pointer;transition:border-color .15s,background .15s}
+button:hover{border-color:var(--oak)}
+button.primary{background:var(--oak);color:#fff;border-color:var(--oak)}
+:root[data-theme="dark"] button.primary{color:#1a120a}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]) button.primary{color:#1a120a}}
+button.danger{background:var(--warn);border-color:var(--warn);color:#fff}
+button:disabled{opacity:.4;cursor:default}
+.segctl{display:inline-flex;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.segctl button{border:none;border-radius:0;border-right:1px solid var(--line)}
+.segctl button:last-child{border-right:none}
+.segctl button.on{background:var(--ink);color:var(--bg)}
+input,select{font:inherit;font-size:14px;padding:5px 8px;border-radius:8px;border:1px solid var(--line);background:var(--surface);color:var(--ink)}
+input[type=number]{width:72px}
+input[type=range]{accent-color:var(--oak)}
+.controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:10px 0}
+table{border-collapse:collapse;width:100%;font-size:14px;margin:10px 0}
+th,td{border-bottom:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
+th{color:var(--muted);font-weight:500;font-size:13px}
+.tablewrap{overflow-x:auto}
+.log{font-size:14px;min-height:26px;margin-top:10px;padding:9px 13px;border-radius:9px;background:var(--surface2);transition:background .3s}
+.log.err{background:var(--warn-soft);color:var(--warn)}
+.log.good{background:var(--leaf-soft);color:var(--leaf)}
+.theme-toggle{position:fixed;right:14px;bottom:14px;z-index:40;border-radius:99px;box-shadow:var(--shadow)}
+.badge{display:inline-block;font-size:11px;font-weight:700;padding:1px 8px;border-radius:99px;white-space:nowrap}
+.b-done{background:var(--leaf-soft);color:var(--leaf)}
+.b-part{background:var(--hl-soft);color:var(--oak)}
+.b-todo{background:var(--surface2);color:var(--muted)}
+.reveal{opacity:0;transform:translateY(18px);transition:opacity .6s,transform .6s}
+.reveal.in{opacity:1;transform:none}
+@media (prefers-reduced-motion: reduce){.reveal{opacity:1;transform:none}}
+
+/* hero animation */
+.hero-tree{position:absolute;right:-20px;top:30px;width:340px;opacity:.9;pointer-events:none}
+@media (max-width:900px){.hero-tree{display:none}}
+.hero-tree .n{animation:pop .6s backwards}
+@keyframes pop{from{opacity:0;transform:scale(.6)}}
+
+/* 1-1 transfer */
+.accts{display:flex;gap:16px;align-items:center;justify-content:center;flex-wrap:wrap;margin:14px 0}
+.acct{width:150px;border-radius:14px;border:2px solid var(--line);background:var(--surface);padding:12px;text-align:center;transition:all .3s}
+.acct .nm{font-size:13px;color:var(--muted)}
+.acct .v{font-size:30px;font-weight:900;font-family:"JetBrains Mono",monospace}
+.acct.flash{border-color:var(--hl);box-shadow:0 0 0 4px var(--hl-soft)}
+.arrowmoney{font-size:26px;color:var(--muted)}
+.memo{min-width:180px;min-height:84px;border:2px dashed var(--violet);border-radius:12px;padding:8px 12px;background:var(--violet-soft);font-size:13px;font-family:"JetBrains Mono",monospace;color:var(--violet)}
+.memo .t{font-family:"Noto Sans KR",sans-serif;font-weight:700;font-size:12px}
+.total{font-size:14px;text-align:center}
+.acid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:10px}
+@media (max-width:760px){.acid{grid-template-columns:1fr 1fr}}
+.acid div{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px;transition:transform .2s}
+.acid div:hover{transform:translateY(-3px)}
+.acid .L{font-size:26px;font-weight:900;color:var(--oak);font-family:"JetBrains Mono",monospace;line-height:1}
+.acid .n{font-weight:700;font-size:14px;margin-top:4px}
+.acid .d{font-size:12.5px;color:var(--muted);line-height:1.5}
+
+/* 1-2 layers */
+.stackwrap{display:grid;grid-template-columns:1.1fr 1fr;gap:16px}
+@media (max-width:760px){.stackwrap{grid-template-columns:1fr}}
+.stack{position:relative;display:flex;flex-direction:column;gap:6px}
+.lay{position:relative;border:1.5px solid var(--line);border-radius:10px;padding:9px 12px 9px 40px;background:var(--surface);transition:all .3s;font-size:14px}
+.lay .ln{font-weight:700}
+.lay .ld{font-size:12px;color:var(--muted)}
+.lay .badge{position:absolute;right:10px;top:10px}
+.lay.on{border-color:var(--oak);background:var(--oak-soft);transform:translateX(6px)}
+.lay .ic{position:absolute;left:11px;top:10px;font-size:16px}
+.token{position:absolute;left:-12px;width:18px;height:18px;border-radius:50%;background:var(--hl);box-shadow:0 0 0 4px var(--hl-soft),0 0 14px var(--hl);transition:top .55s cubic-bezier(.5,0,.3,1);z-index:3}
+.trace{font-size:13.5px;display:flex;flex-direction:column;gap:6px;max-height:430px;overflow:auto}
+.trace div{background:var(--surface2);border-radius:8px;padding:7px 10px;animation:slidein .35s}
+.trace div b{color:var(--oak)}
+@keyframes slidein{from{opacity:0;transform:translateX(12px)}}
+
+/* 1-3 latency */
+.lat{display:flex;flex-direction:column;gap:12px}
+.latrow{display:grid;grid-template-columns:190px 1fr 140px;gap:10px;align-items:center;font-size:14px}
+.latrow .track{height:24px;background:var(--surface2);border-radius:6px;overflow:hidden;position:relative}
+.latrow .fill{height:100%;width:0;border-radius:6px;transition:width 1.4s cubic-bezier(.3,.7,.3,1)}
+.latrow .hum{font-weight:700;font-size:13px}
+@media (max-width:620px){.latrow{grid-template-columns:110px 1fr 90px;font-size:12px}}
+.blocks{display:grid;grid-template-columns:repeat(8,1fr);gap:6px;margin-top:10px}
+.blk{display:grid;grid-template-columns:repeat(4,1fr);gap:2px;padding:4px;border-radius:7px;border:1.5px solid var(--line);transition:all .3s}
+.blk.on{border-color:var(--oak);background:var(--oak-soft);transform:scale(1.06)}
+.blk i{display:block;aspect-ratio:1;border-radius:2px;background:var(--surface2);cursor:pointer}
+.blk i:hover{background:var(--hl)}
+.blk i.pick{background:var(--warn)}
+@media (max-width:620px){.blocks{grid-template-columns:repeat(4,1fr)}}
+
+/* 1-4 search */
+.arr{display:grid;grid-template-columns:repeat(16,1fr);gap:3px;margin:12px 0}
+.arr .c{font-family:"JetBrains Mono",monospace;font-size:11px;text-align:center;padding:5px 0;border-radius:5px;background:var(--surface2);transition:background .15s,transform .15s;color:var(--muted)}
+.arr .c.seen{background:var(--hole);color:var(--ink)}
+.arr .c.range{background:var(--inner-soft);color:var(--inner)}
+.arr .c.found{background:var(--leaf);color:#fff;transform:scale(1.15)}
+.arr .c.now{background:var(--hl);color:#3a2a00}
+@media (max-width:620px){.arr{grid-template-columns:repeat(8,1fr)}}
+.bigcount{display:flex;gap:16px;flex-wrap:wrap}
+.bigcount div{flex:1;min-width:170px;background:var(--surface2);border-radius:12px;padding:12px}
+.bigcount .v{font-size:28px;font-weight:900;font-family:"JetBrains Mono",monospace}
+.bigcount .k{font-size:13px;color:var(--muted)}
+
+/* 1-5 btree vs lsm */
+.pagesgrid{display:grid;grid-template-columns:repeat(6,1fr);gap:5px}
+.pagesgrid div{height:34px;border-radius:6px;background:var(--leaf-soft);border:1.5px solid var(--leaf);font-size:10px;display:flex;align-items:center;justify-content:center;font-family:"JetBrains Mono",monospace;color:var(--leaf);transition:all .25s}
+.pagesgrid div.hit{background:var(--hl);border-color:var(--hl);color:#3a2a00;transform:scale(1.1)}
+.lsm .lvl{display:flex;gap:5px;align-items:center;min-height:38px;margin:5px 0;flex-wrap:wrap}
+.lsm .lvl .lb{width:58px;font-size:12px;color:var(--muted)}
+.lsm .file{font-family:"JetBrains Mono",monospace;font-size:10.5px;padding:4px 7px;border-radius:6px;background:var(--inner-soft);border:1.5px solid var(--inner);color:var(--inner);animation:pop .4s}
+.lsm .mem{background:var(--violet-soft);border-color:var(--violet);color:var(--violet)}
+.lsm .file.merge{background:var(--hl);border-color:var(--hl);color:#3a2a00}
+
+/* timeline lanes */
+.lanes{display:grid;grid-template-columns:1fr 120px 1fr;gap:6px 10px;align-items:center}
+.lanes .hd{font-weight:700;text-align:center;font-size:14px}
+.lanes .ev{font-size:13.5px;padding:7px 10px;border-radius:9px;background:var(--surface2);animation:slidein .35s}
+.lanes .ev.bad{background:var(--warn-soft);color:var(--warn)}
+.lanes .ev.good{background:var(--leaf-soft);color:var(--leaf)}
+.lanes .ev.wait{background:repeating-linear-gradient(45deg,var(--surface2),var(--surface2) 6px,transparent 6px,transparent 12px);color:var(--muted)}
+.lanes .mid{text-align:center;font-family:"JetBrains Mono",monospace;font-size:13px;font-weight:700;padding:6px;border-radius:9px;border:1.5px solid var(--line);background:var(--surface)}
+.lanes .empty{min-height:1px}
+@media (max-width:620px){.lanes{grid-template-columns:1fr 70px 1fr}.lanes .ev{font-size:12px}}
+
+/* WAL */
+.walgrid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
+@media (max-width:760px){.walgrid{grid-template-columns:1fr}}
+.box{border:1.5px solid var(--line);border-radius:12px;padding:10px 12px;background:var(--surface);min-height:130px;transition:all .3s}
+.box .bt{font-size:12px;font-weight:700;color:var(--muted);margin-bottom:6px}
+.box.ram{border-style:dashed}
+.rec{font-family:"JetBrains Mono",monospace;font-size:12px;padding:4px 8px;border-radius:6px;margin:3px 0;background:var(--inner-soft);color:var(--inner);animation:pop .35s;transition:all .3s}
+.rec.commit{background:var(--leaf-soft);color:var(--leaf);font-weight:700}
+.rec.volatile{border:1.5px dashed currentColor;opacity:.75}
+.rec.gone{text-decoration:line-through;opacity:.3}
+.rec.replay{background:var(--hl);color:#3a2a00}
+.rec.meta{background:var(--violet-soft);color:var(--violet)}
+.rec.torn{background:var(--warn-soft);color:var(--warn)}
+.stamp{display:inline-block;font-weight:900;color:var(--warn);border:3px solid var(--warn);border-radius:8px;padding:0 8px;transform:rotate(-8deg);animation:stamp .4s}
+@keyframes stamp{from{transform:scale(2.4) rotate(-8deg);opacity:0}}
+.stepdots{display:flex;gap:5px;flex-wrap:wrap;margin:8px 0}
+.stepdots span{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-family:"JetBrains Mono",monospace;background:var(--surface2);color:var(--muted);transition:all .3s}
+.stepdots span.on{background:var(--oak);color:#fff}
+
+/* flip cards */
+.flips{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px}
+.flip{perspective:1000px;height:250px;cursor:pointer}
+.flip .in{position:relative;width:100%;height:100%;transition:transform .6s;transform-style:preserve-3d}
+.flip.on .in{transform:rotateY(180deg)}
+.flip .fr,.flip .bk{position:absolute;inset:0;backface-visibility:hidden;-webkit-backface-visibility:hidden;border-radius:14px;padding:14px 16px;border:1px solid var(--line);overflow:auto}
+.flip .fr{background:var(--surface);display:flex;flex-direction:column;justify-content:space-between}
+.flip .fr .q{font-size:17px;font-weight:700;line-height:1.45}
+.flip .fr .src{font-size:12px;color:var(--oak);font-family:"JetBrains Mono",monospace}
+.flip .fr .hint{font-size:12px;color:var(--muted)}
+.flip .fr .ico{font-size:30px}
+.flip .bk{transform:rotateY(180deg);background:var(--oak-soft);font-size:13.5px;line-height:1.6}
+.flip .bk .a{font-weight:900;font-size:16px;color:var(--oak);margin-bottom:4px}
+.flip .bk .no{color:var(--muted);font-size:12.5px;margin-top:6px}
+
+/* page sim */
+.pagebar{position:relative;height:64px;border-radius:8px;overflow:hidden;border:1px solid var(--line);background:var(--surface2);display:flex}
+.seg{height:100%;display:flex;align-items:center;justify-content:center;font-size:11px;overflow:hidden;white-space:nowrap;border-right:1px solid rgba(0,0,0,.12);transition:all .35s}
+.seg.hdr{background:var(--ink);color:var(--bg)}
+.seg.slots{background:var(--inner);color:#fff}
+.seg.free{background:repeating-linear-gradient(90deg,var(--surface),var(--surface) 6px,var(--surface2) 6px,var(--surface2) 12px);color:var(--muted)}
+.seg.cell{background:var(--leaf);color:#fff}
+.seg.cell.new{background:var(--hl);color:#3a2a00}
+.seg.hole{background:repeating-linear-gradient(45deg,var(--hole),var(--hole) 4px,transparent 4px,transparent 8px);color:var(--muted)}
+.pagescale{display:flex;justify-content:space-between;font-size:11px;color:var(--muted);font-family:"JetBrains Mono",monospace;margin-top:3px}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-top:6px}
+.legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:4px;vertical-align:-2px;border:1.5px solid}
+.stats{display:flex;flex-wrap:wrap;gap:16px;margin-top:8px;font-size:13px}
+.stats b{font-family:"JetBrains Mono",monospace}
+
+/* tree */
+.treebox{position:relative;overflow-x:auto;overflow-y:hidden;border:1px solid var(--line);border-radius:12px;background:var(--surface2);padding:20px 16px 16px;min-height:150px}
+.treecanvas{position:relative}
+.treecanvas svg{position:absolute;left:0;top:0;pointer-events:none;overflow:visible}
+.node{position:absolute;display:flex;border-radius:7px;overflow:hidden;border:1.5px solid;font-family:"JetBrains Mono",monospace;font-size:12px;height:30px;transition:left .35s,top .35s,box-shadow .2s}
+.node.lf{border-color:var(--leaf);background:var(--leaf-soft)}
+.node.in{border-color:var(--inner);background:var(--inner-soft)}
+.node .k{width:30px;display:flex;align-items:center;justify-content:center;border-right:1px solid color-mix(in srgb,currentColor 18%,transparent)}
+.node .k:last-child{border-right:none}
+.node.lf .k{color:var(--leaf)}.node.in .k{color:var(--inner)}
+.node .k.empty{color:var(--muted);width:40px;font-size:11px}
+.node.fresh{box-shadow:0 0 0 3px var(--hl)}
+.node.visit{box-shadow:0 0 0 3px var(--oak)}
+.node .k.hit{background:var(--hl);color:#3a2a00 !important;font-weight:600}
+.node .k.cur{background:var(--oak);color:#fff !important}
+.events{font-size:13.5px;margin-top:10px;max-height:170px;overflow-y:auto;border:1px solid var(--line);border-radius:10px;background:var(--surface)}
+.events div{padding:6px 12px;border-bottom:1px solid var(--line)}
+.events div:first-child{background:var(--hl-soft)}
+.events .grow{color:var(--inner);font-weight:700}.events .shrink{color:var(--warn);font-weight:700}
+.scanout{display:flex;gap:4px;flex-wrap:wrap;margin-top:8px;min-height:30px}
+.scanout span{font-family:"JetBrains Mono",monospace;font-size:13px;padding:2px 8px;border-radius:5px;background:var(--hl-soft);border:1px solid var(--hl);animation:pop .3s}
+
+/* model test */
+.mt{font-family:"JetBrains Mono",monospace;font-size:12.5px}
+.mt tr{animation:slidein .3s}
+.mt td.ok{color:var(--leaf);font-weight:700}.mt td.bad{color:var(--warn);font-weight:700}
+.mt tr.badrow{background:var(--warn-soft)}
+
+/* gantt */
+.gantt{display:flex;flex-direction:column;gap:5px;position:relative}
+.grow2{display:grid;grid-template-columns:70px 1fr;gap:8px;align-items:center}
+.grow2 .lb{font-size:12px;color:var(--muted);text-align:right}
+.gtrack{position:relative;height:22px;background:var(--surface2);border-radius:5px;overflow:hidden}
+.gseg{position:absolute;top:0;height:100%;font-size:10px;display:flex;align-items:center;justify-content:center;color:#fff;overflow:hidden;white-space:nowrap}
+.gseg.think{background:var(--inner)}
+.gseg.wait{background:repeating-linear-gradient(45deg,var(--hole),var(--hole) 4px,transparent 4px,transparent 8px)}
+.gseg.sync{background:var(--oak)}
+.gseg.sync.b1{background:var(--oak)}.gseg.sync.b2{background:var(--violet)}.gseg.sync.b3{background:var(--warn)}.gseg.sync.b0{background:var(--leaf)}
+.curtain{position:absolute;top:0;right:0;bottom:0;background:var(--surface);transition:width 2.6s linear;z-index:2}
+.gtitle{display:flex;justify-content:space-between;align-items:baseline;margin:14px 0 6px;flex-wrap:wrap;gap:6px}
+.gtitle b{font-size:15px}
+.gtime{font-family:"JetBrains Mono",monospace;font-weight:700;font-size:15px}
+.gaxis{display:grid;grid-template-columns:70px 1fr;gap:8px;font-size:11px;color:var(--muted);font-family:"JetBrains Mono",monospace}
+
+/* frame bytes */
+.bytes{display:flex;flex-wrap:wrap;gap:3px;margin-top:10px}
+.byte{display:flex;flex-direction:column;align-items:center;font-family:"JetBrains Mono",monospace;font-size:11.5px;padding:3px 4px;border-radius:5px;min-width:30px;animation:pop .25s backwards}
+.byte small{font-size:10px;opacity:.75}
+.byte.len{background:var(--inner-soft);color:var(--inner)}
+.byte.cmd{background:var(--hl-soft);color:var(--oak)}
+.byte.dat{background:var(--leaf-soft);color:var(--leaf)}
+
+/* roadmap */
+.roadtrack{position:relative;margin:20px 0 10px;padding:30px 0 10px;overflow-x:auto}
+.rail{position:relative;min-width:720px;height:150px}
+.rail .line{position:absolute;left:30px;right:30px;top:40px;height:6px;border-radius:3px;background:var(--surface2)}
+.rail .done{position:absolute;left:30px;top:40px;height:6px;border-radius:3px;background:var(--leaf);width:0;transition:width 2s cubic-bezier(.3,.7,.3,1)}
+.station{position:absolute;top:24px;width:150px;margin-left:-75px;text-align:center;cursor:pointer}
+.station .dot{width:38px;height:38px;border-radius:50%;margin:0 auto;border:4px solid var(--surface2);background:var(--surface);display:flex;align-items:center;justify-content:center;font-size:17px;transition:all .3s}
+.station.past .dot{border-color:var(--leaf)}
+.station.on .dot{border-color:var(--oak);transform:scale(1.18);box-shadow:0 0 0 5px var(--oak-soft)}
+.station .nm{font-weight:700;font-size:14px;margin-top:6px}
+.station .rg{font-size:11px;color:var(--muted);font-family:"JetBrains Mono",monospace}
+.train{position:absolute;top:-4px;font-size:26px;margin-left:-14px;transition:left 2s cubic-bezier(.3,.7,.3,1)}
+
+/* canvas */
+canvas{width:100%;display:block;border-radius:12px;background:var(--surface2)}
+.counter{display:flex;gap:16px;flex-wrap:wrap;margin-top:8px}
+.counter div{background:var(--surface2);border-radius:10px;padding:8px 12px;min-width:140px}
+.counter .v{font-family:"JetBrains Mono",monospace;font-size:22px;font-weight:900}
+.counter .k{font-size:12px;color:var(--muted)}
+
+/* key encode */
+.keyrows{display:flex;flex-direction:column;gap:4px;font-family:"JetBrains Mono",monospace;font-size:12.5px}
+.keyrows div{display:flex;gap:8px;align-items:center;padding:4px 8px;border-radius:6px;background:var(--surface2);animation:slidein .3s}
+.keyrows .tb{color:var(--violet);font-weight:700}
+.keyrows .pk{color:var(--leaf)}
+.keyrows .bad{background:var(--warn-soft)}
+.keyrows .lbl{margin-left:auto;font-family:"Noto Sans KR",sans-serif;font-size:12px;color:var(--muted)}
+
+/* reader questions: add one .qa box per question asked, inside the matching chapter */
+.qa{border:2px dashed var(--violet);background:var(--violet-soft);border-radius:14px;padding:14px 18px;margin:20px 0}
+.qa .qh{font-size:12px;font-weight:700;color:var(--violet);letter-spacing:.03em}
+.qa .qq{font-size:18px;font-weight:700;margin:2px 0 8px}
+.ssdpath{display:flex;align-items:stretch;gap:6px;flex-wrap:wrap;margin:10px 0}
+.ssdpath .sa{align-self:center;color:var(--muted)}
+.sp{flex:1;min-width:120px;border:2px solid var(--line);border-radius:10px;padding:8px 10px;background:var(--surface);transition:all .35s;text-align:center}
+.sp .spn{font-weight:700;font-size:14px}.sp .spd{font-size:11.5px;color:var(--muted)}
+.sp.safe{border-style:solid}
+.sp.has{border-color:var(--hl);background:var(--hl-soft);box-shadow:0 0 0 3px var(--hl-soft)}
+.sp.lost{border-color:var(--warn);background:var(--warn-soft);opacity:.6}
+.sp.kept{border-color:var(--leaf);background:var(--leaf-soft)}
+.gloss{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:10px}
+.gloss div{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:10px 14px;font-size:14px}
+.gloss b{color:var(--oak)}
+footer{padding:50px 0 90px;color:var(--muted);font-size:13px}
+svg text{font-family:"Noto Sans KR",sans-serif}
+</style>
+</head>
+<body>
+<button class="theme-toggle" id="themeBtn">🌓 테마</button>
+
+<header class="hero wrap">
+  <svg class="hero-tree" viewBox="0 0 340 220" aria-hidden="true">
+    <g stroke="var(--inner)" stroke-width="1.5" opacity=".6"><line x1="170" y1="40" x2="80" y2="110"/><line x1="170" y1="40" x2="260" y2="110"/><line x1="80" y1="130" x2="40" y2="190"/><line x1="80" y1="130" x2="120" y2="190"/><line x1="260" y1="130" x2="220" y2="190"/><line x1="260" y1="130" x2="300" y2="190"/></g>
+    <g class="n" style="animation-delay:.1s"><rect x="140" y="20" width="60" height="26" rx="6" fill="var(--inner-soft)" stroke="var(--inner)"/><text x="170" y="38" text-anchor="middle" font-size="12" fill="var(--inner)">m</text></g>
+    <g class="n" style="animation-delay:.3s"><rect x="50" y="108" width="60" height="26" rx="6" fill="var(--inner-soft)" stroke="var(--inner)"/><text x="80" y="126" text-anchor="middle" font-size="12" fill="var(--inner)">d</text></g>
+    <g class="n" style="animation-delay:.4s"><rect x="230" y="108" width="60" height="26" rx="6" fill="var(--inner-soft)" stroke="var(--inner)"/><text x="260" y="126" text-anchor="middle" font-size="12" fill="var(--inner)">s</text></g>
+    <g class="n" style="animation-delay:.6s"><rect x="14" y="186" width="56" height="24" rx="6" fill="var(--leaf-soft)" stroke="var(--leaf)"/><text x="42" y="203" text-anchor="middle" font-size="11" fill="var(--leaf)">a b c</text></g>
+    <g class="n" style="animation-delay:.7s"><rect x="94" y="186" width="56" height="24" rx="6" fill="var(--leaf-soft)" stroke="var(--leaf)"/><text x="122" y="203" text-anchor="middle" font-size="11" fill="var(--leaf)">d h k</text></g>
+    <g class="n" style="animation-delay:.8s"><rect x="194" y="186" width="56" height="24" rx="6" fill="var(--leaf-soft)" stroke="var(--leaf)"/><text x="222" y="203" text-anchor="middle" font-size="11" fill="var(--leaf)">m p r</text></g>
+    <g class="n" style="animation-delay:.9s"><rect x="274" y="186" width="56" height="24" rx="6" fill="var(--leaf-soft)" stroke="var(--leaf)"/><text x="302" y="203" text-anchor="middle" font-size="11" fill="var(--leaf)">s v z</text></g>
+  </svg>
+  <div class="eyebrow">OAKDB · 처음 보는 사람을 위한 그림책</div>
+  <h1>데이터베이스는<br>어떻게 움직일까</h1>
+  <p class="lead">DB의 기본 구조부터 우리가 설계한 Oakdb, SQLite와 다른 점, 앞으로 갈 길까지 이어서 설명해요. 모든 그림은 직접 눌러 보고 움직여 볼 수 있어요. 처음부터 차례로 읽어도 되고, 궁금한 장으로 바로 가도 돼요.</p>
+  <div class="parts">
+    <a href="#p1"><div class="pn">PART 1</div><div class="pt">DB의 기본기</div><div class="pd">파일과 무엇이 다른가, 층, 디스크, 트리, 동시성, 정전</div></a>
+    <a href="#p2"><div class="pn">PART 2</div><div class="pt">Oakdb의 설계</div><div class="pd">우리가 내린 결정 12개와 지금까지 만든 것</div></a>
+    <a href="#p3"><div class="pn">PART 3</div><div class="pt">SQLite와 다른 점</div><div class="pd">동시 쓰기, 네트워크 서버, 그리고 대가</div></a>
+    <a href="#p4"><div class="pn">PART 4</div><div class="pt">앞으로의 길</div><div class="pd">충돌 판정, 그룹 커밋, 체크포인트, SQL, 최종 증명</div></a>
+  </div>
+</header>
+
+<nav class="toc"><div class="wrap">
+  <a class="part" href="#p1">1 기본기</a><a href="#c11">파일 vs DB</a><a href="#c12">DB의 층</a><a href="#c13">디스크</a><a href="#c14">트리</a><a href="#c15">B+Tree·LSM</a><a href="#c16">동시성</a><a href="#c17">정전·로그</a>
+  <a class="part" href="#p2">2 Oakdb</a><a href="#c21">결정 12개</a><a href="#c22">페이지</a><a href="#c23">트리</a><a href="#c24">검증</a>
+  <a class="part" href="#p3">3 SQLite</a><a href="#c31">동시 쓰기</a><a href="#c32">서버</a><a href="#c33">비교표</a><a href="#c34">대가</a>
+  <a class="part" href="#p4">4 앞으로</a><a href="#c41">지도</a><a href="#c42">충돌 판정</a><a href="#c43">그룹 커밋</a><a href="#c44">체크포인트</a><a href="#c45">SQL→키</a><a href="#c46">최종 증명</a><a href="#gl">용어</a>
+</div></nav>
+
+<!-- ================= PART 1 ================= -->
+<div class="wrap">
+<div class="partbanner" id="p1"><div class="num">PART 1</div><h2>DB의 기본기</h2><p>데이터베이스는 결국 "디스크의 파일에 데이터를 저장하는 프로그램"이에요. 그런데 왜 파일에 그냥 쓰지 않고 이렇게 복잡한 걸 만들까요? 일곱 장에 걸쳐 차근차근 알아봐요.</p></div>
+
+<!-- 1-1 -->
+<section class="ch reveal" id="c11">
+  <span class="chno">1-1</span>
+  <h3>그냥 파일에 쓰면 안 될까?</h3>
+  <p>A 계좌에서 B 계좌로 30원을 보내 볼게요. 컴퓨터는 이 일을 <b>두 번에 나눠서</b> 해요. A에서 빼고, B에 더하고요. 그 사이에 정전이 나면 어떻게 될까요?</p>
+  <div class="card">
+    <div class="controls">
+      <span class="segctl" id="tfMode"><button data-m="file" class="on">📄 그냥 파일</button><button data-m="db">🗄 DB 트랜잭션</button></span>
+      <button class="primary" id="tfStart">▶ 이체 시작</button>
+      <button class="danger" id="tfCrash" disabled>💥 지금 정전!</button>
+      <button id="tfReset">다시</button>
+    </div>
+    <div class="accts">
+      <div class="acct" id="tfAbox"><div class="nm">A 계좌 (디스크)</div><div class="v" id="tfA">100</div></div>
+      <div class="arrowmoney">→ 30원 →</div>
+      <div class="acct" id="tfBbox"><div class="nm">B 계좌 (디스크)</div><div class="v" id="tfB">0</div></div>
+      <div class="memo" id="tfMemo" style="display:none"><div class="t">트랜잭션 메모장 (메모리)</div><div id="tfMemoBody">(비어 있음)</div></div>
+    </div>
+    <div class="total" id="tfTotal">합계 100원</div>
+    <div class="log" id="tfLog">▶을 누르고, 진행 중에 💥 버튼을 눌러 보세요. 두 모드에서 각각 해 보면 차이가 보여요.</div>
+  </div>
+  <p>그냥 파일에 쓰면 정전 한 번에 돈이 사라질 수 있어요. DB는 이런 일이 생기지 않도록 네 가지를 약속해요. 머리글자를 따서 <b>ACID</b>라고 불러요.</p>
+  <div class="acid">
+    <div><div class="L">A</div><div class="n">원자성 · 전부 아니면 전무</div><div class="d">이체의 두 단계는 둘 다 되거나 둘 다 안 돼요. 반만 되는 일은 없어요.</div></div>
+    <div><div class="L">C</div><div class="n">일관성 · 규칙 지키기</div><div class="d">"잔액은 음수가 될 수 없다" 같은 규칙이 늘 지켜져요.</div></div>
+    <div><div class="L">I</div><div class="n">격리성 · 서로 안 섞이기</div><div class="d">여러 사람이 동시에 써도 서로의 반쯤 한 일이 보이지 않아요. → 1-6</div></div>
+    <div><div class="L">D</div><div class="n">지속성 · OK면 남는다</div><div class="d">"저장했어요"라고 답한 데이터는 정전이 나도 남아요. → 1-7</div></div>
+  </div>
+  <div class="term"><b>트랜잭션(transaction)</b>: "이 작업들은 한 덩어리"라고 묶은 단위예요. 시작(<code>BEGIN</code>) → 읽고 쓰기 → <b>커밋(COMMIT, 확정)</b> 또는 <b>롤백(ROLLBACK, 없던 일로)</b>. Spring의 <code>@Transactional</code>이 바로 이걸 DB에 부탁하는 거예요.</div>
+</section>
+
+<!-- 1-2 -->
+<section class="ch reveal" id="c12">
+  <span class="chno">1-2</span>
+  <h3>DB 안은 층으로 나뉘어 있다</h3>
+  <p>SQL 한 줄이 들어오면 DB 안에서 여러 층을 거쳐 디스크까지 내려갔다가 돌아와요. 아래에서 명령을 골라 ▶을 눌러 보세요. 노란 공이 층을 따라 움직여요. 오른쪽 배지는 Oakdb에서 그 층을 얼마나 만들었는지예요.</p>
+  <div class="card">
+    <div class="controls">
+      <span class="segctl" id="qSel"><button data-q="sel" class="on">SELECT 읽기</button><button data-q="ins">INSERT 쓰기</button><button data-q="com">COMMIT 확정</button></span>
+      <button class="primary" id="qRun">▶ 실행</button>
+    </div>
+    <div class="small mono" id="qText" style="margin-bottom:10px"></div>
+    <div class="stackwrap">
+      <div class="stack" id="stack"><div class="token" id="token" style="top:-40px"></div></div>
+      <div><div class="small" style="margin-bottom:6px">지나간 길</div><div class="trace" id="trace"><div>▶을 눌러 보세요.</div></div></div>
+    </div>
+  </div>
+  <div class="analogy"><b>비유: 식당.</b> 손님(클라이언트)이 주문서(SQL)를 내면, 홀 직원(서버)이 받아서 주방장(파서·실행기)에게 넘겨요. 주방장은 레시피대로 냉장고(B+Tree)에서 재료를 꺼내요. 냉장고에 없으면 창고(디스크)까지 가요. 주문이 확정(커밋)되면 장부(로그)에 먼저 적어요.</div>
+</section>
+
+<!-- 1-3 -->
+<section class="ch reveal" id="c13">
+  <span class="chno">1-3</span>
+  <h3>디스크는 엄청나게 느리다. 그래서 "페이지"로 다룬다</h3>
+  <p>컴퓨터가 데이터를 가져오는 곳마다 걸리는 시간이 아주 달라요. 너무 작은 숫자라 감이 안 오니까 <b>1나노초를 1초로 늘려서</b> 볼게요.</p>
+  <div class="card">
+    <div class="controls"><button class="primary" id="latRun">▶ 달려 보기</button><span class="small">막대는 로그 눈금이에요. 한 칸 길어질 때마다 10배씩 커져요.</span></div>
+    <div class="lat" id="lat"></div>
+  </div>
+  <p>그래서 DB는 디스크에 가는 횟수를 줄이는 데 온 힘을 써요. 첫 번째 방법이 <b>한 번 갈 때 크게 가져오기</b>예요. 디스크는 1바이트만 달라고 해도 어차피 정해진 크기의 덩어리를 통째로 읽어요. 아래 칸 아무 데나 눌러 보세요.</p>
+  <div class="card">
+    <div class="blocks" id="blocks"></div>
+    <div class="log" id="blkLog">작은 칸 하나는 512바이트예요. 하나를 눌러 보세요.</div>
+  </div>
+  <div class="term"><b>페이지(page)</b>: DB가 디스크와 주고받는 고정 크기 덩어리예요. Oakdb와 SQLite는 <b>4KB</b>를 써요. 운영체제의 메모리 페이지, ft_malloc에서 mmap으로 받은 페이지와 같은 생각이에요. "어차피 4KB를 읽을 거라면, 서로 관련 있는 데이터를 한 페이지에 모아 두자."</div>
+
+  <div class="qa">
+    <div class="qh">❓ 내가 물어본 것 · 2026-11-12</div>
+    <div class="qq">여기서 말하는 "디스크"를 SSD라고 생각해도 되나?</div>
+    <p><b>네.</b> "디스크"는 <b>전원이 꺼져도 남는 저장 장치</b>를 뜻하고, 요즘은 대부분 SSD예요. 실험 0002도 Mac 내장 SSD에서 쟀어요. 이름이 "디스크"인 건 원판이 돌던 하드디스크(HDD) 시절의 흔적이에요. B+Tree도 그 시절에 나왔어요. 바늘이 한 번 움직이는 데 약 10ms나 걸려서, 한 번 읽을 때 수백 갈래를 담아 트리를 낮게 만들었어요. SSD는 HDD보다 100배쯤 빠르지만 RAM보다는 여전히 1,000배쯤 느려요. 그래서 "디스크에 가는 횟수를 줄인다"는 원칙은 그대로예요.</p>
+    <p><b>그런데 sync가 3ms인 건 SSD가 느려서가 아니에요.</b> SSD 안에도 작은 임시 메모리(캐시)가 있어요. 아래에서 sync 방식을 고르고, 기록한 다음 💥를 눌러 보세요.</p>
+    <div class="controls">
+      <span class="segctl" id="ssdMode"><button data-m="fsync" class="on">macOS fsync</button><button data-m="full">F_FULLFSYNC</button></span>
+      <button class="primary" id="ssdWrite">✍️ 기록하고 sync</button><button class="danger" id="ssdCrash">💥 정전</button><button id="ssdReset">다시</button>
+    </div>
+    <div class="ssdpath">
+      <div class="sp" id="sp0"><div class="spn">내 프로그램</div><div class="spd">메모리</div></div><div class="sa">→</div>
+      <div class="sp" id="sp1"><div class="spn">OS 캐시</div><div class="spd">메모리</div></div><div class="sa">→</div>
+      <div class="sp" id="sp2"><div class="spn">SSD 안의 캐시</div><div class="spd">메모리 ⚡</div></div><div class="sa">→</div>
+      <div class="sp safe" id="sp3"><div class="spn">저장 칩 (NAND)</div><div class="spd">전원 꺼져도 남음</div></div>
+    </div>
+    <div class="log" id="ssdLog">sync 방식을 고르고 "기록하고 sync"를 눌러 보세요.</div>
+    <p class="small" style="margin-top:10px">실험 0002의 <b>93배</b>(fsync 32µs vs F_FULLFSYNC 3ms) 차이가 바로 이 마지막 한 칸이에요. 그러니 위 막대의 "35일"은 SSD의 속도라기보다 <b>"진짜로 남았다고 확인하는 비용"</b>이에요. 그리고 SSD도 4KB 한 장을 전부 아니면 전무로 써 준다는 보장은 없어요. 그래서 Oakdb는 장치를 믿지 않고 <b>체크섬(#19)</b>으로 알아채고 <b>WAL의 페이지 전체 사본(#22)</b>으로 고쳐요.</p>
+  </div>
+</section>
+
+<!-- 1-4 -->
+<section class="ch reveal" id="c14">
+  <span class="chno">1-4</span>
+  <h3>왜 하필 "트리"인가: 찾기 놀이</h3>
+  <p>정렬된 칸 64개 중에서 숫자 하나를 찾아볼게요. 하나씩 훑는 방법과 트리로 찾는 방법(한 번에 4갈래로 좁히기)을 비교해요.</p>
+  <div class="card">
+    <div class="controls">찾을 숫자 <input type="number" id="sTarget" value="152"><button class="primary" id="sLin">하나씩 훑기</button><button class="primary" id="sTree">트리로 찾기 (4갈래)</button></div>
+    <div class="arr" id="arr"></div>
+    <div class="log" id="sLog">두 버튼을 차례로 눌러 보세요. 몇 번 만에 찾는지 세어 줘요.</div>
+  </div>
+  <p>칸이 64개일 때는 차이가 작아 보여요. 그런데 데이터가 많아지면 어떨까요? 아래에서 데이터 개수와 갈래 수를 바꿔 보세요.</p>
+  <div class="card">
+    <div class="controls">데이터 개수 <input type="range" id="nRange" min="1" max="9" value="6" style="width:200px"> <b id="nLabel" class="mono"></b>
+      &nbsp; 한 페이지의 갈래 수 <select id="fanSel"><option value="4">4 (위 놀이)</option><option value="100">100</option><option value="300" selected>300 (작은 키의 4KB 페이지)</option></select></div>
+    <div class="bigcount">
+      <div><div class="k">하나씩 훑기 (평균)</div><div class="v" id="cLin"></div><div class="k" id="cLinT"></div></div>
+      <div><div class="k">B+Tree로 찾기 (페이지를 읽는 횟수 = 트리 높이)</div><div class="v" id="cTree" style="color:var(--leaf)"></div><div class="k" id="cTreeT"></div></div>
+    </div>
+    <p class="small">시간은 "페이지 한 장을 디스크에서 읽는 데 100µs"로 잡고 계산했어요.</p>
+  </div>
+  <div class="analogy"><b>비유: 도서관.</b> 입구 안내판(루트)에 "가~마는 1층, 바~아는 2층"이 적혀 있어요. 층 안내판(내부 페이지)에는 "가~나는 3번 책장". 책장(<b>리프</b>)에 진짜 책(데이터)이 있어요. 그리고 책장끼리는 옆으로 이어져 있어서, "가부터 다까지" 같은 범위는 옆 책장으로 넘어가며 읽어요. 이 옆 연결이 B<b>+</b>Tree의 "+"예요.</div>
+  <div class="term"><b>B+Tree</b>: 한 노드(=페이지 한 장)가 수백 갈래로 나뉘는 넓고 낮은 트리예요. 넓어서 낮고, 낮아서 디스크에 적게 가요. 데이터는 맨 아래 리프에만 있고, 리프끼리 사슬로 이어져 있어요. Java의 <code>TreeMap</code>은 갈래가 2개인 이진 트리(레드-블랙)라서 메모리에는 좋지만 디스크에는 너무 깊어요.</div>
+</section>
+
+<!-- 1-5 -->
+<section class="ch reveal" id="c15">
+  <span class="chno">1-5</span>
+  <h3>쓰는 방식은 크게 두 갈래: B+Tree와 LSM</h3>
+  <p>데이터를 고칠 때 <b>제자리에서 고치는</b> 방식과, <b>일단 새로 쌓아 두고 나중에 정리하는</b> 방식이 있어요. "쓰기"를 눌러서 두 방식을 비교해 보세요.</p>
+  <div class="card">
+    <div class="controls"><button class="primary" id="wOne">쓰기 1번</button><button id="wMany">쓰기 12번</button><button id="wReset">처음부터</button></div>
+    <div class="grid2">
+      <div><h4 style="margin-top:0">🌳 B+Tree (Oakdb, SQLite, MySQL, PostgreSQL)</h4><div class="pagesgrid" id="bpPages"></div><p class="small" id="bpLog">키가 들어 있는 페이지를 찾아가서 그 페이지를 고쳐 써요.</p></div>
+      <div class="lsm"><h4 style="margin-top:0">🪵 LSM (RocksDB, Cassandra)</h4>
+        <div class="lvl"><span class="lb">메모리</span><span id="lsmMem"></span></div>
+        <div class="lvl"><span class="lb">L0 파일</span><span id="lsmL0" style="display:flex;gap:5px;flex-wrap:wrap"></span></div>
+        <div class="lvl"><span class="lb">L1 파일</span><span id="lsmL1" style="display:flex;gap:5px;flex-wrap:wrap"></span></div>
+        <p class="small" id="lsmLog">메모리에 모았다가 꽉 차면 새 파일로 통째로 내려놓아요. 파일이 쌓이면 합쳐요(compaction).</p></div>
+    </div>
+  </div>
+  <div class="tablewrap"><table>
+    <tr><th></th><th>B+Tree</th><th>LSM</th></tr>
+    <tr><td>쓰기</td><td>보통. 제자리 고침</td><td>빠름. 덧붙이기만</td></tr>
+    <tr><td>읽기</td><td>빠름. 트리 한 번 내려가기</td><td>여러 파일을 뒤져야 할 수 있음</td></tr>
+    <tr><td>어려운 점</td><td>반쯤 쓴 페이지(정전), 여러 명이 같은 페이지를 고칠 때</td><td>합치기(compaction)가 뒤에서 계속 돎</td></tr>
+    <tr><td>Oakdb의 선택</td><td colspan="2"><b>B+Tree</b>. 관계형 DB의 전통 구조이고 SQLite와 정면으로 비교할 수 있어서예요(ADR 0004). 대신 "정전"과 "동시 쓰기"라는 어려운 문제를 직접 풀어야 해요. 그게 바로 이 프로젝트의 핵심이에요.</td></tr>
+  </table></div>
+</section>
+
+<!-- 1-6 -->
+<section class="ch reveal" id="c16">
+  <span class="chno">1-6</span>
+  <h3>두 사람이 동시에 쓰면: 마지막 좌석 한 장</h3>
+  <p>공연의 남은 좌석은 <b>1장</b>이에요. 앨리스와 밥이 동시에 예매를 눌러요. 대책을 하나 고르고 ▶을 눌러 보세요.</p>
+  <div class="card">
+    <div class="controls">
+      <span class="segctl" id="ccMode"><button data-m="none" class="on">대책 없음</button><button data-m="lock">한 줄로 서기 (SQLite)</button><button data-m="si">스냅샷 + 커밋 때 검사 (Oakdb)</button></span>
+      <button class="primary" id="ccRun">▶ 재생</button>
+    </div>
+    <div class="lanes" id="lanes"></div>
+    <div class="log" id="ccLog">방식을 고르고 ▶을 눌러 보세요.</div>
+  </div>
+  <div class="grid3">
+    <div class="card" style="margin:0"><b>대책 없음</b><p class="small">둘 다 "1장 남음"을 읽고 둘 다 팔아요. 좌석 하나에 표가 두 장 나가요. 이걸 <b>잃어버린 업데이트(lost update)</b>라고 해요.</p></div>
+    <div class="card" style="margin:0"><b>한 줄로 서기</b><p class="small">쓰는 사람은 한 번에 한 명만. 안전하지만, 앞 사람이 오래 걸리면(네트워크, 생각하는 시간) 뒷사람은 계속 기다려요.</p></div>
+    <div class="card" style="margin:0"><b>스냅샷 + 커밋 때 검사</b><p class="small">각자 시작 순간의 사진(스냅샷)을 보고 기다림 없이 일해요. 커밋할 때 "내가 고친 걸 그사이 누가 먼저 고쳤나?"만 검사해서, 늦은 쪽을 돌려보내요.</p></div>
+  </div>
+</section>
+
+<!-- 1-7 -->
+<section class="ch reveal" id="c17">
+  <span class="chno">1-7</span>
+  <h3>정전이 나도 남게: 먼저 일기장에 적는다 (WAL)</h3>
+  <p>B+Tree는 페이지를 제자리에서 고쳐요. 고치는 도중에 정전이 나면 페이지가 반만 써질 수 있어요. 그래서 DB는 진짜 파일을 고치기 <b>전에</b>, 무엇을 바꿀지 일기장(로그)에 먼저 적어요. 한 단계씩 진행하다가 아무 때나 💥를 눌러 보세요.</p>
+  <div class="card">
+    <div class="controls"><button class="primary" id="walNext">다음 단계 ▶</button><button class="danger" id="walCrash">💥 정전 → 재시작</button><button id="walReset">처음부터</button></div>
+    <div class="stepdots" id="walDots"></div>
+    <div class="walgrid">
+      <div class="box ram" id="walRam"><div class="bt">🧠 메모리 (정전 나면 사라짐)</div><div id="walRamBody"></div></div>
+      <div class="box" id="walLogBox"><div class="bt">📒 WAL 파일 (일기장, 디스크)</div><div id="walLogBody"></div></div>
+      <div class="box" id="walData"><div class="bt">🗄 데이터 파일 + 메타 (디스크)</div><div id="walDataBody"></div></div>
+    </div>
+    <div class="log" id="walMsg"></div>
+  </div>
+  <div class="analogy"><b>비유: 가계부.</b> 큰 장부(데이터 파일)를 고치는 건 오래 걸리고, 고치다가 쓰러지면 장부가 엉망이 돼요. 그래서 먼저 작은 수첩에 "이렇게 바꿀 것"을 적고 <b>도장(sync)</b>을 찍어요. 도장을 찍은 다음에야 "저장했어요"라고 답해요. 큰 장부는 나중에 여유 있을 때 수첩을 보고 고쳐요. 쓰러졌다 깨어나면 수첩을 처음부터 다시 따라 하면 돼요.</div>
+  <div class="term"><b>WAL(Write-Ahead Log, 먼저 쓰는 로그)</b> · <b>sync</b>: 운영체제 캐시에 있는 데이터를 디스크에 진짜로 내려보내는 명령이에요(macOS <code>F_FULLFSYNC</code>, Linux <code>fdatasync</code>). <b>체크포인트</b>: 로그의 내용을 데이터 파일에 반영하고 "여기까지 반영했음"을 표시하는 일이에요.</div>
+</section>
+</div>
+
+<!-- ================= PART 2 ================= -->
+<div class="wrap">
+<div class="partbanner" id="p2"><div class="num">PART 2</div><h2>Oakdb는 이렇게 설계했다</h2><p>Part 1의 갈림길마다 우리가 어느 쪽을 골랐는지 정리했어요. 카드를 누르면 뒤집혀요. 그다음에는 01~05번 티켓에서 실제로 만든 것을 직접 움직여 봐요.</p></div>
+
+<section class="ch reveal" id="c21">
+  <span class="chno">2-1</span>
+  <h3>우리가 내린 결정 12개</h3>
+  <p class="small">앞면은 질문, 뒷면은 우리의 답과 버린 선택지예요. 하나씩 눌러서 답을 먼저 떠올려 본 다음 뒤집어 보세요.</p>
+  <div class="flips" id="flips"></div>
+</section>
+
+<section class="ch reveal" id="c22">
+  <span class="chno">2-2 · 티켓 01·02</span>
+  <h3>페이지 한 장 = 4096바이트짜리 장부</h3>
+  <p>머리말 아래에 <b>목차(슬롯)</b>는 위에서부터, 실제 항목(<b>셀</b>)은 맨 아래부터 채워요. 지우면 구멍(조각)이 남고, 공간이 모자라면 정리(compact)해서 구멍을 모아요. ft_malloc의 free 블록, 조각 모음과 같은 이야기예요.</p>
+  <div class="card">
+    <div class="controls">
+      키 <input id="pgKey" value="oak" maxlength="6" style="width:80px">
+      값 크기 <select id="pgSize"><option value="100">100B</option><option value="300" selected>300B</option><option value="600">600B</option><option value="1000">1000B</option></select>
+      <button class="primary" id="pgPut">put</button><button id="pgDel">delete</button><button id="pgFill">예시로 채우기</button><button id="pgReset">비우기</button>
+    </div>
+    <div class="pagebar" id="pagebar"></div>
+    <div class="pagescale"><span>0</span><span>← 슬롯은 앞에서부터 · 셀은 뒤에서부터 →</span><span>4096</span></div>
+    <div class="legend">
+      <span><i style="background:var(--ink);border-color:var(--ink)"></i>머리 40B</span>
+      <span><i style="background:var(--inner);border-color:var(--inner)"></i>슬롯 4B씩 (키 순서)</span>
+      <span><i style="background:var(--surface);border-color:var(--line)"></i>빈칸</span>
+      <span><i style="background:var(--leaf);border-color:var(--leaf)"></i>셀</span>
+      <span><i style="background:var(--hole);border-color:var(--hole)"></i>지운 자리(조각)</span>
+    </div>
+    <div class="stats" id="pgStats"></div>
+    <div class="log" id="pgLog">"예시로 채우기"를 누른 다음 pine 1000B를 put 해 보세요. 정리가 일어나요.</div>
+  </div>
+  <div class="grid2">
+    <div class="term" style="margin:0"><b>묘비(tombstone) · 티켓 02</b>: delete는 커밋 전까지 트랜잭션 메모장에 <code>None</code>으로 적어 둬요. "메모장에 없음"(→ 페이지를 읽어라)과 "메모장에 None"(→ 페이지에 있어도 없는 것)을 구분하는 게 핵심이에요.</div>
+    <div class="term" style="margin:0"><b>실패하지 않는 커밋 순서 · 티켓 02</b>: 커밋할 때는 건드리는 키를 <b>전부 먼저 빼고</b> put한 것만 다시 넣어요. 이삿짐처럼 버릴 짐을 먼저 빼야, 결과가 들어가는데도 "공간 부족"으로 실패하는 일이 없어요.</div>
+  </div>
+</section>
+
+<section class="ch reveal" id="c23">
+  <span class="chno">2-3 · 티켓 03·04·05</span>
+  <h3>자라고, 줄어들고, 옆으로 읽는 트리</h3>
+  <p>실제 Oakdb의 규칙 그대로 움직이는 작은 B+Tree예요. 보기 쉽게 크기만 줄여서, 리프는 키 4개, 내부 페이지는 키 3개가 넘으면 나눠요(실제로는 바이트로 재요). 넣고, 지우고, 범위 조회를 해 보세요.</p>
+  <div class="card">
+    <div class="controls">
+      키 <input id="trKey" type="number" value="42" min="1" max="99">
+      <button class="primary" id="trPut">넣기</button><button id="trDel">지우기</button>
+      <button id="trRand">무작위 8개 넣기</button><button id="trAsc">1~20 차례로</button><button id="trDelMany">무작위 8개 지우기</button><button id="trReset">초기화</button>
+    </div>
+    <div class="controls" style="border-top:1px dashed var(--line);padding-top:10px">
+      🔎 범위 조회 <input id="scFrom" type="number" value="10"> 이상 <input id="scTo" type="number" value="40"> 미만 <button class="primary" id="scRun">scan</button>
+      <span class="mono small" id="trHeight"></span>
+    </div>
+    <div class="treebox"><div class="treecanvas" id="trCanvas"></div></div>
+    <div class="legend">
+      <span><i style="background:var(--inner-soft);border-color:var(--inner)"></i>내부 페이지 (목차)</span>
+      <span><i style="background:var(--leaf-soft);border-color:var(--leaf)"></i>리프 (데이터)</span>
+      <span>→ 옆 포인터</span>
+      <span><i style="border-color:var(--hl)"></i>방금 바뀜</span>
+      <span><i style="border-color:var(--oak)"></i>scan이 지나간 곳</span>
+    </div>
+    <div class="scanout" id="scOut"></div>
+    <div class="events" id="trEvents"></div>
+  </div>
+  <div class="tablewrap"><table>
+    <tr><th></th><th>리프가 나뉠 때 (03)</th><th>내부 페이지가 나뉠 때 (04)</th></tr>
+    <tr><td>구분 키</td><td>오른쪽 리프의 첫 키로 <b>남고</b>, 부모에는 <b>복사</b>돼요</td><td>가운데 키가 부모로 <b>올라가고</b>, 아래에는 <b>남지 않아요</b></td></tr>
+    <tr><td>이유</td><td>리프의 키에는 값이 붙어 있어요</td><td>내부 키는 길 안내일 뿐이에요</td></tr>
+  </table></div>
+  <div class="term"><b>05의 <code>Mutex&lt;Arc&lt;Tree&gt;&gt;</code></b>: 커밋은 트리를 제자리에서 고치지 않아요. 바뀐 페이지만 복사한 새 트리를 만들어 <b>통째로 바꿔 끼워요</b>. 조회는 시작할 때 들고 있던 옛 트리를 끝까지 읽으니 중간에 망가지지 않아요. Java의 <code>CopyOnWriteArrayList</code>와 같은 생각이에요. 나중에 <code>begin()</code>할 때 한 번만 잡게 하면 이게 그대로 "스냅샷"이 돼요(#25).</div>
+</section>
+
+<section class="ch reveal" id="c24">
+  <span class="chno">2-4 · 검증</span>
+  <h3>"맞게 만들었다"를 어떻게 증명하나: 정답지와 비교하기</h3>
+  <p>무작위 연산을 Oakdb와 정답지(Rust 표준 <code>BTreeMap</code>)에 똑같이 넣고 결과를 비교해요. 일부러 버그를 심어 놓고 테스트가 잡아내는지도 봐요. ▶을 눌러 보세요.</p>
+  <div class="card">
+    <div class="controls"><button class="primary" id="mtRun">▶ 무작위 연산 12개</button><label class="small"><input type="checkbox" id="mtBug"> 🐛 버그 심기 ("가끔 delete를 잊음")</label></div>
+    <div class="tablewrap"><table class="mt"><thead><tr><th>#</th><th>연산</th><th>Oakdb</th><th>정답지</th><th></th></tr></thead><tbody id="mtBody"></tbody></table></div>
+    <div class="log" id="mtLog"></div>
+  </div>
+  <div class="grid3">
+    <div class="card" style="margin:0"><b>① 초록불</b><p class="small">테스트가 통과했다고 끝이 아니에요. 04번에서 테스트는 통과했지만, "4층으로 자라기" 경로는 <b>0번</b> 지나갔어요.</p></div>
+    <div class="card" style="margin:0"><b>② 지나간 경로 세기</b><p class="small">연산을 섞는 비율을 바꿔서 성장 44번, 낮아지기 48번(64번 중)을 지나가게 했어요.</p></div>
+    <div class="card" style="margin:0"><b>③ 버그 심어 보기</b><p class="small">일부러 심은 버그 5개를 5개 모두 잡았어요(04, 05 모두). 이걸 변이 검사라고 해요.</p></div>
+  </div>
+</section>
+</div>
+
+<!-- ================= PART 3 ================= -->
+<div class="wrap">
+<div class="partbanner" id="p3"><div class="num">PART 3</div><h2>SQLite와 무엇이 다른가</h2><p>SQLite는 세상에서 가장 많이 쓰이는 DB예요. 휴대폰, 브라우저, 비행기에도 들어가 있어요. 뼈대(B+Tree, 4KB 페이지 배치)는 Oakdb와 같아요. 다른 점은 SQLite가 공식 문서에서 스스로 인정하는 두 가지 한계예요.</p></div>
+
+<section class="ch reveal" id="c31">
+  <span class="chno">3-1 · 차이 ①</span>
+  <h3>동시 쓰기: 한 줄로 서기 vs 각자 일하고 창구만 한 줄</h3>
+  <p>클라이언트 여러 명이 거의 동시에 쓰기 트랜잭션을 해요. 각 트랜잭션은 <b>생각·네트워크 시간</b>(파란색) 동안 일하고, 마지막에 <b>sync</b>(갈색, 약 3ms)로 디스크에 기록해요. 숫자를 바꾸고 ▶을 눌러 보세요.</p>
+  <div class="card">
+    <div class="controls">
+      클라이언트 <input type="range" id="gN" min="1" max="8" value="5"> <b id="gNv" class="mono"></b>
+      &nbsp; 생각·네트워크 시간 <input type="range" id="gT" min="0" max="8" value="4"> <b id="gTv" class="mono"></b>
+      <label class="small"><input type="checkbox" id="gGC" checked> Oakdb 그룹 커밋</label>
+      <button class="primary" id="gRun">▶ 재생</button>
+    </div>
+    <div class="gtitle"><b>🪶 SQLite: 쓰기 잠금을 BEGIN부터 COMMIT까지 쥠</b><span class="gtime" id="gSqT"></span></div>
+    <div class="gantt" id="gSq"></div>
+    <div class="gtitle"><b>🌳 Oakdb: 실행은 동시에, 커밋 창구만 한 줄</b><span class="gtime" id="gOkT" style="color:var(--leaf)"></span></div>
+    <div class="gantt" id="gOk"></div>
+    <div class="legend"><span><i style="background:var(--inner);border-color:var(--inner)"></i>생각·네트워크 (일하는 중)</span><span><i style="background:var(--hole);border-color:var(--hole)"></i>기다림</span><span><i style="background:var(--oak);border-color:var(--oak)"></i>sync (색이 같으면 한 번의 sync를 같이 씀)</span></div>
+    <div class="log" id="gLog"></div>
+    <p class="small">⚠️ 개념을 보여 주는 그림이에요. 실제 측정은 #30(동시 쓰기 벤치마크)에서 해요. sync 3ms는 우리 Mac에서 잰 값(실험 0002)이에요.</p>
+  </div>
+  <div class="analogy"><b>비유: 은행.</b> SQLite는 창구 직원이 한 명이고, 손님이 서류를 <b>창구 앞에서</b> 작성해요. 앞 손님이 고민하는 동안 뒷사람은 모두 서 있어요. Oakdb는 손님들이 각자 테이블에서 서류를 쓰고, 다 쓴 사람만 창구에 줄을 서요. 게다가 창구 직원은 줄 선 서류를 <b>한꺼번에</b> 도장 찍어요(그룹 커밋).</div>
+  <p class="small">※ SQLite의 WAL 모드에서는 읽기는 쓰기와 동시에 할 수 있어요. 하지만 <b>쓰기는 여전히 한 번에 하나</b>예요.</p>
+</section>
+
+<section class="ch reveal" id="c32">
+  <span class="chno">3-2 · 차이 ②</span>
+  <h3>라이브러리 vs 서버</h3>
+  <div class="grid2">
+    <div class="card" style="margin:0">
+      <b>🪶 SQLite: 앱 안에 들어가는 라이브러리</b>
+      <svg viewBox="0 0 400 230" width="100%">
+        <rect x="20" y="20" width="160" height="100" rx="12" fill="var(--surface2)" stroke="var(--line)"/><text x="100" y="42" text-anchor="middle" font-size="13" fill="var(--ink)">내 앱 프로세스</text>
+        <rect x="45" y="58" width="110" height="44" rx="9" fill="var(--oak-soft)" stroke="var(--oak)"/><text x="100" y="85" text-anchor="middle" font-size="13" fill="var(--oak)">SQLite</text>
+        <rect x="60" y="165" width="80" height="44" rx="8" fill="var(--leaf-soft)" stroke="var(--leaf)"/><text x="100" y="192" text-anchor="middle" font-size="12" fill="var(--leaf)">app.db</text>
+        <line x1="100" y1="102" x2="100" y2="165" stroke="var(--oak)" stroke-width="2"/>
+        <circle r="5" fill="var(--hl)"><animateMotion dur="1.4s" repeatCount="indefinite" path="M100,102 L100,165"/></circle>
+        <rect x="240" y="20" width="140" height="60" rx="12" fill="var(--surface2)" stroke="var(--line)"/><text x="310" y="46" text-anchor="middle" font-size="12" fill="var(--ink)">다른 컴퓨터의</text><text x="310" y="64" text-anchor="middle" font-size="12" fill="var(--ink)">클라이언트</text>
+        <path d="M240,60 C200,110 170,160 140,180" fill="none" stroke="var(--warn)" stroke-width="2" stroke-dasharray="6 5"/>
+        <text x="225" y="140" font-size="26" fill="var(--warn)">✕</text>
+        <text x="250" y="170" font-size="11" fill="var(--muted)">네트워크로는</text><text x="250" y="186" font-size="11" fill="var(--muted)">붙을 수 없어요</text>
+      </svg>
+      <p class="small">함수 호출 한 번이면 DB에 닿아요. 그래서 엄청 빠르고 간단해요. 대신 다른 컴퓨터에서 붙으려면 클라이언트/서버 DB를 쓰라고 SQLite 문서가 직접 권해요.</p>
+    </div>
+    <div class="card" style="margin:0">
+      <b>🌳 Oakdb: 서버 프로세스 + 여러 클라이언트</b>
+      <svg viewBox="0 0 400 230" width="100%">
+        <g font-size="12">
+          <rect x="10" y="15" width="90" height="36" rx="8" fill="var(--inner-soft)" stroke="var(--inner)"/><text x="55" y="38" text-anchor="middle" fill="var(--inner)">CLI</text>
+          <rect x="10" y="95" width="90" height="36" rx="8" fill="var(--inner-soft)" stroke="var(--inner)"/><text x="55" y="118" text-anchor="middle" fill="var(--inner)">웹 서버</text>
+          <rect x="10" y="175" width="90" height="36" rx="8" fill="var(--inner-soft)" stroke="var(--inner)"/><text x="55" y="198" text-anchor="middle" fill="var(--inner)">AI 에이전트</text>
+        </g>
+        <rect x="210" y="60" width="170" height="110" rx="12" fill="var(--surface2)" stroke="var(--line)"/><text x="295" y="82" text-anchor="middle" font-size="13" fill="var(--ink)">oakdb-server</text>
+        <rect x="235" y="95" width="120" height="50" rx="9" fill="var(--oak-soft)" stroke="var(--oak)"/><text x="295" y="125" text-anchor="middle" font-size="13" fill="var(--oak)">엔진</text>
+        <g stroke="var(--inner)" stroke-width="1.6" fill="none"><path id="pk1" d="M100,33 C160,33 170,100 210,110"/><path id="pk2" d="M100,113 L210,115"/><path id="pk3" d="M100,193 C160,193 170,130 210,122"/></g>
+        <circle r="5" fill="var(--hl)"><animateMotion dur="1.6s" repeatCount="indefinite"><mpath href="#pk1"/></animateMotion></circle>
+        <circle r="5" fill="var(--hl)"><animateMotion dur="1.2s" begin=".4s" repeatCount="indefinite"><mpath href="#pk2"/></animateMotion></circle>
+        <circle r="5" fill="var(--hl)"><animateMotion dur="1.9s" begin=".8s" repeatCount="indefinite"><mpath href="#pk3"/></animateMotion></circle>
+        <text x="130" y="225" font-size="11" fill="var(--muted)">TCP · 직접 만든 이진 규칙</text>
+      </svg>
+      <p class="small">접속마다 자기 트랜잭션을 가져요. 접속이 끊기면 그 트랜잭션은 자동으로 롤백돼요(스펙 #12).</p>
+    </div>
+  </div>
+  <h4>통신 규칙 맛보기: 메시지는 [길이][명령][데이터]</h4>
+  <p class="small">네트워크로는 바이트만 오가요. 그래서 "메시지가 어디서 끝나는지"를 맨 앞의 길이로 알려 줘요. 아래에 SQL을 써 보세요. (예시 형식이에요. 실제 세부 규칙은 #36에서 정해요.)</p>
+  <div class="card">
+    <input id="frIn" value="SELECT * FROM t WHERE id = 7" style="width:100%">
+    <div class="bytes" id="frOut"></div>
+    <div class="legend"><span><i style="background:var(--inner-soft);border-color:var(--inner)"></i>길이 4바이트 (빅 엔디언)</span><span><i style="background:var(--hl-soft);border-color:var(--hl)"></i>명령 1바이트 (0x01 = 쿼리)</span><span><i style="background:var(--leaf-soft);border-color:var(--leaf)"></i>데이터 (UTF-8)</span></div>
+  </div>
+</section>
+
+<section class="ch reveal" id="c33">
+  <span class="chno">3-3</span>
+  <h3>한눈에 보는 비교표</h3>
+  <div class="tablewrap"><table>
+    <tr><th>항목</th><th>🪶 SQLite</th><th>🌳 Oakdb (목표)</th><th>왜 다르게?</th></tr>
+    <tr><td>기본 구조</td><td>B+Tree 위의 관계형 DB</td><td><b>같음</b></td><td>차이를 두 가지로만 좁혀서 벤치마크 차이를 설명하기 쉽게 (ADR 0004)</td></tr>
+    <tr><td>페이지 배치</td><td>4KB, 슬롯 앞·셀 뒤, overflow</td><td><b>같음</b> (+ 슬롯에 길이도 넣음)</td><td>검증된 공개 설계를 기준점으로 (ADR 0008)</td></tr>
+    <tr><td>동시 쓰기</td><td>한 번에 하나</td><td><b>여러 트랜잭션이 동시에 실행</b>, 커밋만 한 줄</td><td>차별점 ① (ADR 0005, 0006)</td></tr>
+    <tr><td>접속</td><td>앱에 내장</td><td><b>네트워크 서버</b> + CLI</td><td>차별점 ② (ADR 0005)</td></tr>
+    <tr><td>격리 수준</td><td>쓰기가 한 줄이라 사실상 직렬(serializable)</td><td><b>스냅샷 격리</b> (write skew 허용)</td><td>동시 실행의 대가 → 3-4</td></tr>
+    <tr><td>장애 복구</td><td>롤백 저널(기본) 또는 WAL 모드</td><td><b>redo 전용 WAL</b> + 페이지 전체 사본</td><td>커밋 전에는 트리를 안 건드리니 undo가 필요 없어요 (ADR 0007)</td></tr>
+    <tr><td>디스크 기록</td><td>커밋마다 sync</td><td><b>그룹 커밋</b> (여러 커밋이 sync 한 번을 나눠 씀)</td><td>커밋 시간의 99.9%가 sync (실험 0002)</td></tr>
+    <tr><td>페이지 체크섬</td><td>기본은 없음 (확장 기능으로 가능)</td><td><b>모든 페이지에 CRC-32C</b> + 페이지 번호</td><td>조용히 망가진 페이지를 잡으려고 (ADR 0008)</td></tr>
+    <tr><td>운영체제</td><td>거의 모든 곳</td><td>macOS + Linux, 같은 내구성</td><td>개발은 Mac, 서버는 Linux (ADR 0003)</td></tr>
+    <tr><td>성숙도</td><td>20년 넘게, 테스트 코드가 본체의 수백 배</td><td>학습용 v1</td><td>목표는 이기는 게 아니라 <b>"이 두 가지만큼은 낫다"를 숫자로 보이기</b></td></tr>
+  </table></div>
+</section>
+
+<section class="ch reveal" id="c34">
+  <span class="chno">3-4 · 솔직한 대가</span>
+  <h3>스냅샷 격리의 구멍: write skew</h3>
+  <p>병원 규칙: <b>당직 의사는 최소 1명</b>. 지금 앨리스와 밥, 둘 다 당직이에요. 둘이 동시에 "나 빠져도 되나?"를 확인하고 빠져요. 둘은 서로 <b>다른 키</b>(자기 이름)를 고쳐요.</p>
+  <div class="card">
+    <div class="controls"><span class="segctl" id="wsMode"><button data-m="sq" class="on">SQLite 방식</button><button data-m="ok">Oakdb 방식</button></span><button class="primary" id="wsRun">▶ 재생</button></div>
+    <div class="lanes" id="wsLanes"></div>
+    <div class="log" id="wsLog"></div>
+  </div>
+  <div class="warnbox"><b>왜 받아들였나.</b> 이걸 막으려면 "읽은 것"까지 추적하는 직렬 격리(serializable)가 필요한데, 2개월 범위에서는 너무 커요. 그래서 <b>write skew는 허용하고 문서에 분명히 적기로</b> 했어요(ADR 0006, 스펙 Out of Scope). PostgreSQL과 Oracle의 기본 격리 수준도 이 구멍이 있는 쪽이에요. 막아야 하는 규칙이 있으면 둘이 같은 키(예: "당직 인원 수")를 함께 고치게 만들면 충돌 판정에 걸려요.</div>
+</section>
+</div>
+
+<!-- ================= PART 4 ================= -->
+<div class="wrap">
+<div class="partbanner" id="p4"><div class="num">PART 4</div><h2>앞으로의 길</h2><p>27개 티켓 중 4개를 merge했고, 05는 PR이 열려 있어요. 남은 길을 지도로 보고, 앞으로 만들 핵심 장치들을 미리 움직여 봐요.</p></div>
+
+<section class="ch reveal" id="c41">
+  <span class="chno">4-1</span>
+  <h3>여행 지도</h3>
+  <p class="small">역을 누르면 그 구간에서 무엇을 만드는지 볼 수 있어요.</p>
+  <div class="roadtrack"><div class="rail" id="rail"><div class="line"></div><div class="done" id="railDone"></div><div class="train" id="train" style="left:30px">🚂</div></div></div>
+  <div class="card" id="stDetail"></div>
+</section>
+
+<section class="ch reveal" id="c42">
+  <span class="chno">4-2 · 티켓 13·14</span>
+  <h3>충돌 판정: 먼저 커밋한 사람이 이긴다</h3>
+  <p>두 트랜잭션이 같은 사진(스냅샷 v1)에서 출발해요. T1은 키 <code>x</code>를 고쳐요. T2가 무엇을 고칠지, 누가 먼저 커밋할지 골라 보세요.</p>
+  <div class="card">
+    <div class="controls">
+      T2가 고치는 키 <span class="segctl" id="fcKey"><button data-k="x" class="on">x (같은 키)</button><button data-k="y">y (다른 키)</button></span>
+      먼저 커밋 <span class="segctl" id="fcOrd"><button data-o="1" class="on">T1</button><button data-o="2">T2</button></span>
+      <button class="primary" id="fcRun">▶ 재생</button>
+    </div>
+    <svg id="fcSvg" viewBox="0 0 760 210" width="100%"></svg>
+    <div class="log" id="fcLog"></div>
+  </div>
+  <div class="term"><b>first-committer-wins</b>: 커밋 창구에서 "내가 쓴 키 중에 내 스냅샷 이후 누가 먼저 커밋한 게 있나?"만 확인해요. 있으면 충돌 오류를 돌려주고, 클라이언트는 다시 시도하면 돼요. 페이지가 아니라 <b>키</b> 단위로 보기 때문에, 같은 페이지에 있는 다른 키를 고친 트랜잭션끼리는 부딪치지 않아요.</div>
+</section>
+
+<section class="ch reveal" id="c43">
+  <span class="chno">4-3 · 티켓 16</span>
+  <h3>그룹 커밋: 셔틀버스</h3>
+  <p>커밋(점)이 정류장에 도착해요. 버스 한 번 운행이 sync 한 번(약 3ms)이에요. 그룹 커밋을 끄면 버스에 한 명씩만 타요. 켜면 기다리던 사람이 <b>모두 함께</b> 타요. 커밋이 오는 속도를 올려 보세요.</p>
+  <div class="card">
+    <div class="controls">
+      커밋이 오는 속도 <input type="range" id="busRate" min="1" max="12" value="4"> <b id="busRateV" class="mono"></b>
+      <label class="small"><input type="checkbox" id="busGC" checked> 그룹 커밋</label>
+      <button id="busReset">다시</button>
+    </div>
+    <canvas id="busCv" height="200"></canvas>
+    <div class="counter">
+      <div><div class="k">처리한 커밋</div><div class="v" id="busDone">0</div></div>
+      <div><div class="k">버스 운행(sync) 횟수</div><div class="v" id="busTrips">0</div></div>
+      <div><div class="k">초당 커밋 (sync 3ms 기준)</div><div class="v" id="busTput" style="color:var(--leaf)">0</div></div>
+      <div><div class="k">기다리는 커밋</div><div class="v" id="busWait">0</div></div>
+    </div>
+  </div>
+  <p class="small">그룹 커밋 없이는 초당 약 330번(1초 ÷ 3ms)이 천장이에요. 이 숫자는 실험 0002에서 나왔어요. 그룹 커밋은 sync 한 번에 여러 커밋을 실어서 천장을 높여요. 그래도 약속은 같아요. 각 커밋은 자기가 탄 버스가 도착한 다음에야 OK를 받아요.</p>
+</section>
+
+<section class="ch reveal" id="c44">
+  <span class="chno">4-4 · 티켓 10·11</span>
+  <h3>체크포인트와 메타 슬롯 두 개: 번갈아 쓰는 책갈피</h3>
+  <p>WAL은 계속 길어지니 가끔 데이터 파일에 반영(체크포인트)하고 "여기까지 반영함"을 책갈피(메타 슬롯)에 적어요. 책갈피를 <b>두 개 번갈아</b> 쓰는 이유를 단계별로 보세요.</p>
+  <div class="card">
+    <div class="controls"><button class="primary" id="ckNext">다음 단계 ▶</button><button id="ckReset">처음부터</button></div>
+    <div class="stepdots" id="ckDots"></div>
+    <div class="walgrid">
+      <div class="box"><div class="bt">📒 WAL</div><div id="ckWal"></div></div>
+      <div class="box"><div class="bt">🗄 데이터 파일</div><div id="ckData"></div></div>
+      <div class="box"><div class="bt">🔖 메타 슬롯 A · B (페이지 0, 1)</div><div id="ckMeta"></div></div>
+    </div>
+    <div class="log" id="ckLog"></div>
+  </div>
+</section>
+
+<section class="ch reveal" id="c45">
+  <span class="chno">4-5 · 티켓 19~23</span>
+  <h3>SQL 행은 어떻게 키-값이 되나</h3>
+  <p>지금 엔진은 키-값만 알아요. SQL 계층은 테이블의 행을 <b>키 = [테이블 번호][기본 키]</b>, <b>값 = 나머지 열</b>로 바꿔서 저장해요. 그런데 숫자를 바이트로 바꾸는 순서를 잘못 고르면 <b>정렬이 깨져요</b>. B+Tree는 바이트를 사전 순으로 비교하거든요. 숫자를 바꿔 넣어 보세요.</p>
+  <div class="card">
+    <div class="controls">테이블 번호 <input type="number" id="keTab" value="1" min="0" max="255"> 기본 키들 <input id="kePks" value="1, 2, 255, 256, 3" style="width:220px"></div>
+    <div class="grid2">
+      <div><b>✅ 빅 엔디언 (큰 자리부터)</b><div class="small">바이트 사전 순 = 숫자 순</div><div class="keyrows" id="keBE"></div></div>
+      <div><b>❌ 리틀 엔디언 (작은 자리부터)</b><div class="small">바이트 사전 순 ≠ 숫자 순</div><div class="keyrows" id="keLE"></div></div>
+    </div>
+    <div class="log" id="keLog"></div>
+  </div>
+  <div class="term">그래서 스펙에서 "키는 테이블 식별자 + 기본 키를 <b>정렬 순서가 유지되는 바이트</b>로"라고 정했어요. 그래야 <code>WHERE id BETWEEN 10 AND 20</code>이 05번의 범위 조회 하나로 끝나요. (페이지 안의 정수는 리틀 엔디언이에요. 그건 비교하지 않고 읽기만 하는 값이라 괜찮아요.)</div>
+</section>
+
+<section class="ch reveal" id="c46">
+  <span class="chno">4-6 · 티켓 30·39</span>
+  <h3>마지막 증명: 이 그래프 하나</h3>
+  <p>모든 설계는 결국 이 그래프 하나를 그리기 위한 거예요. 클라이언트가 늘어날 때 쓰기 처리량이 어떻게 변하는가.</p>
+  <div class="card">
+    <svg id="finalChart" viewBox="0 0 640 300" width="100%"></svg>
+    <div class="controls"><button class="primary" id="fcDraw">▶ 그려 보기</button></div>
+    <p class="small">⚠️ <b>예상 모양</b>이에요. 아직 측정하지 않았어요. 실제 측정은 #30(엔진)과 #39(네트워크)에서 하고, 결과가 예상과 다르면 그것도 그대로 기록해요. 이게 우리의 A/B 원칙이에요.</p>
+  </div>
+  <div class="grid3">
+    <div class="card" style="margin:0"><b>가설 1</b><p class="small">서로 다른 키를 쓰는 클라이언트가 늘면, SQLite는 거의 그대로이고 Oakdb는 늘어난다.</p></div>
+    <div class="card" style="margin:0"><b>가설 2</b><p class="small">그룹 커밋이 있으면 커밋 처리량이 sync 한 번의 천장(약 330/s)을 넘는다.</p></div>
+    <div class="card" style="margin:0"><b>약속은 그대로</b><p class="small">그러면서도 OK를 받은 커밋은 정전 실험에서 하나도 사라지지 않는다.</p></div>
+  </div>
+</section>
+
+<section class="ch reveal" id="gl">
+  <span class="chno">부록</span>
+  <h3>용어 사전</h3>
+  <div class="gloss">
+    <div><b>페이지</b> · 디스크와 주고받는 4KB 덩어리</div>
+    <div><b>슬롯 / 셀</b> · 페이지 안의 목차 / 실제 항목</div>
+    <div><b>리프 / 내부 페이지</b> · 데이터가 있는 맨 아래 / 길 안내 목차</div>
+    <div><b>분할(split)</b> · 꽉 찬 페이지를 둘로 나누기</div>
+    <div><b>옆 포인터</b> · 리프끼리 잇는 화살표. 범위 조회에 씀</div>
+    <div><b>트랜잭션</b> · 전부 아니면 전무로 묶인 작업 묶음</div>
+    <div><b>커밋 / 롤백</b> · 확정 / 없던 일로</div>
+    <div><b>묘비(tombstone)</b> · "지웠음" 표시 (<code>None</code>)</div>
+    <div><b>스냅샷</b> · 트랜잭션이 시작한 순간의 DB 사진</div>
+    <div><b>스냅샷 격리</b> · 사진을 보고 일하고, 같은 키를 먼저 커밋한 쪽이 이김</div>
+    <div><b>write skew</b> · 다른 키를 고쳐서 규칙이 깨지는 구멍</div>
+    <div><b>WAL</b> · 데이터 파일보다 먼저 쓰는 일기장</div>
+    <div><b>sync (fsync)</b> · 디스크에 진짜로 내려보내는 도장</div>
+    <div><b>그룹 커밋</b> · 여러 커밋이 sync 한 번을 나눠 씀</div>
+    <div><b>체크포인트</b> · WAL 내용을 데이터 파일에 반영</div>
+    <div><b>메타 슬롯</b> · 파일 맨 앞의 책갈피 두 장</div>
+    <div><b>체크섬(CRC-32C)</b> · 페이지가 망가졌는지 알려 주는 지문</div>
+    <div><b>반쯤 쓴 페이지(torn page)</b> · 정전으로 일부만 써진 페이지</div>
+    <div><b>A/B · A/A</b> · 두 버전 비교 / 같은 것끼리 비교(저울 영점)</div>
+    <div><b>변이 검사</b> · 버그를 심어 테스트가 잡는지 확인</div>
+  </div>
+</section>
+</div>
+
+<footer class="wrap">Oakdb 그림책 · 근거: ADR 0001~0008, 스펙 #12, design 0001~0005, 실험 0002·0004 · 기초 개념 그림(지연 시간, LSM 등)은 일반적인 값이고, Part 3·4의 시뮬레이션은 개념을 보여 주는 그림이에요.</footer>
+
+<script>
+const $=id=>document.getElementById(id);
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const css=v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+function segctl(id,cb){const el=$(id);el.querySelectorAll('button').forEach(b=>b.onclick=()=>{el.querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));cb(b.dataset);});}
+function segval(id,key){return $(id).querySelector('button.on').dataset[key];}
+
+/* theme */
+(function(){const root=document.documentElement;try{const t=localStorage.getItem('oak-theme');if(t)root.dataset.theme=t;}catch(e){}
+$('themeBtn').onclick=()=>{const dark=root.dataset.theme?root.dataset.theme==='dark':matchMedia('(prefers-color-scheme: dark)').matches;root.dataset.theme=dark?'light':'dark';try{localStorage.setItem('oak-theme',root.dataset.theme);}catch(e){}};})();
+
+/* reveal on scroll */
+(function(){const io=new IntersectionObserver(es=>es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target);}}),{threshold:.08});document.querySelectorAll('.reveal').forEach(e=>io.observe(e));})();
+
+/* ===== 1-1 transfer ===== */
+const TF={mode:'file',tok:0,disk:{A:100,B:0},memo:[],running:false,committed:false};
+function tfRender(){$('tfA').textContent=TF.disk.A;$('tfB').textContent=TF.disk.B;const t=TF.disk.A+TF.disk.B;$('tfTotal').innerHTML=t===100?`합계 <b>${t}원</b> ✅`:`합계 <b style="color:var(--warn)">${t}원</b> 😱 ${100-t}원 증발!`;
+$('tfMemo').style.display=TF.mode==='db'?'block':'none';$('tfMemoBody').innerHTML=TF.memo.length?TF.memo.map(m=>`<div>${m}</div>`).join(''):'(비어 있음)';}
+function tfLog(m,c){const l=$('tfLog');l.className='log'+(c?' '+c:'');l.innerHTML=m;}
+function flash(id){const e=$(id);e.classList.add('flash');setTimeout(()=>e.classList.remove('flash'),700);}
+function tfReset(){TF.tok++;TF.disk={A:100,B:0};TF.memo=[];TF.running=false;TF.committed=false;$('tfStart').disabled=false;$('tfCrash').disabled=true;tfRender();tfLog('▶을 누르고, 진행 중에 💥를 눌러 보세요.');}
+segctl('tfMode',d=>{TF.mode=d.m;tfReset();});
+$('tfReset').onclick=tfReset;
+$('tfStart').onclick=async()=>{tfReset();const t=++TF.tok;TF.running=true;$('tfStart').disabled=true;$('tfCrash').disabled=false;
+  const steps=TF.mode==='file'?[
+    ['A 계좌에서 30원을 빼서 <b>파일에 바로 씀</b>…',()=>{TF.disk.A=70;flash('tfAbox');}],
+    ['B 계좌에 30원을 더해서 <b>파일에 씀</b>…',()=>{TF.disk.B=30;flash('tfBbox');}]]:[
+    ['메모장에 "A: 100 → 70"을 적음. <b>파일은 그대로</b>예요.',()=>TF.memo.push('A: 100 → 70')],
+    ['메모장에 "B: 0 → 30"을 적음.',()=>TF.memo.push('B: 0 → 30')],
+    ['<b>COMMIT</b>: 두 줄을 한 덩어리로 디스크에 반영해요 (로그 덕분에 전부 아니면 전무).',()=>{TF.disk.A=70;TF.disk.B=30;TF.memo=[];TF.committed=true;flash('tfAbox');flash('tfBbox');}]];
+  for(const [m,f] of steps){tfLog(m+' <span class="small">(지금 💥를 눌러 보세요)</span>');await sleep(1600);if(t!==TF.tok)return;f();tfRender();}
+  TF.running=false;$('tfCrash').disabled=true;$('tfStart').disabled=false;tfLog('정전 없이 끝났어요. A 70, B 30. 이번엔 중간에 💥를 눌러 보세요.','good');};
+$('tfCrash').onclick=()=>{TF.tok++;$('tfCrash').disabled=true;$('tfStart').disabled=false;
+  if(TF.mode==='file'){tfRender();const lost=100-(TF.disk.A+TF.disk.B);tfLog(lost?`💥 재시작해 보니 A는 ${TF.disk.A}원, B는 ${TF.disk.B}원이에요. <b>${lost}원이 사라졌어요.</b> 파일에 쓴 절반만 남았거든요.`:'💥 재시작: 아직 아무것도 안 썼거나 둘 다 써서 무사해요. 타이밍을 바꿔서 다시 해 보세요.',lost?'err':'');}
+  else{const had=TF.memo.length;TF.memo=[];tfRender();tfLog(TF.committed?'💥 이미 커밋돼서 A 70, B 30이 그대로 남아요. <b>OK를 받았으면 남아요(지속성).</b>':`💥 메모장(메모리)은 정전과 함께 사라졌어요. 디스크는 <b>A 100, B 0 그대로</b>. 이체가 <b>없던 일</b>이 됐을 뿐 돈은 안 사라졌어요(원자성).${had?'':''}`,'good');}};
+tfRender();
+
+/* ===== 1-2 layers ===== */
+const LAYERS=[
+ ['🖥','클라이언트 → 서버','접속을 받고 SQL을 주고받는 곳','todo','#36'],
+ ['📝','SQL 계층','파서(문법) + 실행기(계획)','todo','#31'],
+ ['🧾','트랜잭션 관리자','메모장, 스냅샷, 충돌 판정','part','버퍼만'],
+ ['📒','로그 · 복구 (WAL)','먼저 쓰는 일기장, 그룹 커밋','todo','#22'],
+ ['🌳','B+Tree','찾기, 넣기, 분할, 범위 조회','done','01~05'],
+ ['📦','페이지 관리자','4KB 페이지 · 메모리 캐시','part','전부 메모리'],
+ ['💾','파일 출입구 (Fs) → 디스크','OS별 sync 차이를 여기서만','done','01'],
+];
+const QUERIES={
+ sel:{sql:'SELECT * FROM users WHERE id = 7',path:[[0,'클라이언트가 SQL 글자를 네트워크로 보내요'],[1,'파서가 글자를 단어로 쪼개고 문법을 확인해요 → 실행기가 "users의 기본 키 7을 하나 읽기"로 계획해요'],[2,'<code>txn.get([users|7])</code>: 내 메모장에 있나? 없으면 스냅샷에서 읽어요'],[4,'루트 → 내부 → 리프로 3번 내려가 키를 찾아요'],[5,'그 페이지가 메모리에 있나? 있으면 여기서 끝(캐시 적중)'],[6,'없으면 디스크에서 4KB를 통째로 읽어 와요 (느림!)'],[0,'결과 행 (7, "oak")가 다시 올라가 클라이언트에 도착해요 ✅']]},
+ ins:{sql:"INSERT INTO users VALUES (8, 'elm')",path:[[0,'SQL이 도착해요'],[1,'행 (8, "elm")을 키 [users|8]와 값으로 바꿔요'],[2,'<code>txn.put</code>: <b>개인 메모장에만 적어요. 여기서 멈춰요!</b> 다른 사람에게는 아직 안 보이고, 디스크에도 안 가요'],[0,'"OK (아직 커밋 전)"이라고 답해요']]},
+ com:{sql:'COMMIT',path:[[0,'COMMIT이 도착해요'],[1,'트랜잭션 명령이네요 → 트랜잭션 관리자에게'],[2,'커밋 창구에 줄을 서요 → "내가 쓴 키를 그사이 누가 먼저 커밋했나?" 검사 (충돌이면 여기서 실패)'],[3,'바뀐 페이지 사본 + COMMIT 레코드를 WAL에 쓰고 <b>sync</b>. 기다리던 다른 커밋도 같이 (그룹 커밋)'],[4,'메모리의 트리에 반영해요 (새 트리로 바꿔 끼우기)'],[0,'<b>OK</b> = "이제 정전이 나도 남아요" ✅ (데이터 파일은 나중에 체크포인트 때)']]},
+};
+(function(){const st=$('stack');LAYERS.forEach((l,i)=>{const d=document.createElement('div');d.className='lay';d.id='lay'+i;d.innerHTML=`<span class="ic">${l[0]}</span><div class="ln">${l[1]}</div><div class="ld">${l[2]}</div><span class="badge ${l[3]==='done'?'b-done':l[3]==='part'?'b-part':'b-todo'}">${l[3]==='done'?'✅ ':l[3]==='part'?'🟡 ':'⏳ '}${l[4]}</span>`;st.appendChild(d);});
+ const showQ=()=>{$('qText').textContent='› '+QUERIES[segval('qSel','q')].sql;};segctl('qSel',showQ);showQ();
+ let tok=0;
+ $('qRun').onclick=async()=>{const t=++tok;const q=QUERIES[segval('qSel','q')];$('trace').innerHTML='';
+  for(const [li,cap] of q.path){if(t!==tok)return;document.querySelectorAll('.lay').forEach(e=>e.classList.remove('on'));const el=$('lay'+li);el.classList.add('on');$('token').style.top=(el.offsetTop+el.offsetHeight/2-9)+'px';
+   const d=document.createElement('div');d.innerHTML=`<b>${LAYERS[li][1]}</b> · ${cap}`;$('trace').appendChild(d);$('trace').scrollTop=1e9;await sleep(1150);}
+  if(t===tok)document.querySelectorAll('.lay').forEach(e=>e.classList.remove('on'));};
+})();
+
+/* ===== 1-3 latency & blocks ===== */
+(function(){const R=[['CPU 캐시 읽기','1ns','1초','var(--leaf)',1],['메모리(RAM) 읽기','100ns','1분 40초','var(--inner)',100],['SSD에서 4KB 읽기','~100µs','약 1.2일','var(--violet)',1e5],['디스크에 확실히 기록 (우리 Mac의 F_FULLFSYNC)','~3ms','약 35일 😱','var(--warn)',3e6]];
+ $('lat').innerHTML=R.map((r,i)=>`<div class="latrow"><span>${r[0]} <span class="small mono">${r[1]}</span></span><div class="track"><div class="fill" id="lf${i}" style="background:${r[3]}"></div></div><span class="hum" style="color:${r[3]}">${r[2]}</span></div>`).join('');
+ const run=()=>{R.forEach((r,i)=>{const f=$('lf'+i);f.style.transition='none';f.style.width='0';void f.offsetWidth;f.style.transition='';setTimeout(()=>f.style.width=Math.max(3,(Math.log10(r[4])+.4)/(Math.log10(3e6)+.4)*100)+'%',i*450);});};
+ $('latRun').onclick=run;new IntersectionObserver((es,o)=>{if(es[0].isIntersecting){run();o.disconnect();}},{threshold:.4}).observe($('lat'));
+ let h='';for(let b=0;b<8;b++){h+=`<div class="blk" id="blk${b}">`;for(let c=0;c<8;c++)h+=`<i data-b="${b}" data-c="${c}"></i>`;h+='</div>';}$('blocks').innerHTML=h;
+ $('blocks').onclick=e=>{const i=e.target.closest('i');if(!i)return;document.querySelectorAll('.blk').forEach(x=>x.classList.remove('on'));document.querySelectorAll('.blk i').forEach(x=>x.classList.remove('pick'));i.classList.add('pick');const b=+i.dataset.b,c=+i.dataset.c;$('blk'+b).classList.add('on');$('blkLog').innerHTML=`${(b*8+c)*512}번째 바이트 근처만 필요했는데, 디스크는 <b>${b}번 덩어리(4KB) 전체</b>를 읽어요. 이 덩어리 안에 다음에 필요할 데이터가 함께 있으면 디스크에 다시 갈 필요가 없어요.`;};
+})();
+
+/* ===== 1-3 Q&A: is the disk an SSD? ===== */
+(function(){let at=-1,tok=0;const cls=(i,c)=>{$('sp'+i).className='sp'+(i===3?' safe':'')+(c?' '+c:'');};
+ const reset=()=>{tok++;at=-1;[0,1,2,3].forEach(i=>cls(i));$('ssdLog').className='log';$('ssdLog').textContent='sync 방식을 고르고 "기록하고 sync"를 눌러 보세요.';$('ssdWrite').disabled=false;};
+ $('ssdReset').onclick=reset;segctl('ssdMode',reset);
+ $('ssdWrite').onclick=async()=>{const t=++tok,full=segval('ssdMode','m')==='full',stop=full?3:2;$('ssdWrite').disabled=true;
+  for(let i=0;i<=stop;i++){if(t!==tok)return;[0,1,2,3].forEach(j=>cls(j,j<=i&&j>=i-0?'has':''));at=i;$('ssdLog').innerHTML=['write(): 내 프로그램에서 출발','OS 캐시에 도착 (아직 메모리)','fsync: SSD 안의 캐시까지 보냄','F_FULLFSYNC: "캐시를 칩에 진짜로 내려!" (여기서 약 3ms)'][i];await sleep(full&&i===3?1500:650);}
+  if(t!==tok)return;$('ssdLog').innerHTML=full?'sync 끝 → 데이터가 <b>저장 칩</b>에 있어요. 이제 OK를 보내도 돼요. 💥를 눌러 보세요.':'sync 끝 (32µs, 빠름!) → 그런데 데이터는 <b>SSD 안의 캐시</b>에 있어요. 💥를 눌러 보세요.';};
+ $('ssdCrash').onclick=()=>{tok++;$('ssdWrite').disabled=false;if(at<0){$('ssdLog').textContent='아직 아무것도 안 썼어요.';return;}
+  if(at===3){cls(3,'kept');$('ssdLog').className='log good';$('ssdLog').innerHTML='💥 정전 → 재부팅: 데이터가 남아 있어요 ✅ 그래서 Oakdb는 macOS에서 F_FULLFSYNC를 써요(ADR 0003).';}
+  else{cls(at,'lost');$('ssdLog').className='log err';$('ssdLog').innerHTML=`💥 정전 → 재부팅: ${['프로그램','OS 캐시','SSD 캐시'][at]}에 있던 데이터가 <b>사라졌어요</b>. 프로그램은 이미 "저장했어요"라고 답했을 수도 있어요. 이게 "Mac에서 fsync가 빠르니 괜찮다"가 위험한 이유예요. (실제로는 캐시를 지키는 배터리가 달린 SSD도 있지만, 그걸 믿을 수 없으니 F_FULLFSYNC를 써요.)`;}};
+})();
+
+/* ===== 1-4 search ===== */
+(function(){const A=Array.from({length:64},(_,i)=>i*3+2);$('arr').innerHTML=A.map((v,i)=>`<div class="c" id="ac${i}">${v}</div>`).join('');
+ let tok=0;const clear=()=>A.forEach((_,i)=>$('ac'+i).className='c');
+ $('sLin').onclick=async()=>{const t=++tok;clear();const x=+$('sTarget').value;let n=0;for(let i=0;i<A.length;i++){if(t!==tok)return;n++;$('ac'+i).className='c now';$('sLog').innerHTML=`하나씩 훑는 중… <b>${n}번째</b> 칸`;await sleep(45);if(A[i]===x){$('ac'+i).className='c found';$('sLog').innerHTML=`찾았어요! <b>${n}번</b> 봤어요.`;return;}$('ac'+i).className='c seen';if(A[i]>x)break;}$('sLog').innerHTML=`없어요. <b>${n}번</b> 봤어요. (정렬돼 있으니 더 큰 수가 나오면 멈춰요)`;};
+ $('sTree').onclick=async()=>{const t=++tok;clear();const x=+$('sTarget').value;let lo=0,hi=64,step=0;const msgs=[];
+  while(hi-lo>1){step++;const sz=(hi-lo)/4;let part=3;for(let p=1;p<4;p++){if(x<A[lo+p*sz]){part=p-1;break;}}const nlo=lo+part*sz,nhi=nlo+sz;
+   for(let i=0;i<64;i++)$('ac'+i).className='c'+(i>=lo&&i<hi?(i>=nlo&&i<nhi?' range':' seen'):'');
+   msgs.push(`${step}층: 구분 키 ${[1,2,3].map(p=>A[lo+p*sz]).join(', ')}를 보고 ${part+1}번째 갈래로`);$('sLog').innerHTML=msgs.join('<br>');lo=nlo;hi=nhi;await sleep(900);if(t!==tok)return;}
+  const ok=A[lo]===x;$('ac'+lo).className='c '+(ok?'found':'now');$('sLog').innerHTML=msgs.join('<br>')+`<br><b>${step}번 만에 ${ok?'찾았어요!':'이 자리에 없다는 걸 알았어요.'}</b> 한 번에 4갈래씩 좁히니까요.`;};
+ const fmt=n=>n>=1e8?(n/1e8).toFixed(n>=1e9?0:1).replace('.0','')+'억':n>=1e4?(n/1e4).toFixed(0)+'만':Math.round(n).toLocaleString();
+ const tfmt=us=>us<1000?us.toFixed(0)+'µs':us<1e6?(us/1000).toFixed(1)+'ms':us<6e7?(us/1e6).toFixed(1)+'초':us<3.6e9?(us/6e7).toFixed(0)+'분':(us/3.6e9).toFixed(1)+'시간';
+ const calc=()=>{const N=Math.pow(10,+$('nRange').value),f=+$('fanSel').value;$('nLabel').textContent=fmt(N)+'개';const lin=N/2,h=Math.max(1,Math.ceil(Math.log(N)/Math.log(f)-1e-9));
+  $('cLin').textContent=fmt(lin)+'번';$('cTree').textContent=h+'번';const perPage=Math.max(1,Math.floor(4096/16));$('cLinT').textContent='한 페이지에 키 '+perPage+'개씩이면 페이지 '+fmt(Math.ceil(lin/perPage))+'장 → '+tfmt(Math.ceil(lin/perPage)*100);$('cTreeT').textContent='페이지 '+h+'장 → '+tfmt(h*100);};
+ $('nRange').oninput=calc;$('fanSel').onchange=calc;calc();
+})();
+
+/* ===== 1-5 btree vs lsm ===== */
+(function(){let bp,mem,l0,l1,cnt;const reset=()=>{bp=Array(12).fill(0);mem=[];l0=[];l1=[];cnt=0;render();$('bpLog').textContent='키가 들어 있는 페이지를 찾아가서 그 페이지를 고쳐 써요.';$('lsmLog').textContent='메모리에 모았다가 꽉 차면 새 파일로 통째로 내려놓아요. 파일이 쌓이면 합쳐요(compaction).';};
+ const render=(hit,merged)=>{$('bpPages').innerHTML=bp.map((v,i)=>`<div class="${i===hit?'hit':''}">p${i+2}${v?' ×'+v:''}</div>`).join('');$('lsmMem').innerHTML=`<span class="file mem">${mem.length?mem.join(' '):'(비어 있음)'} </span>`;$('lsmL0').innerHTML=l0.map(f=>`<span class="file">${f.join(' ')}</span>`).join('')||'<span class="small">—</span>';$('lsmL1').innerHTML=l1.map(f=>`<span class="file${merged?' merge':''}">${f.join(' ')}</span>`).join('')||'<span class="small">—</span>';};
+ const write=()=>{cnt++;const k=String.fromCharCode(97+Math.floor(Math.random()*26));const p=Math.floor((k.charCodeAt(0)-97)/26*12);bp[p]++;$('bpLog').innerHTML=`키 "${k}" → 페이지 p${p+2}를 <b>제자리에서</b> 고쳐 씀. 지금까지 쓰기 ${cnt}번 = 페이지 고침 ${cnt}번.`;
+  mem.push(k);mem.sort();let msg=`키 "${k}"를 메모리 표에 넣음 (디스크 안 감).`;let merged=false;
+  if(mem.length>=4){l0.push(mem);mem=[];msg='메모리가 꽉 차서 <b>정렬된 새 파일</b>로 통째로 내려놓음 (덧붙이기만, 제자리 고침 없음).';}
+  if(l0.length>=3){const all=[...new Set([...l0.flat(),...l1.flat()])].sort();l1=[all.slice(0,8)];if(all.length>8)l1.push(all.slice(8,16));l0=[];merged=true;msg='L0 파일이 3개 쌓여서 <b>합치기(compaction)</b>: 읽어서 합치고 다시 씀. 뒤에서 이런 일이 계속 돌아요.';}
+  $('lsmLog').innerHTML=msg;render(p,merged);};
+ $('wOne').onclick=write;$('wMany').onclick=async()=>{for(let i=0;i<12;i++){write();await sleep(260);}};$('wReset').onclick=reset;reset();})();
+
+/* ===== lanes helper ===== */
+function lanes(el,heads,rows){el.innerHTML=`<div class="hd">${heads[0]}</div><div class="hd">${heads[1]}</div><div class="hd">${heads[2]}</div>`;return {add(r){const [a,m,b]=r;const mk=(x)=>x?`<div class="ev ${x.c||''}">${x.t}</div>`:'<div class="empty"></div>';el.insertAdjacentHTML('beforeend',mk(a)+`<div class="mid">${m||''}</div>`+mk(b));}};}
+
+/* ===== 1-6 concurrency ===== */
+(function(){
+ const S={
+  none:[[{t:'"남은 좌석?" → 1장'},'1',null],[null,'1',{t:'"남은 좌석?" → 1장'}],[{t:'1−1=0으로 쓰고 표 발권 🎫'},'0',null],[null,'0',{t:'1−1=0으로 쓰고 표 발권 🎫'}],[{t:'공연장에 왔더니…',c:'bad'},'0',{t:'…같은 자리에 둘이 앉게 됨 😱',c:'bad'}]],
+  lock:[[{t:'🔒 쓰기 잠금 획득'},'1',null],[{t:'"남은 좌석?" → 1장'},'1',{t:'잠금 요청… ⏳ 기다림',c:'wait'}],[{t:'(결제 화면에서 고민 중…)'},'1',{t:'⏳ 계속 기다림',c:'wait'}],[{t:'0으로 쓰고 커밋 🎫 🔓 잠금 해제',c:'good'},'0',{t:'⏳',c:'wait'}],[null,'0',{t:'🔒 획득 → "남은 좌석?" → 0장'}],[null,'0',{t:'"매진입니다" (정확함 ✅. 하지만 내내 기다렸어요)',c:'good'}]],
+  si:[[{t:'📸 스냅샷 v1에서 "남은 좌석?" → 1장'},'1',null],[null,'1',{t:'📸 스냅샷 v1에서 "남은 좌석?" → 1장 (기다림 없음!)'}],[{t:'메모장에 좌석=0'},'1',{t:'메모장에 좌석=0'}],[{t:'커밋 창구: 좌석 키, v1 이후 아무도 안 바꿈 → ✅ 🎫',c:'good'},'0',null],[null,'0',{t:'커밋 창구: 좌석 키를 v1 이후 앨리스가 먼저 바꿈 → ❌ 충돌 오류',c:'bad'}],[null,'0',{t:'다시 시도: 새 스냅샷에서 → 0장 → "매진입니다" ✅',c:'good'}]],
+ };
+ const MSG={none:'<b>잃어버린 업데이트.</b> 둘 다 옛날 값(1)을 보고 계산했기 때문이에요.',lock:'<b>안전하지만 느려요.</b> 밥은 앨리스가 고민하는 시간까지 전부 기다렸어요. SQLite가 쓰기를 이렇게 다뤄요.',si:'<b>안전하고, 기다림이 없어요.</b> 대신 늦게 커밋한 밥은 한 번 다시 시도해야 해요. Oakdb가 고른 방식이에요(ADR 0006).'};
+ let tok=0;$('ccRun').onclick=async()=>{const t=++tok;const m=segval('ccMode','m');const L=lanes($('lanes'),['👩 앨리스','남은 좌석','👨 밥']);$('ccLog').innerHTML='재생 중…';for(const r of S[m]){if(t!==tok)return;L.add(r);await sleep(900);}if(t===tok)$('ccLog').innerHTML=MSG[m];};
+ segctl('ccMode',()=>$('ccRun').click());lanes($('lanes'),['👩 앨리스','남은 좌석','👨 밥']);
+})();
+
+/* ===== 1-7 WAL ===== */
+(function(){
+ const STEPS=['출발: 데이터 파일의 x = 1','트랜잭션이 x = 2를 메모장에 적어요','커밋 시작: WAL에 "페이지 5 사본 (x=2)"를 덧붙여요','WAL에 "COMMIT #1"을 덧붙여요','<b>sync</b>: 도장 쾅! 이제야 WAL이 디스크에 진짜로 남아요','클라이언트에게 <b>OK</b>를 보내요','(나중에) 체크포인트: 데이터 파일의 페이지 5를 x = 2로 고쳐요','메타 슬롯에 "WAL #1까지 반영함"을 적어요'];
+ let s=0,crashed=false,tok=0;
+ const dots=()=>{$('walDots').innerHTML=STEPS.map((_,i)=>`<span class="${i<=s?'on':''}">${i}</span>`).join('');};
+ const render=(replay)=>{dots();
+  $('walRamBody').innerHTML=crashed?'<span class="small">(정전으로 비었다가 재시작)</span>':(s>=1&&s<6?'<div class="rec">메모장: x = 2</div>':'')+(s>=5?'<div class="rec commit">클라이언트: OK 받음 ✅</div>':'');
+  const durable=s>=4;let wal='';if(s>=2)wal+=`<div class="rec ${durable?'':'volatile'} ${crashed&&!durable?'gone':''} ${replay===0?'replay':''}" id="wr0">페이지 5 사본 (x=2)</div>`;if(s>=3)wal+=`<div class="rec commit ${durable?'':'volatile'} ${crashed&&!durable?'gone':''} ${replay===1?'replay':''}">COMMIT #1</div>`;
+  if(s>=4&&s<=4&&!crashed)wal+='<div style="margin-top:6px"><span class="stamp">SYNC</span></div>';
+  $('walLogBody').innerHTML=wal||'<span class="small">(비어 있음)</span>';if(s>=2&&s<4)$('walLogBody').innerHTML+='<div class="small">점선 = 아직 OS 캐시에만 있음 (정전 나면 사라질 수 있음)</div>';
+  const x=(s>=6||(crashed&&s>=4))?2:1;const torn=s===6&&crashed;
+  $('walDataBody').innerHTML=`<div class="rec ${torn?'torn':''}">페이지 5: x = ${x}${torn?' (반쯤 쓰였다가 WAL로 고침)':''}</div><div class="rec meta">메타: ${s>=7?'WAL #1까지 반영함':'체크포인트 없음'}</div>`;
+  $('walNext').disabled=s>=STEPS.length-1||crashed;$('walCrash').disabled=crashed;};
+ const msg=(m,c)=>{const l=$('walMsg');l.className='log'+(c?' '+c:'');l.innerHTML=m;};
+ $('walNext').onclick=()=>{s++;render();msg(STEPS[s]);};
+ $('walReset').onclick=()=>{tok++;s=0;crashed=false;render();msg(STEPS[0]+'. "다음 단계"를 눌러 보세요.');};
+ $('walCrash').onclick=async()=>{const t=++tok;crashed=true;render();msg('💥 정전! 메모리가 모두 사라졌어요. 재시작해서 메타 슬롯을 읽고, 그다음 WAL을 앞에서부터 다시 따라 해요…','err');await sleep(1400);if(t!==tok)return;
+  if(s<4){render();msg(`재시작 결과: WAL ${s<2?'에 아무것도 없어요':'기록이 sync 전이라 사라졌거나 COMMIT이 없어요'} → 무시해요. <b>x = 1</b>. 클라이언트는 OK를 못 받았으니 약속을 어긴 게 아니에요 ✅`,'good');return;}
+  if(s>=7){render();msg('재시작 결과: 메타가 "WAL #1까지 반영함"이라고 하니 다시 따라 할 게 없어요. <b>x = 2</b> ✅','good');return;}
+  render(0);msg('WAL 재생 중: 페이지 5 사본을 데이터 파일에 다시 덮어써요…');await sleep(1000);if(t!==tok)return;render(1);msg('COMMIT #1 확인 ✔');await sleep(900);if(t!==tok)return;render();
+  msg(`재시작 결과: <b>x = 2</b> ✅ ${s===6?'체크포인트 도중이라 데이터 파일 페이지가 반쯤 쓰였어도, WAL의 <b>페이지 전체 사본</b>으로 통째로 덮어써서 고쳐요. 그래서 Oakdb는 페이지 전체 사본을 남겨요(ADR 0007).':'OK를 받은 커밋은 살아남았어요. 지속성!'} 되돌리기(undo)는 한 번도 안 했어요. 다시하기(redo)만 했어요.`,'good');};
+ $('walReset').click();
+})();
+
+/* ===== 2-1 flip cards ===== */
+(function(){const C=[
+ ['🦀','무슨 언어로 만들까?','ADR 0001','Rust','소유권, 빌림 검사, Send/Sync가 저장 엔진·동시성 설계와 바로 닿아 있어서, 그 연결을 배우는 것 자체가 목표예요.','버림: Java/Kotlin(GC, 바이트 제어), Go'],
+ ['🎯','어디까지 깊게 할까?','ADR 0002','저장·복구·동시성은 깊게','쿼리와 서버는 최소 기능, 분산은 제외. "완료"는 기능 목록이 아니라 ADR·장애 실험·벤치마크가 갖춰졌는지로 판단해요.','버림: 넓고 얕게'],
+ ['🐧','어떤 OS를 지원할까?','ADR 0003','macOS + Linux 둘 다','개발은 Mac, 서버는 Linux. sync 방법이 달라서(F_FULLFSYNC vs fdatasync) Fs 한 곳에서만 갈라요.','버림: 한쪽만'],
+ ['🌳','B+Tree? LSM?','ADR 0004','B+Tree 위의 단순 RDB','관계형 DB의 전통 구조이고 SQLite와 바로 비교할 수 있어요. 대신 정전·동시 쓰기를 직접 풀어야 해요.','버림: LSM(조사에서 추천됨), document·vector'],
+ ['⚔️','SQLite와 무엇으로 다를까?','ADR 0005','동시 쓰기 + 네트워크 서버','SQLite 문서가 스스로 인정하는 두 한계예요. "클라이언트 수 vs 쓰기 처리량" 그래프 하나로 둘을 함께 보여요.','버림: 복제(분산이라 범위 밖)'],
+ ['👥','여러 명이 동시에 쓰려면?','ADR 0006','스냅샷 + 커밋 창구 한 줄','실행 중에는 잠금 없음. 커밋 때 키 단위로 검사(first-committer-wins). 트리는 커밋 담당만 고쳐요.','버림: 페이지 래치 크래빙(나중에), B-link, 행 잠금+undo, LMDB식 복사 트리'],
+ ['⚡','정전에서 어떻게 살아날까?','ADR 0007','redo 전용 WAL + 페이지 전체 사본','커밋 전엔 트리를 안 건드리니 undo가 필요 없어요. 메타 슬롯 두 개에 체크포인트를 번갈아 기록해요.','버림: ARIES(너무 큼), 롤백 저널, WiredTiger식'],
+ ['📄','페이지는 어떤 모양?','ADR 0008','SQLite 형식 + CRC-32C 체크섬','4KB, 슬롯 앞·셀 뒤, overflow. SQLite와 달리 모든 페이지에 체크섬(페이지 번호 포함). 키는 512B까지.','버림: 값 크기 상한, 파일 호환'],
+ ['💾','OK는 언제 보내나?','스펙 #12','그룹 커밋 후','여러 커밋의 로그를 모아 한 번에 sync하고 함께 응답해요. 응답한 커밋은 정전에도 남아요.','버림: sync 없이 응답(빠르지만 거짓말)'],
+ ['🔒','어디까지 막을까? (격리)','스펙 #12','스냅샷 격리','같은 키를 동시에 고치면 나중 커밋이 실패해요. write skew는 허용하고 문서에 적어요.','버림: 직렬 격리(범위 밖)'],
+ ['📡','클라이언트와 무슨 말로?','스펙 #12','직접 만든 이진 규칙 + CLI','[길이][명령][데이터]. 접속마다 스레드 하나로 단순하게 시작해요.','버림: PostgreSQL 규칙 흉내, HTTP'],
+ ['🗣','SQL은 어디까지?','스펙 #12','테이블 하나 단위의 기본 문장','CREATE TABLE(기본 키 필수), INSERT, SELECT…WHERE, UPDATE, DELETE, BEGIN/COMMIT/ROLLBACK.','버림: JOIN, 보조 인덱스, 집계, 서브쿼리'],
+ ];
+ $('flips').innerHTML=C.map(c=>`<div class="flip"><div class="in"><div class="fr"><div><div class="ico">${c[0]}</div><div class="q">${c[1]}</div></div><div><div class="src">${c[2]}</div><div class="hint">눌러서 답 보기 ↻</div></div></div><div class="bk"><div class="a">${c[3]}</div>${c[4]}<div class="no">${c[5]}</div></div></div></div>`).join('');
+ document.querySelectorAll('.flip').forEach(f=>f.onclick=()=>f.classList.toggle('on'));})();
+
+/* ===== 2-2 page sim ===== */
+const PG={size:4096,hdr:40};let pg;
+function pgReset(){pg={cells:{},slots:[],holes:[],freeEnd:4096,frag:0,last:null};}pgReset();
+const pgFS=()=>PG.hdr+4*pg.slots.length;
+function pgRemove(k){const c=pg.cells[k];if(!c)return false;pg.holes.push({off:c.off,len:c.len,key:k});pg.frag+=c.len;delete pg.cells[k];pg.slots=pg.slots.filter(s=>s!==k);return true;}
+function pgCompact(){let end=4096;[...pg.slots].sort((a,b)=>pg.cells[b].off-pg.cells[a].off).forEach(k=>{end-=pg.cells[k].len;pg.cells[k].off=end;});pg.freeEnd=end;pg.holes=[];pg.frag=0;}
+function pgPut(k,vlen){const len=4+k.length+vlen,snap=JSON.stringify(pg),m=[];if(pgRemove(k))m.push(`같은 키 "${esc(k)}"가 있어서 옛 셀은 조각으로 남기고`);const need=4+len;const gap=pg.freeEnd-pgFS();
+ if(gap<need){if(gap+pg.frag>=need){pgCompact();m.push('빈칸이 모자라서 <b>정리(compact)</b>로 조각을 모은 뒤');}else{pg=JSON.parse(snap);return {err:`<b>꽉 찼어요.</b> 빈칸과 조각을 다 합쳐도 ${need}B가 안 돼요. 01·02에서는 여기서 커밋이 실패했고, <b>03부터는 여기서 페이지를 둘로 나눠요</b> (2-3).`};}}
+ pg.freeEnd-=len;pg.cells[k]={off:pg.freeEnd,len};pg.slots.push(k);pg.slots.sort();pg.last=k;m.push(`"${esc(k)}" 셀 ${len}B를 빈칸 끝에 놓고 슬롯을 키 순서 자리에 끼웠어요`);return {ok:m.join(', ')+'.'};}
+function pgRender(){const p=b=>b/PG.size*100,fs=pgFS();let h=`<div class="seg hdr" style="width:${p(40)}%"></div><div class="seg slots" style="width:${p(fs-40)}%"></div><div class="seg free" style="width:${p(pg.freeEnd-fs)}%">${pg.freeEnd-fs>300?'빈칸 '+(pg.freeEnd-fs)+'B':''}</div>`;
+ [...Object.entries(pg.cells).map(([k,c])=>({k,...c,t:'cell'})),...pg.holes.map(x=>({k:x.key,off:x.off,len:x.len,t:'hole'}))].sort((a,b)=>a.off-b.off).forEach(x=>h+=`<div class="seg ${x.t}${x.t==='cell'&&x.k===pg.last?' new':''}" style="width:${p(x.len)}%" title="${esc(x.k)} ${x.len}B">${x.len>140?(x.t==='hole'?'(조각)':esc(x.k)):''}</div>`);
+ $('pagebar').innerHTML=h;$('pgStats').innerHTML=`<span>항목 <b>${pg.slots.length}</b> (${pg.slots.map(esc).join(', ')||'—'})</span><span>빈칸 <b>${pg.freeEnd-fs}B</b></span><span>조각 <b>${pg.frag}B</b></span>`;}
+const pgLog=(m,c)=>{const l=$('pgLog');l.className='log'+(c?' '+c:'');l.innerHTML=m;};
+$('pgPut').onclick=()=>{const r=pgPut($('pgKey').value.trim()||'k',+$('pgSize').value);pgRender();r.err?pgLog(r.err,'err'):pgLog(r.ok,'good');};
+$('pgDel').onclick=()=>{const k=$('pgKey').value.trim();if(pgRemove(k)){pg.last=null;pgRender();pgLog(`"${esc(k)}" 슬롯을 뺐어요. 셀 자리는 바로 비우지 않고 조각으로 남겨요.`);}else pgLog('없는 키를 지워도 오류가 아니에요.');};
+$('pgFill').onclick=()=>{pgReset();['ash','elm','fir','oak','yew'].forEach((k,i)=>pgPut(k,[600,300,600,300,600][i]));pgRemove('elm');pgPut('oak',600);pgRender();pgLog('ash·elm·fir·oak·yew를 넣고, elm을 지우고, oak를 더 큰 값으로 덮어썼어요. 회색 조각이 두 개 보이죠? 이제 pine 1000B를 put 해 보세요.');$('pgKey').value='pine';$('pgSize').value='1000';};
+$('pgReset').onclick=()=>{pgReset();pgRender();pgLog('비웠어요.');};pgRender();
+
+/* ===== tree rendering ===== */
+function layoutTree(root){const KW=30,GAP=26,LH=74,pos=new Map();let x=0;const w=n=>(n.keys.length?n.keys.length*KW:40)+2;
+ (function place(n,d){if(n.leaf){const W=w(n);pos.set(n,{x,y:d*LH,w:W});x+=W+GAP;}else{n.children.forEach(c=>place(c,d+1));const f=pos.get(n.children[0]),l=pos.get(n.children[n.children.length-1]),W=w(n);pos.set(n,{x:(f.x+l.x+l.w)/2-W/2,y:d*LH,w:W});}})(root,0);
+ let minX=1e9,maxX=0,maxY=0;pos.forEach(p=>{minX=Math.min(minX,p.x);maxX=Math.max(maxX,p.x+p.w);maxY=Math.max(maxY,p.y);});const sh=12-minX;pos.forEach(p=>p.x+=sh);return {pos,width:maxX+sh+12,height:maxY+46,KW};}
+function renderTree(canvas,root,opt={}){const {pos,width,height,KW}=layoutTree(root);
+ let svg=`<svg width="${width}" height="${height}"><defs><marker id="ah${canvas.id}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--leaf)"/></marker></defs>`,nodes='';
+ const walk=n=>{const p=pos.get(n);
+  if(!n.leaf)n.children.forEach((c,i)=>{const cp=pos.get(c),x1=n.keys.length?p.x+1+i*KW:p.x+p.w/2,on=opt.path&&opt.path.has(c);svg+=`<line x1="${x1}" y1="${p.y+30}" x2="${cp.x+cp.w/2}" y2="${cp.y}" stroke="${on?'var(--oak)':'var(--inner)'}" stroke-opacity="${on?1:.45}" stroke-width="${on?2.6:1.3}"/>`;walk(c);});
+  else if(n.next&&pos.has(n.next)){const np=pos.get(n.next);svg+=`<line x1="${p.x+p.w+2}" y1="${p.y+15}" x2="${np.x-3}" y2="${np.y+15}" stroke="var(--leaf)" stroke-width="1.5" marker-end="url(#ah${canvas.id})"/>`;}
+  const cls=['node',n.leaf?'lf':'in'];if(opt.fresh&&opt.fresh.has(n))cls.push('fresh');if(opt.visit&&opt.visit.has(n))cls.push('visit');
+  const ks=n.keys.length?n.keys.map((k,i)=>{let c='k';if(opt.hit&&opt.hit.has(n.id+':'+i))c+=' hit';if(opt.cur===n.id+':'+i)c+=' cur';return `<div class="${c}">${esc(k)}</div>`;}).join(''):'<div class="k empty">∅</div>';
+  nodes+=`<div class="${cls.join(' ')}" style="left:${p.x}px;top:${p.y}px">${ks}</div>`;};
+ walk(root);canvas.style.width=width+'px';canvas.style.height=height+'px';canvas.innerHTML=svg+'</svg>'+nodes;}
+
+/* ===== 2-3 tree sim ===== */
+const LEAF_MAX=4,INNER_MAX=3;let nid=2,troot,events=[],freshSet=new Set(),scanTok=0;
+const mkLeaf=k=>({id:nid++,leaf:true,keys:k,next:null}),mkInner=(k,c)=>({id:nid++,leaf:false,keys:k,children:c});
+function trReset(){nid=2;troot=mkLeaf([]);events=[];freshSet=new Set();}
+function childIdx(n,k){let i=0;while(i<n.keys.length&&k>=n.keys[i])i++;return i;}
+function height(){let h=1,n=troot;while(!n.leaf){n=n.children[0];h++;}return h;}
+function leafList(){const o=[];(function w(n){if(n.leaf)o.push(n);else n.children.forEach(w);})(troot);return o;}
+const ev=h=>events.unshift(h);
+function trInsert(k){const path=[];let n=troot;while(!n.leaf){const i=childIdx(n,k);path.push([n,i]);n=n.children[i];}
+ if(n.keys.includes(k)){ev(`${k}: 이미 있어요 → 값만 덮어써요`);return;}n.keys.push(k);n.keys.sort((a,b)=>a-b);freshSet.add(n);if(n.keys.length<=LEAF_MAX){ev(`${k} 넣음`);return;}
+ const mid=Math.floor(n.keys.length/2),R=mkLeaf(n.keys.slice(mid));n.keys=n.keys.slice(0,mid);R.next=n.next;n.next=R;freshSet.add(R);let sep=R.keys[0],left=n,right=R;
+ ev(`${k} 넣음 → 리프가 넘쳐 <b>리프 분할</b> [${n.keys}] | [${R.keys}], 첫 키 <b>${sep}</b>를 부모에 <b>복사</b>`);
+ while(true){if(!path.length){const o=height();troot=mkInner([sep],[left,right]);freshSet.add(troot);ev(`새 루트를 만들었어요 → <span class="grow">트리가 한 층 자람 (${o}→${o+1}층)</span>`);break;}
+  const [p,i]=path.pop();p.keys.splice(i,0,sep);p.children.splice(i+1,0,right);freshSet.add(p);if(p.keys.length<=INNER_MAX)break;
+  const m=Math.floor(p.keys.length/2),up=p.keys[m],rn=mkInner(p.keys.slice(m+1),p.children.slice(m+1));p.keys=p.keys.slice(0,m);p.children=p.children.slice(0,m+1);freshSet.add(rn);
+  ev(`내부 페이지도 넘쳐 <b>내부 분할</b> [${p.keys}] | [${rn.keys}], 가운데 <b>${up}</b>는 위로 <b>올라가요</b>`);sep=up;left=p;right=rn;}}
+function trDelete(k){const path=[];let n=troot;while(!n.leaf){const i=childIdx(n,k);path.push([n,i]);n=n.children[i];}
+ const idx=n.keys.indexOf(k);if(idx<0){ev(`${k}: 없는 키예요 (오류 아님)`);return;}n.keys.splice(idx,1);freshSet.add(n);if(n.keys.length||n===troot){ev(`${k} 지움`);return;}
+ const ls=leafList(),pos=ls.indexOf(n);if(pos>0){ls[pos-1].next=n.next;freshSet.add(ls[pos-1]);}let msg=`${k} 지움 → 리프가 비어서 <b>빼고</b>, 앞 리프의 옆 포인터가 건너뛰게 고쳐요. `;
+ while(path.length){const [p,i]=path.pop();if(p.keys.length===0){msg+='부모도 함께 비어서 위로. ';continue;}if(i<p.keys.length){p.keys.splice(i,1);p.children.splice(i,1);}else{p.keys.pop();p.children.pop();}freshSet.add(p);if(p.keys.length===0)msg+='부모는 이제 <b>∅ (키 0개, 자식 1개)</b>. 합치기는 안 해요(04 결정 1).';break;}
+ ev(msg);while(!troot.leaf&&troot.keys.length===0){const o=height();troot=troot.children[0];freshSet.add(troot);ev(`루트에 자식이 하나만 남음 → <span class="shrink">트리가 한 층 낮아짐 (${o}→${o-1}층)</span>`);}}
+function trRender(opt){scanTok++;renderTree($('trCanvas'),troot,opt||{fresh:freshSet});$('trHeight').textContent=`높이 ${height()}층 · 키 ${leafList().reduce((a,l)=>a+l.keys.length,0)}개`;$('trEvents').innerHTML=events.length?events.slice(0,40).map(e=>`<div>${e}</div>`).join(''):'<div>키를 넣어 보세요.</div>';}
+const act=f=>{freshSet=new Set();$('scOut').innerHTML='';f();trRender();};
+$('trPut').onclick=()=>act(()=>trInsert(+$('trKey').value));$('trDel').onclick=()=>act(()=>trDelete(+$('trKey').value));
+$('trRand').onclick=()=>act(()=>{for(let i=0;i<8;i++)trInsert(1+Math.floor(Math.random()*99));});$('trAsc').onclick=()=>act(()=>{for(let i=1;i<=20;i++)trInsert(i);});
+$('trDelMany').onclick=()=>act(()=>{const all=leafList().flatMap(l=>l.keys);for(let i=0;i<8&&all.length;i++)trDelete(all.splice(Math.floor(Math.random()*all.length),1)[0]);});
+$('trReset').onclick=()=>{trReset();$('scOut').innerHTML='';trRender();};
+trReset();[50,20,80,10,30,60,90,40,70,25,55,85,15,35,65].forEach(trInsert);events=[];ev('예시로 키 15개를 넣은 3층 트리예요.');freshSet=new Set();trRender();
+$('scRun').onclick=async()=>{trRender({});const t=scanTok;const from=+$('scFrom').value,to=+$('scTo').value;$('scOut').innerHTML='';
+ if(from>=to){ev('scan: 시작이 끝보다 뒤 → 빈 결과 (오류 아님)');trRender({});return;}
+ const visit=new Set(),path=new Set(),hit=new Set();let n=troot;visit.add(n);path.add(n);const draw=cur=>{if(t!==scanTok)return false;renderTree($('trCanvas'),troot,{visit,path,hit,cur});return true;};
+ if(!draw())return;await sleep(500);while(!n.leaf){n=n.children[childIdx(n,from)];visit.add(n);path.add(n);if(!draw())return;await sleep(500);}
+ let i=0,hops=0,cnt=0;while(i<n.keys.length&&n.keys[i]<from)i++;
+ while(true){if(i>=n.keys.length){if(!n.next)break;n=n.next;i=0;hops++;visit.add(n);if(!draw())return;await sleep(450);continue;}
+  const k=n.keys[i];if(k>=to){draw(n.id+':'+i);break;}hit.add(n.id+':'+i);cnt++;$('scOut').insertAdjacentHTML('beforeend',`<span>${k}</span>`);if(!draw(n.id+':'+i))return;await sleep(330);i++;}
+ if(t!==scanTok)return;ev(`scan [${from}, ${to}): ${cnt}개 · 아래로 ${height()-1}번 내려간 뒤 <b>옆 포인터로 ${hops}걸음</b>`);$('trEvents').innerHTML=events.slice(0,40).map(e=>`<div>${e}</div>`).join('');};
+
+/* ===== 2-4 model test ===== */
+(function(){let tok=0;$('mtRun').onclick=async()=>{const t=++tok;const bug=$('mtBug').checked;const eng=new Map(),mod=new Map();const keys=['a','b','c','d'];$('mtBody').innerHTML='';$('mtLog').className='log';$('mtLog').textContent='돌리는 중…';let fail=null;let dels=0;
+ for(let i=1;i<=12;i++){if(t!==tok)return;const r=Math.random(),k=keys[Math.floor(Math.random()*4)];let op,e,m;
+  if(r<.4){const v=Math.floor(Math.random()*9);op=`put(${k}, ${v})`;eng.set(k,v);mod.set(k,v);e=m='ok';}
+  else if(r<.65){op=`delete(${k})`;dels++;if(!(bug&&dels%2===0))eng.delete(k);mod.delete(k);e=m='ok';}
+  else{op=`get(${k})`;e=eng.has(k)?eng.get(k):'없음';m=mod.has(k)?mod.get(k):'없음';}
+  const same=String(e)===String(m);$('mtBody').insertAdjacentHTML('beforeend',`<tr class="${same?'':'badrow'}"><td>${i}</td><td>${op}</td><td>${e}</td><td>${m}</td><td class="${same?'ok':'bad'}">${same?'✓':'✗ 다름!'}</td></tr>`);
+  if(!same){fail=i;break;}await sleep(280);}
+ if(t!==tok)return;const l=$('mtLog');if(fail){l.className='log err';l.innerHTML=`🐛 ${fail}번째 연산에서 Oakdb와 정답지의 답이 달라요 → <b>버그 발견!</b> proptest는 이 실패를 가장 짧은 사례로 줄여서 저장해 줘요.`;}
+ else if(bug){l.className='log';l.innerHTML='이번에는 버그가 드러나지 않았어요. 지운 키를 나중에 <code>get</code>하는 순서가 안 나왔거든요. 그래서 <b>"지나간 경로 세기"</b>가 필요해요. 다시 눌러 보세요.';}
+ else{l.className='log good';l.innerHTML='12개 모두 같아요 ✓ 실제 테스트는 이런 걸 연산 수천 개로 수백 번 돌려요.';}};})();
+
+/* ===== 3-1 gantt ===== */
+(function(){const S=3,GAP=.7;
+ const lbl=()=>{$('gNv').textContent=$('gN').value+'명';$('gTv').textContent=$('gT').value+'ms';};
+ function sim(){const N=+$('gN').value,T=+$('gT').value,gc=$('gGC').checked;const arr=Array.from({length:N},(_,i)=>i*GAP);
+  const sq=[];let free=0;arr.forEach(a=>{const s=Math.max(a,free);sq.push([[a,s,'wait'],[s,s+T,'think'],[s+T,s+T+S,'sync']]);free=s+T+S;});
+  const c=arr.map(a=>a+T),ok=arr.map((a,i)=>[[a,c[i],'think']]);let t=0,idx=0,b=0;
+  while(idx<N){const s=Math.max(t,c[idx]);let j=idx;if(gc){while(j<N&&c[j]<=s+1e-9)j++;}else j=idx+1;const e=s+S;for(let q=idx;q<j;q++)ok[q].push([c[q],s,'wait'],[s,e,'sync b'+(b%4)]);b++;idx=j;t=e;}
+  return {sq,ok,sqEnd:free,okEnd:t,batches:b,N};}
+ function draw(el,rows,tmax){el.innerHTML=rows.map((segs,i)=>`<div class="grow2"><span class="lb">클라이언트 ${i+1}</span><div class="gtrack">${segs.filter(s=>s[1]-s[0]>1e-9).map(s=>`<div class="gseg ${s[2]}" style="left:${s[0]/tmax*100}%;width:${(s[1]-s[0])/tmax*100}%">${s[2].startsWith('sync')&&(s[1]-s[0])/tmax>.05?'sync':''}</div>`).join('')}<div class="curtain"></div></div></div>`).join('')+`<div class="gaxis"><span></span><span style="display:flex;justify-content:space-between"><span>0ms</span><span>${tmax.toFixed(1)}ms</span></span></div>`;}
+ function run(){lbl();const r=sim();const tmax=Math.max(r.sqEnd,r.okEnd);draw($('gSq'),r.sq,tmax);draw($('gOk'),r.ok,tmax);$('gSqT').textContent='끝: '+r.sqEnd.toFixed(1)+'ms';$('gOkT').textContent='끝: '+r.okEnd.toFixed(1)+'ms';
+  document.querySelectorAll('#c31 .curtain').forEach(c=>{c.style.transition='none';c.style.width='100%';void c.offsetWidth;c.style.transition='';requestAnimationFrame(()=>c.style.width='0%');});
+  $('gLog').innerHTML=`SQLite는 <b>${r.sqEnd.toFixed(1)}ms</b>, Oakdb는 <b>${r.okEnd.toFixed(1)}ms</b> (${(r.sqEnd/r.okEnd).toFixed(1)}배). Oakdb의 sync는 ${r.batches}번${$('gGC').checked?` (커밋 ${r.N}개가 나눠 씀)`:''}. ${+$('gT').value===0?'생각 시간이 0이면 둘의 차이는 sync를 나눠 쓰는 그룹 커밋에서만 나와요.':'생각 시간이 길수록 SQLite는 그 시간 내내 잠금을 쥐고 있어서 차이가 커져요.'}`;}
+ ['gN','gT'].forEach(id=>$(id).oninput=lbl);$('gGC').onchange=run;$('gRun').onclick=run;lbl();
+ new IntersectionObserver((es,o)=>{if(es[0].isIntersecting){run();o.disconnect();}},{threshold:.3}).observe($('gSq'));})();
+
+/* ===== 3-2 frame ===== */
+(function(){const f=()=>{const d=new TextEncoder().encode($('frIn').value);const len=1+d.length;const L=[len>>>24&255,len>>>16&255,len>>>8&255,len&255];const hx=b=>b.toString(16).padStart(2,'0');let h='';let k=0;
+ L.forEach((b,i)=>h+=`<div class="byte len" style="animation-delay:${k++*15}ms">${hx(b)}<small>${i===3?'길이='+len:'길이'}</small></div>`);h+=`<div class="byte cmd" style="animation-delay:${k++*15}ms">01<small>쿼리</small></div>`;
+ const txt=$('frIn').value;let ci=0;const chars=[...txt];const map=[];chars.forEach(ch=>{const n=new TextEncoder().encode(ch).length;for(let q=0;q<n;q++)map.push(q===0?ch:'');});
+ d.slice(0,48).forEach((b,i)=>h+=`<div class="byte dat" style="animation-delay:${k++*15}ms">${hx(b)}<small>${esc(map[i]===' '?'␣':map[i])||'·'}</small></div>`);if(d.length>48)h+=`<div class="byte dat">…<small>+${d.length-48}</small></div>`;$('frOut').innerHTML=h;};$('frIn').oninput=f;f();})();
+
+/* ===== 3-4 write skew ===== */
+(function(){const S={
+ sq:[[{t:'🔒 쓰기 잠금 · "당직 몇 명?" → 2명'},'앨리스✅ 밥✅',{t:'잠금 요청 ⏳',c:'wait'}],[{t:'2명이니 빠져도 됨 → 앨리스=휴무, 커밋 🔓'},'앨리스❌ 밥✅',{t:'⏳',c:'wait'}],[null,'앨리스❌ 밥✅',{t:'🔒 "당직 몇 명?" → 1명'}],[null,'앨리스❌ 밥✅',{t:'1명뿐이라 못 빠짐 → 규칙 지켜짐 ✅',c:'good'}]],
+ ok:[[{t:'📸 스냅샷: 당직 2명'},'앨리스✅ 밥✅',{t:'📸 스냅샷: 당직 2명'}],[{t:'앨리스 키 = 휴무 (메모장)'},'앨리스✅ 밥✅',{t:'밥 키 = 휴무 (메모장)'}],[{t:'커밋: 앨리스 키를 누가 먼저 바꿨나? 아니오 → ✅'},'앨리스❌ 밥✅',null],[null,'앨리스❌ 밥❌',{t:'커밋: 밥 키를 누가 먼저 바꿨나? 아니오 → ✅'}],[{t:'당직 0명 😱',c:'bad'},'앨리스❌ 밥❌',{t:'규칙이 깨졌어요',c:'bad'}]]};
+ const M={sq:'SQLite는 쓰기가 한 줄이라 밥이 앨리스의 결과를 보고 판단해요 → 안전해요.',ok:'<b>write skew</b>: 둘은 서로 <b>다른 키</b>를 고쳤어요. 그래서 "같은 키를 먼저 커밋했나" 검사에 걸리지 않아요. 각자 본 사진은 맞았지만, 합친 결과가 규칙을 깨요.'};
+ let tok=0;$('wsRun').onclick=async()=>{const t=++tok,m=segval('wsMode','m'),L=lanes($('wsLanes'),['👩‍⚕️ 앨리스','당직 상태','👨‍⚕️ 밥']);$('wsLog').innerHTML='재생 중…';for(const r of S[m]){if(t!==tok)return;L.add(r);await sleep(950);}if(t===tok)$('wsLog').innerHTML=M[m];};
+ segctl('wsMode',()=>$('wsRun').click());lanes($('wsLanes'),['👩‍⚕️ 앨리스','당직 상태','👨‍⚕️ 밥']);})();
+
+/* ===== 4-1 roadmap ===== */
+(function(){const ST=[
+ ['📦','저장 엔진','01~07','B+Tree에 저장하고 읽기','01~04 merge, 05(범위 조회) PR 리뷰 중. 남은 것: <b>06 overflow</b>(페이지보다 큰 값을 다음 페이지로 이어 붙이기), <b>07 체크섬</b>(페이지 지문 CRC-32C).','책: 돛단배 책의 B+-tree 장'],
+ ['⚡','정전에도 안전','08~12','"OK면 남는다"를 지키기','<b>08 가짜 파일시스템</b>(정전을 시드로 재현) → <b>09 지금은 깨진다는 걸 보이기</b> → <b>10 WAL</b> → <b>11 체크포인트·메타 슬롯</b> → <b>12 디스크 실패 시 엔진 정지</b>. 프로젝트에서 가장 어려운 구간이에요.','책: 복구(Recovery) 장'],
+ ['👥','동시 쓰기','13~18','차별점 ①','<b>13 스냅샷 읽기</b> → <b>14 충돌 판정</b> → <b>15 여러 스레드와 커밋 창구</b> → <b>16 그룹 커밋</b> → <b>17 동시성 검증</b>(이력 검사, loom) → <b>18 벤치마크</b>.','책: 동시성 제어 · 스냅샷 격리 절'],
+ ['🗣','SQL','19~23','사람의 말로 묻기','<b>19 렉서·파서·실행기</b> → <b>20 WHERE·범위</b> → <b>21 UPDATE·DELETE</b> → <b>22 타입 검사</b> → <b>23 트랜잭션 명령</b>. 행을 정렬이 유지되는 키로 바꾸는 게 핵심이에요(4-5).','책: 질의 처리 장 (가볍게)'],
+ ['🌐','네트워크 서버','24~27','차별점 ②','<b>24 통신 규칙과 CLI</b> → <b>25 여러 클라이언트와 접속별 트랜잭션</b> → <b>26 정상 종료</b> → <b>27 네트워크 벤치마크</b>(최종 그래프, 4-6).','—'],
+ ];const xs=ST.map((_,i)=>10+i*20);const rail=$('rail');
+ ST.forEach((s,i)=>{const d=document.createElement('div');d.className='station'+(i===0?' on':'');d.style.left=`calc(${xs[i]}% )`;d.innerHTML=`<div class="dot">${s[0]}</div><div class="nm">${s[1]}</div><div class="rg">${s[2]}</div>`;d.onclick=()=>show(i);rail.appendChild(d);});
+ function show(i){document.querySelectorAll('.station').forEach((e,j)=>e.classList.toggle('on',j===i));const s=ST[i];$('stDetail').innerHTML=`<div style="font-size:22px">${s[0]} <b>${s[1]}</b> <span class="mono small">${s[2]}</span></div><div class="small" style="color:var(--oak);font-weight:700">${s[3]}</div><p>${s[4]}</p><div class="small">📚 ${s[5]}</div>`;}
+ show(0);new IntersectionObserver((es,o)=>{if(es[0].isIntersecting){$('railDone').style.width=`calc(${xs[0]+20*0.7}% - 30px)`;$('train').style.left=`calc(${xs[0]+20*0.7}% - 0px)`;o.disconnect();}},{threshold:.5}).observe(rail);})();
+
+/* ===== 4-2 first committer wins ===== */
+(function(){let tok=0;
+ function draw(p,key,ord){const T2k=key,y1=60,y2=140,ex1=ord==='1'?430:560,ex2=ord==='1'?560:430;const conflict=key==='x';const loser=conflict?(ord==='1'?2:1):0;
+  let g=`<line x1="40" y1="30" x2="40" y2="180" stroke="var(--muted)" stroke-dasharray="4 4"/><text x="44" y="22" font-size="12" fill="var(--muted)">📸 스냅샷 v1 (x=1, y=1)</text>`;
+  const lane=(y,lab,k,end,done,lose)=>{const w=Math.min(p,1)*(end-60);let s=`<text x="0" y="${y+5}" font-size="14" font-weight="700" fill="var(--ink)">${lab}</text><rect x="60" y="${y-12}" width="${Math.max(0,w)}" height="24" rx="6" fill="var(--inner-soft)" stroke="var(--inner)"/>`;
+   if(p>.35)s+=`<text x="${150}" y="${y+5}" font-size="12" fill="var(--inner)">${k} = 2 (메모장)</text>`;
+   if(done)s+=`<circle cx="${end}" cy="${y}" r="16" fill="${lose?'var(--warn)':'var(--leaf)'}"/><text x="${end}" y="${y+5}" text-anchor="middle" font-size="14" fill="#fff">${lose?'✕':'✓'}</text><text x="${end+24}" y="${y+5}" font-size="12" fill="${lose?'var(--warn)':'var(--leaf)'}">${lose?'충돌! 다시 시도':'커밋 OK'}</text>`;return s;};
+  const t1done=p>=1.05+(ord==='1'?0:.5),t2done=p>=1.05+(ord==='2'?0:.5);
+  g+=lane(y1,'T1','x',ex1,t1done,loser===1)+lane(y2,'T2',T2k,ex2,t2done,loser===2);
+  g+=`<line x1="690" y1="20" x2="690" y2="190" stroke="var(--oak)" stroke-width="2"/><text x="690" y="205" text-anchor="middle" font-size="11" fill="var(--oak)">커밋 창구 (한 줄)</text>`;
+  $('fcSvg').innerHTML=g;}
+ $('fcRun').onclick=async()=>{const t=++tok,key=segval('fcKey','k'),ord=segval('fcOrd','o');$('fcLog').innerHTML='두 트랜잭션이 기다림 없이 동시에 실행돼요…';
+  for(let p=0;p<=1.6;p+=.04){if(t!==tok)return;draw(p,key,ord);await sleep(30);}
+  const first=ord==='1'?'T1':'T2',second=ord==='1'?'T2':'T1';
+  $('fcLog').innerHTML=key==='x'?`${first}이 먼저 커밋해서 x를 바꿨어요. ${second}가 커밋할 때 "내가 쓴 x를 v1 이후 누가 먼저 커밋했나?" → <b>예 → 충돌 오류</b>. ${second}는 새 스냅샷에서 다시 시도하면 돼요. 이렇게 해서 잃어버린 업데이트가 사라져요.`:`T1은 x, T2는 y. 서로 다른 키라서 <b>둘 다 커밋 OK</b> ✅ 같은 페이지에 있는 키여도 괜찮아요. 판정이 키 단위니까요. SQLite라면 T2는 T1이 끝날 때까지 기다려야 했어요.`;};
+ ['fcKey','fcOrd'].forEach(id=>segctl(id,()=>$('fcRun').click()));draw(0,'x','1');$('fcLog').textContent='▶을 눌러 보세요.';})();
+
+/* ===== 4-3 bus canvas ===== */
+(function(){const cv=$('busCv'),ctx=cv.getContext('2d');let W,H,dpr;function size(){dpr=window.devicePixelRatio||1;W=cv.clientWidth;H=200;cv.width=W*dpr;cv.height=H*dpr;ctx.setTransform(dpr,0,0,dpr,0,0);}size();addEventListener('resize',size);
+ let st;const reset=()=>{st={dots:[],queue:0,bus:{go:false,x:0,load:0},done:0,trips:0,syncTime:0,acc:0};};reset();$('busReset').onclick=reset;
+ const SYNC=1.6;let last=performance.now(),visible=false;new IntersectionObserver(es=>visible=es[0].isIntersecting).observe(cv);
+ const lbl=()=>$('busRateV').textContent=$('busRate').value+' / sync';$('busRate').oninput=lbl;lbl();
+ function frame(now){const dt=Math.min(.05,(now-last)/1000);last=now;if(visible){step(dt);paint();}requestAnimationFrame(frame);}
+ function step(dt){const rate=+$('busRate').value/SYNC;st.acc+=rate*dt;while(st.acc>=1){st.acc--;st.dots.push({x:-10,y:40+Math.random()*120,sp:120+Math.random()*80});}
+  const stopX=W*.55;st.dots.forEach(d=>d.x+=d.sp*dt);const arrived=st.dots.filter(d=>d.x>=stopX-30);st.queue+=arrived.length;st.dots=st.dots.filter(d=>d.x<stopX-30);
+  if(st.bus.go){st.bus.x+=dt/SYNC;st.syncTime+=dt;if(st.bus.x>=1){st.done+=st.bus.load;st.trips++;st.bus={go:false,x:0,load:0};}}
+  if(!st.bus.go&&st.queue>0){const cap=$('busGC').checked?Infinity:1;const l=Math.min(st.queue,cap);st.queue-=l;st.bus={go:true,x:0,load:l};}
+  $('busDone').textContent=st.done;$('busTrips').textContent=st.trips;$('busWait').textContent=st.queue;$('busTput').textContent=st.trips?Math.round(st.done/st.trips*333).toLocaleString():0;}
+ function paint(){const ink=css('--ink'),muted=css('--muted'),oak=css('--oak'),hl=css('--hl'),leaf=css('--leaf'),line=css('--line'),warn=css('--warn');ctx.clearRect(0,0,W,H);const stopX=W*.55;
+  ctx.strokeStyle=line;ctx.lineWidth=2;ctx.setLineDash([8,8]);ctx.beginPath();ctx.moveTo(0,H-24);ctx.lineTo(W,H-24);ctx.stroke();ctx.setLineDash([]);
+  ctx.fillStyle=muted;ctx.font='12px "Noto Sans KR"';ctx.fillText('커밋 도착 →',8,20);ctx.fillText('🚏 커밋 창구',stopX-70,20);ctx.fillText('디스크 (sync 완료 = OK)',W-150,20);
+  st.dots.forEach(d=>{ctx.fillStyle=hl;ctx.beginPath();ctx.arc(d.x,d.y,6,0,7);ctx.fill();});
+  const qn=Math.min(st.queue,40);for(let i=0;i<qn;i++){ctx.fillStyle=warn;ctx.beginPath();ctx.arc(stopX-40-(i%5)*13,50+Math.floor(i/5)*14,5.5,0,7);ctx.fill();}if(st.queue>40){ctx.fillStyle=warn;ctx.fillText('+'+(st.queue-40),stopX-110,H-34);}
+  const bx=stopX+(W-stopX-90)*st.bus.x,by=H-80;ctx.fillStyle=oak;ctx.beginPath();ctx.roundRect(bx,by,84,46,10);ctx.fill();ctx.fillStyle='#fff';ctx.font='bold 13px "Noto Sans KR"';ctx.fillText(st.bus.go?`sync · ${st.bus.load}명`:'대기',bx+10,by+28);
+  ctx.fillStyle=ink;ctx.beginPath();ctx.arc(bx+18,by+48,7,0,7);ctx.arc(bx+66,by+48,7,0,7);ctx.fill();
+  ctx.fillStyle=leaf;ctx.font='bold 13px "JetBrains Mono"';ctx.fillText('✓ '+st.done,W-60,H-40);}
+ requestAnimationFrame(frame);})();
+
+/* ===== 4-4 checkpoint ===== */
+(function(){const S=[
+ {wal:['r1','r2','r3'],data:'옛 페이지들',A:'체크포인트 = 0 · 번호 7 ✓',B:'체크포인트 = 0 · 번호 6 ✓',msg:'WAL에 커밋 r1~r3가 쌓였어요. 메타 슬롯 두 장 중 <b>번호가 큰 A(7)</b>가 지금 책갈피예요.'},
+ {wal:['r1','r2','r3'],data:'r1~r3 반영 중…',A:'체크포인트 = 0 · 번호 7 ✓',B:'체크포인트 = 0 · 번호 6 ✓',hl:'data',msg:'체크포인트 시작: WAL의 페이지 사본들을 데이터 파일에 써요. 그다음 sync.'},
+ {wal:['r1','r2','r3'],data:'r1~r3 반영됨 ✓',A:'체크포인트 = 0 · 번호 7 ✓',B:'✍️ 쓰는 중…',hl:'B',msg:'이제 "r3까지 반영함"을 적어요. <b>지금 책갈피(A)가 아니라 다른 쪽(B)에</b> 써요.'},
+ {wal:['r1','r2','r3'],data:'r1~r3 반영됨 ✓',A:'체크포인트 = 0 · 번호 7 ✓',B:'💥 반쯤 써짐 · 체크섬 ✗',torn:true,msg:'💥 만약 B를 쓰다가 정전이 나면? B는 체크섬이 틀려서 버려요. 하지만 <b>A는 멀쩡해요</b> → A의 "체크포인트 0"부터 WAL을 다시 적용하면 돼요. 손해는 일을 조금 다시 하는 것뿐이에요.'},
+ {wal:['r1','r2','r3'],data:'r1~r3 반영됨 ✓',A:'체크포인트 = 0 · 번호 7 ✓',B:'체크포인트 = r3 · 번호 8 ✓',hl:'B',msg:'정전이 없었다면: B에 "r3까지 · 번호 8"이 무사히 써졌어요. 이제 <b>번호가 큰 B가 책갈피</b>예요.'},
+ {wal:['(비움)','r4'],data:'r1~r3 반영됨 ✓',A:'체크포인트 = 0 · 번호 7 ✓',B:'체크포인트 = r3 · 번호 8 ✓',msg:'r3까지는 데이터 파일에 있으니 WAL 앞부분은 버려도 돼요. 새 커밋 r4부터 쌓이고, 다음 체크포인트는 <b>A에</b> 써요. 이렇게 번갈아 써요. 책갈피 하나만 쓰면 그걸 고치다 정전이 났을 때 기댈 곳이 없어요.'},
+ ];let s=0;const r=()=>{const x=S[s];$('ckDots').innerHTML=S.map((_,i)=>`<span class="${i<=s?'on':''}">${i+1}</span>`).join('');
+  $('ckWal').innerHTML=x.wal.map(w=>`<div class="rec ${w.startsWith('(')?'gone':''}">${w}</div>`).join('');$('ckData').innerHTML=`<div class="rec ${x.hl==='data'?'replay':''}">${x.data}</div>`;
+  $('ckMeta').innerHTML=`<div class="rec meta ${x.hl==='A'?'replay':''}">A: ${x.A}</div><div class="rec ${x.torn?'torn':'meta'} ${x.hl==='B'?'replay':''}">B: ${x.B}</div>`;$('ckLog').innerHTML=x.msg;$('ckNext').disabled=s>=S.length-1;};
+ $('ckNext').onclick=()=>{s++;r();};$('ckReset').onclick=()=>{s=0;r();};r();})();
+
+/* ===== 4-5 key encoding ===== */
+(function(){const hx=b=>b.toString(16).padStart(2,'0');const run=()=>{const tb=Math.max(0,Math.min(255,+$('keTab').value||0));const pks=$('kePks').value.split(/[ ,]+/).map(Number).filter(n=>Number.isInteger(n)&&n>=0&&n<2**32).slice(0,8);
+ const be=n=>[n>>>24&255,n>>>16&255,n>>>8&255,n&255],le=n=>be(n).reverse();const cmp=(a,b)=>{for(let i=0;i<a.length;i++)if(a[i]!==b[i])return a[i]-b[i];return 0;};
+ const show=(enc,el)=>{const rows=pks.map(n=>({n,b:enc(n)})).sort((a,b)=>cmp(a.b,b.b));const sortedNum=[...pks].sort((a,b)=>a-b);let bad=0;
+  el.innerHTML=rows.map((r,i)=>{const ok=r.n===sortedNum[i];if(!ok)bad++;return `<div class="${ok?'':'bad'}" style="animation-delay:${i*60}ms"><span class="tb">${hx(tb)}</span><span class="pk">${r.b.map(hx).join(' ')}</span><span class="lbl">id = ${r.n} ${ok?'':'⚠️ 자리가 틀림'}</span></div>`;}).join('');return bad;};
+ show(be,$('keBE'));const bad=show(le,$('keLE'));$('keLog').innerHTML=`B+Tree는 키를 <b>바이트 사전 순</b>으로 비교해요(위에서 아래로 정렬돼 있어요). 빅 엔디언은 숫자 순서와 같아요. 리틀 엔디언은 ${bad?`<b>${bad}개가 자리를 잘못 잡았어요</b>. 예를 들어 256(= 00 01 00 00)이 1(= 01 00 00 00)보다 앞에 와요. 범위 조회가 엉망이 돼요.`:'이번 숫자들에서는 우연히 맞았어요. 1, 256을 넣어 보세요.'}`;};
+ $('keTab').oninput=run;$('kePks').oninput=run;run();})();
+
+/* ===== 4-6 final chart ===== */
+(function(){const svg=$('finalChart');const X=n=>60+(n-1)/15*540,Y=v=>260-v/10*220;
+ const sq=Array.from({length:16},(_,i)=>[i+1,2.2+Math.min(i,2)*.15]);const ok=Array.from({length:16},(_,i)=>{const n=i+1;return [n,2.4+7*(1-Math.exp(-(n-1)/5))];});
+ const pathOf=p=>p.map((q,i)=>(i?'L':'M')+X(q[0]).toFixed(1)+','+Y(q[1]).toFixed(1)).join(' ');
+ const base=`<g font-size="12" fill="var(--muted)"><line x1="60" y1="260" x2="610" y2="260" stroke="var(--line)"/><line x1="60" y1="30" x2="60" y2="260" stroke="var(--line)"/><text x="335" y="290" text-anchor="middle">동시에 쓰는 클라이언트 수 →</text><text x="20" y="150" transform="rotate(-90 20 150)" text-anchor="middle">쓰기 처리량 →</text>${[1,4,8,12,16].map(n=>`<text x="${X(n)}" y="276" text-anchor="middle">${n}</text>`).join('')}</g>`;
+ const draw=()=>{svg.innerHTML=base+`<path id="lsq" d="${pathOf(sq)}" fill="none" stroke="var(--muted)" stroke-width="3"/><path id="lok" d="${pathOf(ok)}" fill="none" stroke="var(--leaf)" stroke-width="3.5"/><text x="${X(16)+4}" y="${Y(sq[15][1])+4}" font-size="13" fill="var(--muted)" text-anchor="end" dy="-10">SQLite (예상)</text><text x="${X(16)}" y="${Y(ok[15][1])-12}" font-size="13" font-weight="700" fill="var(--leaf)" text-anchor="end">Oakdb (예상)</text><text x="330" y="40" text-anchor="middle" font-size="12" fill="var(--warn)">아직 측정 전 · 모양만 그린 가설</text>`;
+  ['lsq','lok'].forEach((id,i)=>{const p=$(id),L=p.getTotalLength();p.style.strokeDasharray=L;p.style.strokeDashoffset=L;p.getBoundingClientRect();p.style.transition=`stroke-dashoffset 2s ease ${i*.5}s`;p.style.strokeDashoffset=0;});};
+ $('fcDraw').onclick=draw;new IntersectionObserver((es,o)=>{if(es[0].isIntersecting){draw();o.disconnect();}},{threshold:.4}).observe(svg);})();
+</script>
+</body>
+</html>
