@@ -1,6 +1,7 @@
 //! Benchmarks for one leaf (docs/benchmarks/0001), a two-level tree
 //! (docs/benchmarks/0003), range scans (docs/benchmarks/0005) and long
-//! values in overflow pages (docs/benchmarks/0006).
+//! values in overflow pages (docs/benchmarks/0006), and opening a
+//! database (docs/benchmarks/0007).
 //!
 //! Reads run against a full leaf. Commits overwrite keys that are already
 //! there, so the leaf stays full and every few commits has to compact.
@@ -240,5 +241,16 @@ fn long_values(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, reads, commits, scans, long_values);
+/// Opening reads and checks every page: about 160 leaves under one root.
+fn opens(c: &mut Criterion) {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open_with(NoSyncFs, dir.path()).unwrap();
+    fill_two_levels(&db);
+    db.close().unwrap();
+    c.bench_function("open/two_levels", |b| {
+        b.iter(|| black_box(Db::open_with(NoSyncFs, dir.path()).unwrap()))
+    });
+}
+
+criterion_group!(benches, reads, commits, scans, long_values, opens);
 criterion_main!(benches);
