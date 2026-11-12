@@ -1,7 +1,7 @@
 //! Benchmarks for one leaf (docs/benchmarks/0001), a two-level tree
-//! (docs/benchmarks/0003), range scans (docs/benchmarks/0005) and long
-//! values in overflow pages (docs/benchmarks/0006), and opening a
-//! database (docs/benchmarks/0007).
+//! (docs/benchmarks/0003), range scans (docs/benchmarks/0005), long values
+//! in overflow pages (docs/benchmarks/0006) and opening a database
+//! (docs/benchmarks/0007).
 //!
 //! Reads run against a full leaf. Commits overwrite keys that are already
 //! there, so the leaf stays full and every few commits has to compact.
