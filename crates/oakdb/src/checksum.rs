@@ -3,9 +3,10 @@
 //! Every page in the data file starts with a CRC-32C of the rest of the
 //! page followed by its page number as 8 little-endian bytes. The page
 //! number makes a whole, valid page written in the wrong place fail too.
-//! Pages in memory keep 0 in the field: the checksum is filled in on the
-//! way to the file and checked on the way back, and a page whose checksum
-//! does not match is always an error.
+//! The checksum is filled in on the way to the file and checked on the way
+//! back, and a page whose checksum does not match is always an error. In
+//! memory the field means nothing: pages made in memory hold 0 there, pages
+//! read from the file keep what was read, and every write fills it in anew.
 
 use crate::error::{Error, Result};
 use crate::page::PAGE_SIZE;
@@ -21,9 +22,8 @@ fn checksum(page_no: u64, page: &[u8]) -> u32 {
 
 /// A copy of `page` with its checksum for `page_no` filled in, ready to be
 /// written there.
-pub(crate) fn sealed(page_no: u64, page: &[u8]) -> [u8; PAGE_SIZE] {
-    let mut out = [0; PAGE_SIZE];
-    out.copy_from_slice(page);
+pub(crate) fn sealed(page_no: u64, page: &[u8; PAGE_SIZE]) -> [u8; PAGE_SIZE] {
+    let mut out = *page;
     let sum = checksum(page_no, &out);
     out[..CHECKSUM_LEN].copy_from_slice(&sum.to_le_bytes());
     out
@@ -44,8 +44,8 @@ pub(crate) fn verify(page_no: u64, page: &[u8]) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn page_of(byte: u8) -> Vec<u8> {
-        vec![byte; PAGE_SIZE]
+    fn page_of(byte: u8) -> [u8; PAGE_SIZE] {
+        [byte; PAGE_SIZE]
     }
 
     #[test]

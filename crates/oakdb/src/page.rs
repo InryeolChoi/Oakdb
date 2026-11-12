@@ -19,7 +19,7 @@
 //!
 //! ```text
 //! offset  size  field
-//! 0..4    u32   checksum         0 in memory, CRC-32C on disk (checksum.rs)
+//! 0..4    u32   checksum         CRC-32C on disk, filled in by each write (checksum.rs)
 //! 4..12   u64   page_lsn         reserved for the WAL, 0 for now
 //! 12      u8    kind             1 = leaf, 2 = internal (3, 4 below)
 //! 13      u8    flags            must be 0
@@ -362,8 +362,11 @@ impl Page {
         Ok(())
     }
 
-    pub(crate) fn as_bytes(&self) -> &[u8] {
-        &self.buf
+    /// The page's bytes, as they go to the file (before the checksum).
+    pub(crate) fn as_bytes(&self) -> &[u8; PAGE_SIZE] {
+        self.buf[..]
+            .try_into()
+            .expect("every page is made or read with PAGE_SIZE bytes")
     }
 
     /// What this page is for.
@@ -821,7 +824,7 @@ mod tests {
             let len = if key % 2 == 0 { 1 } else { 300 };
             assert_eq!(page.get(&[key]), Some(Value::Inline(&vec![key; len][..])));
         }
-        Page::from_bytes(page.as_bytes().into()).unwrap();
+        Page::from_bytes(page.as_bytes()[..].into()).unwrap();
     }
 
     #[test]
@@ -858,7 +861,7 @@ mod tests {
                 Err(Full) => assert_eq!(page.as_bytes(), before.as_bytes()),
             }
             if step % 500 == 0 {
-                page = Page::from_bytes(page.as_bytes().into()).unwrap();
+                page = Page::from_bytes(page.as_bytes()[..].into()).unwrap();
             }
         }
         for key in 0..40u8 {
@@ -882,7 +885,7 @@ mod tests {
         assert_eq!(page.get(b"b"), Some(Value::Inline(&b"22"[..])));
         assert_eq!(page.read_u16(CELL_COUNT), 1);
         assert_eq!(page.read_u16(FRAG_BYTES), 6);
-        Page::from_bytes(page.as_bytes().into()).unwrap();
+        Page::from_bytes(page.as_bytes()[..].into()).unwrap();
     }
 
     #[test]
@@ -923,7 +926,7 @@ mod tests {
         page.put(b"oak", b"tree").unwrap();
         page.put(b"acorn", b"seed").unwrap();
 
-        let read = Page::from_bytes(page.as_bytes().into()).unwrap();
+        let read = Page::from_bytes(page.as_bytes()[..].into()).unwrap();
 
         assert_eq!(read.get(b"oak"), Some(Value::Inline(&b"tree"[..])));
         assert_eq!(read.get(b"acorn"), Some(Value::Inline(&b"seed"[..])));
@@ -973,7 +976,7 @@ mod tests {
         page.put(b"a", b"old").unwrap();
         page.put(b"a", b"new").unwrap();
 
-        let mut read = Page::from_bytes(page.as_bytes().into()).unwrap();
+        let mut read = Page::from_bytes(page.as_bytes()[..].into()).unwrap();
         read.put(b"a", b"newest").unwrap();
 
         assert_eq!(read.get(b"a"), Some(Value::Inline(&b"newest"[..])));
@@ -983,13 +986,13 @@ mod tests {
     fn an_overflow_page_round_trips_through_its_bytes() {
         let page = Page::overflow(b"part of a value", Some(9));
 
-        let read = Page::from_bytes(page.as_bytes().into()).unwrap();
+        let read = Page::from_bytes(page.as_bytes()[..].into()).unwrap();
 
         assert_eq!(read.kind(), Kind::Overflow);
         assert_eq!(read.data(), b"part of a value");
         assert_eq!(read.next(), Some(9));
         let full = Page::overflow(&[7; OVERFLOW_DATA], None);
-        let read = Page::from_bytes(full.as_bytes().into()).unwrap();
+        let read = Page::from_bytes(full.as_bytes()[..].into()).unwrap();
         assert_eq!(read.data(), &[7; OVERFLOW_DATA][..]);
         assert_eq!(read.next(), None);
     }
@@ -998,7 +1001,7 @@ mod tests {
     fn a_free_page_round_trips_and_holds_nothing_else() {
         let page = Page::free(Some(5));
 
-        let read = Page::from_bytes(page.as_bytes().into()).unwrap();
+        let read = Page::from_bytes(page.as_bytes()[..].into()).unwrap();
 
         assert_eq!(read.kind(), Kind::Free);
         assert_eq!(read.next(), Some(5));
@@ -1035,7 +1038,7 @@ mod tests {
         page.put(b"a", b"short").unwrap();
         page.put_value(b"b", Value::Overflow(r)).unwrap();
 
-        let read = Page::from_bytes(page.as_bytes().into()).unwrap();
+        let read = Page::from_bytes(page.as_bytes()[..].into()).unwrap();
 
         assert_eq!(read.get(b"a"), Some(Value::Inline(&b"short"[..])));
         assert_eq!(read.get(b"b"), Some(Value::Overflow(r)));

@@ -100,7 +100,7 @@ impl<F: Fs> Db<F> {
         if size < PAGE_SIZE as u64 {
             return Err(Error::Corrupt("data file is too short".into()));
         }
-        let meta = Meta::decode(&read_page(&file, 0)?)?;
+        let meta = Meta::read_fields(&read_page(&file, 0)?)?;
         if size < meta.page_count.saturating_mul(PAGE_SIZE as u64) {
             return Err(Error::Corrupt(
                 "data file is shorter than its meta page says".into(),
@@ -373,7 +373,7 @@ fn write_meta(file: &impl FsFile, meta: Meta) -> Result<()> {
 }
 
 /// Writes `page` at page `page_no`, with its checksum.
-fn write_page(file: &impl FsFile, page_no: u64, page: &[u8]) -> Result<()> {
+fn write_page(file: &impl FsFile, page_no: u64, page: &[u8; PAGE_SIZE]) -> Result<()> {
     file.write_all_at(&checksum::sealed(page_no, page), page_offset(page_no))?;
     Ok(())
 }

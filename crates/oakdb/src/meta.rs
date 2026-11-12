@@ -39,8 +39,10 @@ pub(crate) struct Meta {
 
 impl Meta {
     /// Encodes a full meta page.
-    pub(crate) fn encode(&self) -> Vec<u8> {
+    pub(crate) fn encode(&self) -> [u8; PAGE_SIZE] {
         encode_with_page_size(self, PAGE_SIZE as u32)
+            .try_into()
+            .expect("the meta page is PAGE_SIZE bytes")
     }
 
     /// Checks that the first [`META_LEN`] bytes of a file start an Oakdb
@@ -67,10 +69,16 @@ impl Meta {
         Ok(())
     }
 
-    /// Reads the meta fields from the first [`META_LEN`] bytes of the file,
-    /// after [`Meta::check_header`].
+    /// Checks the header, then reads the meta fields.
+    #[cfg(test)]
     pub(crate) fn decode(bytes: &[u8]) -> Result<Meta> {
         Meta::check_header(bytes)?;
+        Meta::read_fields(bytes)
+    }
+
+    /// Reads the meta fields from the first [`META_LEN`] bytes of the meta
+    /// page, whose header [`Meta::check_header`] has already accepted.
+    pub(crate) fn read_fields(bytes: &[u8]) -> Result<Meta> {
         let meta = Meta {
             root_page: u64_at(bytes, 20),
             page_count: u64_at(bytes, 28),
