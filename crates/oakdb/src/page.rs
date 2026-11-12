@@ -19,7 +19,7 @@
 //!
 //! ```text
 //! offset  size  field
-//! 0..4    u32   checksum         reserved for CRC-32C, 0 for now
+//! 0..4    u32   checksum         0 in memory, CRC-32C on disk (checksum.rs)
 //! 4..12   u64   page_lsn         reserved for the WAL, 0 for now
 //! 12      u8    kind             1 = leaf, 2 = internal (3, 4 below)
 //! 13      u8    flags            must be 0

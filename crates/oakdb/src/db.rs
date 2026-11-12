@@ -9,6 +9,9 @@
 //!          new pages reuse free ones before going at the end
 //! ```
 //!
+//! Every page goes to the file with its checksum filled in, and every page
+//! read back is checked against it (`checksum.rs`).
+//!
 //! A commit writes the pages it changed straight into the data file and
 //! syncs them. If it added pages, it then writes the meta page and syncs
 //! again. The WAL (ADR 0007) will replace that later.
@@ -19,6 +22,7 @@ use std::ops::{Bound, RangeBounds};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use crate::checksum;
 use crate::error::{Error, Result, MAX_KEY_LEN, MAX_VALUE_LEN};
 use crate::fs::{Fs, FsFile, StdFs};
 use crate::meta::{Meta, META_LEN};
@@ -72,7 +76,7 @@ impl<F: Fs> Db<F> {
     fn create(fs: &F, dir: &Path, file: F::File) -> Result<Self> {
         let mut tree = Tree::new();
         for page_no in tree.take_dirty() {
-            file.write_all_at(tree.page(page_no).as_bytes(), page_offset(page_no))?;
+            write_page(&file, page_no, tree.page(page_no).as_bytes())?;
         }
         write_meta(&file, tree.meta())?;
         file.sync_data()?;
@@ -90,17 +94,19 @@ impl<F: Fs> Db<F> {
         }
         let mut header = [0; META_LEN];
         file.read_exact_at(&mut header, 0)?;
-        let meta = Meta::decode(&header)?;
+        // Magic, page size and version first: they say how long a page is
+        // and whether it has a checksum at all.
+        Meta::check_header(&header)?;
+        if size < PAGE_SIZE as u64 {
+            return Err(Error::Corrupt("data file is too short".into()));
+        }
+        let meta = Meta::decode(&read_page(&file, 0)?)?;
         if size < meta.page_count.saturating_mul(PAGE_SIZE as u64) {
             return Err(Error::Corrupt(
                 "data file is shorter than its meta page says".into(),
             ));
         }
-        let tree = Tree::load(meta, |page_no| {
-            let mut buf = vec![0; PAGE_SIZE].into_boxed_slice();
-            file.read_exact_at(&mut buf, page_offset(page_no))?;
-            Page::from_bytes(buf)
-        })?;
+        let tree = Tree::load(meta, |page_no| Page::from_bytes(read_page(&file, page_no)?))?;
         Ok(Db {
             file,
             tree: Mutex::new(Arc::new(tree)),
@@ -231,7 +237,7 @@ impl<F: Fs> Txn<'_, F> {
         }
         let file = &self.db.file;
         for page_no in next.take_dirty() {
-            file.write_all_at(next.page(page_no).as_bytes(), page_offset(page_no))?;
+            write_page(file, page_no, next.page(page_no).as_bytes())?;
         }
         file.sync_data()?;
         // The meta page goes last, so it only points at pages already on
@@ -362,9 +368,22 @@ fn check_key(key: &[u8]) -> Result<()> {
 
 /// Writes `meta` to both meta slots.
 fn write_meta(file: &impl FsFile, meta: Meta) -> Result<()> {
-    file.write_all_at(&meta.encode(), 0)?;
-    file.write_all_at(&meta.encode(), PAGE_SIZE as u64)?;
+    write_page(file, 0, &meta.encode())?;
+    write_page(file, 1, &meta.encode())
+}
+
+/// Writes `page` at page `page_no`, with its checksum.
+fn write_page(file: &impl FsFile, page_no: u64, page: &[u8]) -> Result<()> {
+    file.write_all_at(&checksum::sealed(page_no, page), page_offset(page_no))?;
     Ok(())
+}
+
+/// Reads page `page_no`, refusing it if its checksum does not match.
+fn read_page(file: &impl FsFile, page_no: u64) -> Result<Box<[u8]>> {
+    let mut buf = vec![0; PAGE_SIZE].into_boxed_slice();
+    file.read_exact_at(&mut buf, page_offset(page_no))?;
+    checksum::verify(page_no, &buf)?;
+    Ok(buf)
 }
 
 fn page_offset(page_no: u64) -> u64 {
