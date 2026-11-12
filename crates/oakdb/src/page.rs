@@ -535,12 +535,13 @@ impl Page {
     /// The value of entry `index`. Leaves only.
     pub(crate) fn value(&self, index: usize) -> Value<'_> {
         debug_assert!(self.is_leaf());
-        let (offset, _) = self.slot(index);
-        let stored = self.value_at(index);
-        if self.read_u16(offset + 2) & OVERFLOW_BIT != 0 {
-            Value::Overflow(OverflowRef::decode(stored))
-        } else {
+        let (offset, len) = self.slot(index);
+        let start = offset + CELL_HEADER_SIZE + self.read_u16(offset);
+        let stored = &self.buf[start..offset + len];
+        if self.read_u16(offset + 2) & OVERFLOW_BIT == 0 {
             Value::Inline(stored)
+        } else {
+            Value::Overflow(OverflowRef::decode(stored))
         }
     }
 
