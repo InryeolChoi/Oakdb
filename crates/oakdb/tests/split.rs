@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use oakdb::{Db, Error, DATA_FILE, MAX_ENTRY_LEN, MAX_KEY_LEN};
+use oakdb::{Db, DATA_FILE, MAX_ENTRY_LEN, MAX_KEY_LEN};
 
 /// How many 4 KB pages the data file has: two meta pages, then the tree.
 fn pages_in_file(dir: &Path) -> u64 {
@@ -113,32 +113,19 @@ fn every_key_is_found_after_many_splits_in_scattered_order() {
 }
 
 #[test]
-fn a_value_is_refused_if_four_entries_of_its_size_would_not_fit_in_a_page() {
+fn an_entry_up_to_the_leaf_limit_stays_in_its_leaf_and_a_longer_one_still_fits() {
+    // 03 refused values past `MAX_ENTRY_LEN`; since #18 they go to overflow
+    // pages, so both sides of the limit round trip.
     let root = tempfile::tempdir().unwrap();
     let db = Db::open(root.path()).unwrap();
     let mut txn = db.begin();
-
     txn.put(b"k", &[1; MAX_ENTRY_LEN - 1]).unwrap();
-    let err = txn.put(b"k", &[1; MAX_ENTRY_LEN]).unwrap_err();
-    assert!(
-        matches!(
-            err,
-            Error::ValueTooLarge {
-                len: 1006,
-                max: 1005
-            }
-        ),
-        "{err:?}"
-    );
-    let err = txn.put(&[7; MAX_KEY_LEN], &[1; 495]).unwrap_err();
-    assert!(
-        matches!(err, Error::ValueTooLarge { len: 495, max: 494 }),
-        "{err:?}"
-    );
+    txn.put(b"l", &[2; MAX_ENTRY_LEN]).unwrap();
+    txn.put(&[7; MAX_KEY_LEN], &[3; 495]).unwrap();
     txn.commit().unwrap();
 
-    assert_eq!(
-        db.begin().get(b"k").unwrap(),
-        Some(vec![1; MAX_ENTRY_LEN - 1])
-    );
+    let txn = db.begin();
+    assert_eq!(txn.get(b"k").unwrap(), Some(vec![1; MAX_ENTRY_LEN - 1]));
+    assert_eq!(txn.get(b"l").unwrap(), Some(vec![2; MAX_ENTRY_LEN]));
+    assert_eq!(txn.get(&[7; MAX_KEY_LEN]).unwrap(), Some(vec![3; 495]));
 }

@@ -6,7 +6,9 @@
 //! mostly puts, so the tree grows four levels deep; the other deletes long
 //! runs of keys, so leaves empty out and the root hands over to its last
 //! child. Both also scan ranges, with each end included, excluded or
-//! open, and between keys or on them.
+//! open, and between keys or on them. About one put in five writes a value
+//! too long for its leaf, so overflow pages fill, are replaced, freed and
+//! reused from the free list.
 //!
 //! Failing cases proptest finds are saved in `model.proptest-regressions`
 //! beside this file and run first every time; the ones that taught us
@@ -31,13 +33,27 @@ fn key(i: u16) -> Vec<u8> {
     key
 }
 
+/// Longest part of a long value past what fits in its leaf: up to four
+/// overflow pages.
+const LONGEST_OVERFLOW: usize = 4 * 4056;
+
+/// A value of `len` bytes that changes along its length, so a page of it
+/// read in the wrong place shows.
+fn value(len: usize, fill: u8) -> Vec<u8> {
+    (0..len)
+        .map(|i| fill.wrapping_add((i / 251) as u8))
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 enum Op {
-    /// Puts a value of `len` bytes (cut down to what the key leaves room
-    /// for) under key `key`.
+    /// Puts a value under key `key`: of `len` bytes cut down to what the
+    /// key leaves room for in its leaf, or, if `long`, of that much plus
+    /// `len`, which takes up to four overflow pages.
     Put {
         key: u16,
         len: u16,
+        long: bool,
         fill: u8,
     },
     Delete {
@@ -121,8 +137,8 @@ fn bound() -> impl Strategy<Value = Bound<Vec<u8>>> {
 
 fn op(mix: Mix) -> impl Strategy<Value = Op> {
     prop_oneof![
-        mix.put => (0..KEYS, any::<u16>(), any::<u8>())
-            .prop_map(|(key, len, fill)| Op::Put { key, len, fill }),
+        mix.put => (0..KEYS, any::<u16>(), prop::bool::weighted(0.2), any::<u8>())
+            .prop_map(|(key, len, long, fill)| Op::Put { key, len, long, fill }),
         mix.delete => (0..KEYS).prop_map(|key| Op::Delete { key }),
         mix.delete_run => (0..KEYS, 1..=mix.longest_run)
             .prop_map(|(from, count)| Op::DeleteRun { from, count }),
@@ -152,10 +168,20 @@ fn run(dir: &Path, ops: &[Op]) -> std::result::Result<(), TestCaseError> {
             let mut txn = db.begin();
             for op in ops.by_ref() {
                 match *op {
-                    Op::Put { key: i, len, fill } => {
+                    Op::Put {
+                        key: i,
+                        len,
+                        long,
+                        fill,
+                    } => {
                         let key = key(i);
-                        let len = usize::from(len) % (MAX_ENTRY_LEN - key.len() + 1);
-                        let value = vec![fill; len];
+                        let room = MAX_ENTRY_LEN - key.len();
+                        let len = if long {
+                            room + 1 + usize::from(len) % LONGEST_OVERFLOW
+                        } else {
+                            usize::from(len) % (room + 1)
+                        };
+                        let value = value(len, fill);
                         txn.put(&key, &value).unwrap();
                         pending.insert(key, value);
                     }

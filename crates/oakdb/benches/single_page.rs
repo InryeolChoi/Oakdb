@@ -1,5 +1,6 @@
 //! Benchmarks for one leaf (docs/benchmarks/0001), a two-level tree
-//! (docs/benchmarks/0003) and range scans (docs/benchmarks/0005).
+//! (docs/benchmarks/0003), range scans (docs/benchmarks/0005) and long
+//! values in overflow pages (docs/benchmarks/0006).
 //!
 //! Reads run against a full leaf. Commits overwrite keys that are already
 //! there, so the leaf stays full and every few commits has to compact.
@@ -187,5 +188,57 @@ fn scans(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, reads, commits, scans);
+/// A value of 100 KiB: 26 overflow pages.
+const LONG: usize = 100 * 1024;
+
+fn long_values(c: &mut Criterion) {
+    let mut group = c.benchmark_group("long");
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open_with(NoSyncFs, dir.path()).unwrap();
+    let mut txn = db.begin();
+    txn.put(b"long", &vec![1; LONG]).unwrap();
+    txn.commit().unwrap();
+    group.bench_function("get_100k", |b| {
+        b.iter(|| black_box(db.begin().get(b"long").unwrap()))
+    });
+    // Frees the 26 pages of the old value and takes them back for the new
+    // one: 26 overflow pages and the leaf to write.
+    let mut v = 0u8;
+    group.bench_function("overwrite_100k_no_sync", |b| {
+        b.iter(|| {
+            v = v.wrapping_add(1);
+            let mut txn = db.begin();
+            txn.put(b"long", &vec![v; LONG]).unwrap();
+            txn.commit().unwrap();
+        })
+    });
+    // Puts the value on free pages, then frees them again: two commits
+    // that each write 26 overflow or free pages, the leaf and the meta page.
+    group.bench_function("put_then_delete_100k_no_sync", |b| {
+        b.iter(|| {
+            let mut txn = db.begin();
+            txn.put(b"other", &vec![2; LONG]).unwrap();
+            txn.commit().unwrap();
+            let mut txn = db.begin();
+            txn.delete(b"other").unwrap();
+            txn.commit().unwrap();
+        })
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open_with(StdFs, dir.path()).unwrap();
+    let mut txn = db.begin();
+    txn.put(b"long", &vec![1; LONG]).unwrap();
+    txn.commit().unwrap();
+    group.bench_function("overwrite_100k_durable", |b| {
+        b.iter(|| {
+            v = v.wrapping_add(1);
+            let mut txn = db.begin();
+            txn.put(b"long", &vec![v; LONG]).unwrap();
+            txn.commit().unwrap();
+        })
+    });
+    group.finish();
+}
+
+criterion_group!(benches, reads, commits, scans, long_values);
 criterion_main!(benches);
