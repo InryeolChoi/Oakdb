@@ -948,6 +948,27 @@ mod tests {
     }
 
     #[test]
+    fn putting_over_a_long_value_frees_its_pages_first() {
+        // Commits delete every key they write before putting it back, so
+        // only a put straight on the tree replaces a long value in place.
+        let mut tree = Tree::new();
+        tree.put(b"k", &vec![1; 3 * OVERFLOW_DATA]);
+
+        tree.put(b"k", &vec![2; 2 * OVERFLOW_DATA]);
+
+        assert_eq!(tree.meta().page_count, 6);
+        assert_eq!(tree.meta().free_count, 1);
+        assert_eq!(
+            tree.get(b"k").as_deref(),
+            Some(&vec![2; 2 * OVERFLOW_DATA][..])
+        );
+        reload(&tree).unwrap();
+        tree.put(b"k", b"short");
+        assert_eq!(tree.meta().free_count, 3);
+        reload(&tree).unwrap();
+    }
+
+    #[test]
     fn a_split_takes_a_free_page_and_an_emptied_branch_gives_its_pages_back() {
         let mut tree = big_tree(0..300);
         let grown = tree.meta().page_count;
