@@ -3,22 +3,24 @@
 //! The database is one data file of B+Tree pages:
 //!
 //! ```text
-//! page 0   meta slot A: root page and page count
+//! page 0   meta slot A: root page, page count and free list
 //! page 1   meta slot B (same content as A for now)
-//! page 2.. tree pages; new pages go at the end
+//! page 2.. tree pages, overflow pages for long values, and free pages;
+//!          new pages reuse free ones before going at the end
 //! ```
 //!
 //! A commit writes the pages it changed straight into the data file and
 //! syncs them. If it added pages, it then writes the meta page and syncs
 //! again. The WAL (ADR 0007) will replace that later.
 
+use std::borrow::Cow;
 use std::collections::{btree_map, BTreeMap};
 use std::iter::{FusedIterator, Peekable};
 use std::ops::{Bound, RangeBounds};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use crate::error::{Error, Result, MAX_ENTRY_LEN, MAX_KEY_LEN};
+use crate::error::{Error, Result, MAX_KEY_LEN, MAX_VALUE_LEN};
 use crate::fs::{Fs, FsFile, StdFs};
 use crate::meta::{Meta, META_LEN};
 use crate::page::{Page, PAGE_SIZE};
@@ -143,7 +145,10 @@ impl<F: Fs> Txn<'_, F> {
         if let Some(write) = self.writes.get(key) {
             return Ok(write.clone());
         }
-        Ok(self.db.tree().get(key).map(<[u8]>::to_vec))
+        // Copy a long value out of its overflow pages without holding the
+        // lock, so commits do not wait for it.
+        let tree = Arc::clone(&self.db.tree());
+        Ok(tree.get(key).map(Cow::into_owned))
     }
 
     /// The entries whose keys are in `range`, in key order, including this
@@ -173,15 +178,12 @@ impl<F: Fs> Txn<'_, F> {
         scan
     }
 
-    /// Stores `value` under `key` when the transaction commits.
+    /// Stores `value` under `key` when the transaction commits. A value
+    /// longer than [`crate::MAX_ENTRY_LEN`] minus the key goes to overflow
+    /// pages; values can be up to [`MAX_VALUE_LEN`] bytes.
     pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         check_key(key)?;
-        if key.len() + value.len() > MAX_ENTRY_LEN {
-            return Err(Error::ValueTooLarge {
-                len: value.len(),
-                max: MAX_ENTRY_LEN - key.len(),
-            });
-        }
+        check_value_len(value.len())?;
         self.writes.insert(key.to_vec(), Some(value.to_vec()));
         Ok(())
     }
@@ -287,11 +289,11 @@ impl Scan<'_> {
     /// end of the range.
     fn read_committed(&mut self) {
         let end = self.end.as_ref().map(Vec::as_slice);
-        self.committed = self
-            .tree
+        let tree = &self.tree;
+        self.committed = tree
             .next_entry(&mut self.cursor)
             .filter(|&(key, _)| (Bound::Unbounded, end).contains(key))
-            .map(|(key, value)| (key.to_vec(), value.to_vec()));
+            .map(|(key, value)| (key.to_vec(), tree.value(value).into_owned()));
     }
 }
 
@@ -331,6 +333,16 @@ impl Iterator for Scan<'_> {
     }
 }
 
+fn check_value_len(len: usize) -> Result<()> {
+    if len > MAX_VALUE_LEN {
+        return Err(Error::ValueTooLarge {
+            len,
+            max: MAX_VALUE_LEN,
+        });
+    }
+    Ok(())
+}
+
 fn check_key(key: &[u8]) -> Result<()> {
     if key.len() > MAX_KEY_LEN {
         return Err(Error::KeyTooLarge {
@@ -363,6 +375,8 @@ mod tests {
         let meta = Meta {
             root_page: 2,
             page_count: 3,
+            free_head: None,
+            free_count: 0,
         };
         let mut bytes = encode_for_page_size(&meta, 8192);
         bytes.resize(3 * 8192, 0);
@@ -376,6 +390,15 @@ mod tests {
                 expected: 4096,
                 found: 8192
             }
+        ));
+    }
+
+    #[test]
+    fn a_value_longer_than_the_limit_is_refused() {
+        assert!(check_value_len(MAX_VALUE_LEN).is_ok());
+        assert!(matches!(
+            check_value_len(MAX_VALUE_LEN + 1),
+            Err(Error::ValueTooLarge { len, max: MAX_VALUE_LEN }) if len == MAX_VALUE_LEN + 1
         ));
     }
 

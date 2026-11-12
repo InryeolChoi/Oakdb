@@ -6,11 +6,17 @@ use std::io;
 /// Longest key the engine accepts, in bytes (ADR 0008).
 pub const MAX_KEY_LEN: usize = 512;
 
-/// Longest key plus value the engine accepts, in bytes.
+/// Longest key plus value kept inside a leaf page, in bytes.
 ///
 /// Four entries this size fill a page, so a full leaf always splits into
-/// two that fit. Values longer than this will go to overflow pages (#18).
+/// two that fit. A longer value goes, whole, to overflow pages, and its
+/// leaf keeps only where to find it.
 pub const MAX_ENTRY_LEN: usize = 1006;
+
+/// Longest value the engine accepts, in bytes: about 4 GiB, what the
+/// length field of an overflow value holds. The whole database is kept in
+/// memory for now, so memory is the real limit.
+pub const MAX_VALUE_LEN: usize = u32::MAX as usize;
 
 /// Everything that can go wrong in the engine.
 #[derive(Debug)]
@@ -25,12 +31,11 @@ pub enum Error {
         /// The limit, [`MAX_KEY_LEN`].
         max: usize,
     },
-    /// A key plus its value is longer than [`MAX_ENTRY_LEN`].
+    /// A value is longer than [`MAX_VALUE_LEN`].
     ValueTooLarge {
         /// Length of the rejected value.
         len: usize,
-        /// The longest value this key can have: [`MAX_ENTRY_LEN`] minus the
-        /// key's length.
+        /// The limit, [`MAX_VALUE_LEN`].
         max: usize,
     },
     /// The data file was made with a different page size.
@@ -58,10 +63,9 @@ impl fmt::Display for Error {
             Error::KeyTooLarge { len, max } => {
                 write!(f, "key is {len} bytes, longer than the {max} byte limit")
             }
-            Error::ValueTooLarge { len, max } => write!(
-                f,
-                "value is {len} bytes, longer than the {max} bytes left for it"
-            ),
+            Error::ValueTooLarge { len, max } => {
+                write!(f, "value is {len} bytes, longer than the {max} byte limit")
+            }
             Error::PageSizeMismatch { expected, found } => write!(
                 f,
                 "data file uses {found} byte pages, but this build uses {expected}"

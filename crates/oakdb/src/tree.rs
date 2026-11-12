@@ -1,17 +1,22 @@
 //! The B+Tree: finding the leaf for a key, splitting pages that fill up,
 //! and taking out leaves that empty out.
 //!
-//! The whole tree is kept in memory. Pages are shared with [`Arc`], so a
+//! Values too long for a leaf go to chains of overflow pages. Pages that
+//! fall out of use (an emptied leaf, a replaced value's overflow pages) go
+//! on the free list, and new pages come from there before the file grows.
+//!
+//! The whole file is kept in memory. Pages are shared with [`Arc`], so a
 //! commit can clone the tree cheaply, change its copy, and copy only the
 //! pages it touches.
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::ops::Bound;
 use std::sync::Arc;
 
-use crate::error::{corrupt, Result};
+use crate::error::{corrupt, Result, MAX_ENTRY_LEN};
 use crate::meta::Meta;
-use crate::page::Page;
+use crate::page::{Kind, OverflowRef, Page, Value, OVERFLOW_DATA};
 
 /// Page number of the first tree page. Pages 0 and 1 hold the meta slots.
 pub(crate) const FIRST_PAGE: u64 = 2;
@@ -19,8 +24,12 @@ pub(crate) const FIRST_PAGE: u64 = 2;
 #[derive(Clone)]
 pub(crate) struct Tree {
     root: u64,
-    /// Every page of the tree, page number [`FIRST_PAGE`] first.
+    /// Every page of the file, page number [`FIRST_PAGE`] first: tree
+    /// pages, overflow pages and free pages.
     pages: Vec<Arc<Page>>,
+    /// The first page of the free list, which each free page continues.
+    free_head: Option<u64>,
+    free_count: u64,
     /// Pages changed since the last [`Tree::take_dirty`].
     dirty: BTreeSet<u64>,
 }
@@ -31,6 +40,8 @@ impl Tree {
         let mut tree = Tree {
             root: FIRST_PAGE,
             pages: Vec::new(),
+            free_head: None,
+            free_count: 0,
             dirty: BTreeSet::new(),
         };
         tree.push(Page::empty_leaf());
@@ -39,8 +50,9 @@ impl Tree {
 
     /// The tree `meta` describes, reading each page with `read`.
     ///
-    /// Refuses a tree whose pages do not fit together, so a damaged file
-    /// can never send a lookup in circles or to the wrong leaf.
+    /// Refuses a file whose pages do not fit together, so a damaged file
+    /// can never send a lookup in circles or to the wrong leaf, or hand out
+    /// a page that is still in use.
     pub(crate) fn load(meta: Meta, mut read: impl FnMut(u64) -> Result<Page>) -> Result<Self> {
         let pages = (FIRST_PAGE..meta.page_count)
             .map(|page_no| read(page_no).map(Arc::new))
@@ -48,6 +60,8 @@ impl Tree {
         let tree = Tree {
             root: meta.root_page,
             pages,
+            free_head: meta.free_head,
+            free_count: meta.free_count,
             dirty: BTreeSet::new(),
         };
         tree.check()?;
@@ -58,6 +72,8 @@ impl Tree {
         Meta {
             root_page: self.root,
             page_count: FIRST_PAGE + self.pages.len() as u64,
+            free_head: self.free_head,
+            free_count: self.free_count,
         }
     }
 
@@ -70,27 +86,88 @@ impl Tree {
         std::mem::take(&mut self.dirty)
     }
 
-    pub(crate) fn get(&self, key: &[u8]) -> Option<&[u8]> {
+    /// The value under `key`, read from its overflow pages if it is there.
+    pub(crate) fn get(&self, key: &[u8]) -> Option<Cow<'_, [u8]>> {
         let (_, leaf) = self.descend(key);
-        self.page(leaf).get(key)
+        Some(self.value(self.page(leaf).get(key)?))
+    }
+
+    /// The bytes of `value`: borrowed from its leaf, or gathered from its
+    /// overflow pages.
+    pub(crate) fn value<'a>(&'a self, value: Value<'a>) -> Cow<'a, [u8]> {
+        match value {
+            Value::Inline(bytes) => Cow::Borrowed(bytes),
+            Value::Overflow(r) => {
+                let mut bytes = Vec::with_capacity(r.len as usize);
+                let mut next = Some(r.first);
+                while let Some(page_no) = next {
+                    let page = self.page(page_no);
+                    bytes.extend_from_slice(page.data());
+                    next = page.next();
+                }
+                debug_assert_eq!(bytes.len(), r.len as usize);
+                Cow::Owned(bytes)
+            }
+        }
     }
 
     /// Stores `value` under `key`, splitting its leaf if it is full, and
-    /// its parents too if they fill up.
+    /// its parents too if they fill up. A value too long for the leaf goes
+    /// to overflow pages. The overflow pages of a value it replaces are
+    /// freed.
     pub(crate) fn put(&mut self, key: &[u8], value: &[u8]) {
         let (path, leaf) = self.descend(key);
-        if self.page_mut(leaf).put(key, value).is_err() {
+        if let Some(Value::Overflow(old)) = self.page(leaf).get(key) {
+            self.free_chain(old);
+        }
+        let value = if key.len() + value.len() <= MAX_ENTRY_LEN {
+            Value::Inline(value)
+        } else {
+            Value::Overflow(self.write_overflow(value))
+        };
+        if self.page_mut(leaf).put_value(key, value).is_err() {
             self.split(&path, leaf, key, value);
         }
     }
 
-    /// Removes `key`. Its leaf is written at commit even if `key` was not
-    /// there. A leaf left empty leaves the tree, unless it is the root.
+    /// Removes `key`, freeing its overflow pages. Its leaf is written at
+    /// commit even if `key` was not there. A leaf left empty leaves the
+    /// tree, unless it is the root.
     pub(crate) fn delete(&mut self, key: &[u8]) {
         let (path, leaf) = self.descend(key);
+        if let Some(Value::Overflow(old)) = self.page(leaf).get(key) {
+            self.free_chain(old);
+        }
         self.page_mut(leaf).delete(key);
         if self.page(leaf).cell_count() == 0 && !path.is_empty() {
             self.remove_leaf(&path, leaf);
+        }
+    }
+
+    /// Writes `value` to a new chain of overflow pages, in page number order
+    /// when they are new at the end of the file.
+    fn write_overflow(&mut self, value: &[u8]) -> OverflowRef {
+        let chunks: Vec<&[u8]> = value.chunks(OVERFLOW_DATA).collect();
+        let page_nos: Vec<u64> = chunks
+            .iter()
+            .map(|_| self.alloc(Page::free(None)))
+            .collect();
+        for (i, chunk) in chunks.iter().enumerate() {
+            let next = page_nos.get(i + 1).copied();
+            self.set(page_nos[i], Page::overflow(chunk, next));
+        }
+        OverflowRef {
+            first: page_nos[0],
+            len: u32::try_from(value.len()).expect("Txn::put checks the length"),
+        }
+    }
+
+    /// Puts every page of the chain `r` on the free list.
+    fn free_chain(&mut self, r: OverflowRef) {
+        let mut next = Some(r.first);
+        while let Some(page_no) = next {
+            next = self.page(page_no).next();
+            self.free(page_no);
         }
     }
 
@@ -116,7 +193,7 @@ impl Tree {
     /// The entry at `cursor`, moving `cursor` on to the next one. Past the
     /// end of a leaf, follows its pointer to the next leaf; past the last
     /// leaf, returns `None`.
-    pub(crate) fn next_entry(&self, cursor: &mut Cursor) -> Option<(&[u8], &[u8])> {
+    pub(crate) fn next_entry(&self, cursor: &mut Cursor) -> Option<(&[u8], Value<'_>)> {
         loop {
             let page = self.page(cursor.leaf);
             if cursor.index < page.cell_count() {
@@ -148,15 +225,15 @@ impl Tree {
 
     /// Splits `leaf` to make room for `key` and `value`. The left half
     /// keeps the leaf's page number, so the leaf before it still points at
-    /// it; the right half goes on a new page.
+    /// it; the right half goes on a new page, a free one if there is one.
     ///
     /// Each parent on `path` then takes the new right page. A parent with
     /// no room splits the same way and hands its own right half up; a root
     /// with no room gets a new root above it, and the tree grows a level.
-    fn split(&mut self, path: &[(u64, usize)], leaf: u64, key: &[u8], value: &[u8]) {
+    fn split(&mut self, path: &[(u64, usize)], leaf: u64, key: &[u8], value: Value<'_>) {
         let (mut left, mut separator, mut right) = self.page(leaf).split_leaf(key, value);
         right.set_right_sibling(self.page(leaf).right_sibling());
-        let mut right_no = self.push(right);
+        let mut right_no = self.alloc(right);
         left.set_right_sibling(Some(right_no));
         *self.page_mut(leaf) = left;
 
@@ -168,11 +245,11 @@ impl Tree {
             }
             let (left, up, right) = page.split_internal(index, &separator, right_no);
             *page = left;
-            right_no = self.push(right);
+            right_no = self.alloc(right);
             separator = up;
             left_no = parent;
         }
-        self.root = self.push(Page::new_internal(left_no, &separator, right_no));
+        self.root = self.alloc(Page::new_internal(left_no, &separator, right_no));
     }
 
     /// Takes the empty `leaf` out of the tree. The leaf before it points
@@ -181,12 +258,13 @@ impl Tree {
     /// separators. A root left with one child hands over to it, and the
     /// tree loses a level.
     ///
-    /// The pages that leave the tree stay in the file, unused.
+    /// The pages that leave the tree go on the free list.
     fn remove_leaf(&mut self, path: &[(u64, usize)], leaf: u64) {
         if let Some(before) = self.leaf_before(path) {
             let next = self.page(leaf).right_sibling();
             self.page_mut(before).set_right_sibling(next);
         }
+        self.free(leaf);
         for &(parent, index) in path.iter().rev() {
             // A parent with no separators had `leaf`'s branch as its only
             // child, so it is empty now too.
@@ -194,9 +272,12 @@ impl Tree {
                 self.page_mut(parent).remove_child(index);
                 break;
             }
+            self.free(parent);
         }
         while !self.page(self.root).is_leaf() && self.page(self.root).cell_count() == 0 {
-            self.root = self.page(self.root).child_at(0);
+            let old = self.root;
+            self.root = self.page(old).child_at(0);
+            self.free(old);
         }
     }
 
@@ -221,16 +302,46 @@ impl Tree {
         page_no
     }
 
+    /// Stores `page` on the first free page, or at the end of the file if
+    /// none is free, and returns its page number.
+    fn alloc(&mut self, page: Page) -> u64 {
+        let Some(page_no) = self.free_head else {
+            return self.push(page);
+        };
+        self.free_head = self.page(page_no).next();
+        self.free_count -= 1;
+        self.set(page_no, page);
+        page_no
+    }
+
+    /// Puts page `page_no`, no longer in use, at the front of the free list.
+    /// Its old content is gone from the file once the commit writes it.
+    fn free(&mut self, page_no: u64) {
+        self.set(page_no, Page::free(self.free_head));
+        self.free_head = Some(page_no);
+        self.free_count += 1;
+    }
+
+    /// Replaces page `page_no` with `page`. A committed tree that shares the
+    /// old page keeps it.
+    fn set(&mut self, page_no: u64, page: Page) {
+        self.dirty.insert(page_no);
+        self.pages[(page_no - FIRST_PAGE) as usize] = Arc::new(page);
+    }
+
     /// The page to change, copied first if a committed tree shares it.
     fn page_mut(&mut self, page_no: u64) -> &mut Page {
         self.dirty.insert(page_no);
         Arc::make_mut(&mut self.pages[(page_no - FIRST_PAGE) as usize])
     }
 
-    /// Checks that, from the root down, every child is a page of the tree
-    /// reached only once, keys stay within the range their parent gives
-    /// them, every leaf is at the same depth, and the leaves point to each
-    /// other from left to right.
+    /// Checks that every page of the file has exactly one use, so none is
+    /// lost or handed out twice: from the root down, every child is a tree
+    /// page reached only once, keys stay within the range their parent
+    /// gives them, every leaf is at the same depth, and the leaves point to
+    /// each other from left to right; each value in overflow pages has a
+    /// chain of exactly the pages its length needs; and the free list holds
+    /// every other page, as many as the meta page says.
     fn check(&self) -> Result<()> {
         let mut walk = Walk {
             seen: vec![false; self.pages.len()],
@@ -243,6 +354,23 @@ impl Tree {
             if self.page(leaf).right_sibling() != leaves.peek().copied().copied() {
                 return Err(corrupt("leaves do not point to the next leaf"));
             }
+        }
+        let mut free = 0;
+        let mut next = self.free_head;
+        while let Some(page_no) = next {
+            walk.visit(page_no)?;
+            let page = self.page(page_no);
+            if page.kind() != Kind::Free {
+                return Err(corrupt("free list holds a page in use"));
+            }
+            free += 1;
+            next = page.next();
+        }
+        if free != self.free_count {
+            return Err(corrupt("free list is not as long as the meta page says"));
+        }
+        if walk.seen.contains(&false) {
+            return Err(corrupt("page is neither in use nor free"));
         }
         Ok(())
     }
@@ -258,14 +386,11 @@ impl Tree {
         if depth > MAX_DEPTH {
             return Err(corrupt("tree is too deep"));
         }
-        let seen = page_no
-            .checked_sub(FIRST_PAGE)
-            .and_then(|i| walk.seen.get_mut(i as usize))
-            .ok_or_else(|| corrupt("child page is outside the file"))?;
-        if std::mem::replace(seen, true) {
-            return Err(corrupt("page is reached twice"));
-        }
+        walk.visit(page_no)?;
         let page = self.page(page_no);
+        if !matches!(page.kind(), Kind::Leaf | Kind::Internal) {
+            return Err(corrupt("tree points at a page outside the tree"));
+        }
         let count = page.cell_count();
         if count > 0 {
             let below_low = low.is_some_and(|low| page.key_at(0) < low);
@@ -279,6 +404,11 @@ impl Tree {
                 return Err(corrupt("leaves are at different depths"));
             }
             walk.leaves.push(page_no);
+            for index in 0..count {
+                if let Value::Overflow(r) = page.value(index) {
+                    self.check_chain(r, walk)?;
+                }
+            }
             return Ok(());
         }
         for index in 0..=count {
@@ -296,14 +426,50 @@ impl Tree {
         }
         Ok(())
     }
+
+    /// Checks that the overflow chain of `r` holds exactly its bytes: full
+    /// pages, then the rest on the last one, which ends the chain.
+    fn check_chain(&self, r: OverflowRef, walk: &mut Walk) -> Result<()> {
+        let pages = r.pages();
+        let mut next = Some(r.first);
+        for i in 0..pages {
+            let page_no = next.ok_or_else(|| corrupt("overflow chain is too short"))?;
+            walk.visit(page_no)?;
+            let page = self.page(page_no);
+            if page.kind() != Kind::Overflow {
+                return Err(corrupt(
+                    "overflow chain runs into a page that is not overflow",
+                ));
+            }
+            let expected = if i + 1 < pages {
+                OVERFLOW_DATA
+            } else {
+                r.len as usize - OVERFLOW_DATA * (pages - 1)
+            };
+            if page.data().len() != expected {
+                return Err(corrupt(
+                    "overflow page does not hold its share of the value",
+                ));
+            }
+            next = page.next();
+        }
+        if next.is_some() {
+            return Err(corrupt("overflow chain is too long"));
+        }
+        Ok(())
+    }
 }
 
 /// Deeper than any tree Oakdb writes. The tree only grows a level when its
-/// root splits, which takes a full root over pages that split before it,
-/// so growing one level more takes at least twice the pages it took to get
-/// this far. Pages are never reused, so a tree this deep would need a file
-/// of more than 2^64 pages. Checking stops here, so a corrupt file of long page chains cannot
-/// overflow the stack.
+/// root splits, and deletes never add levels. An internal page that splits
+/// leaves two halves of at most about 2,820 of its 4,056 bytes, so each has
+/// room for at least two more of the biggest separators (528 bytes), and
+/// before either half splits again at least two splits must happen below
+/// it. Growing a level thus takes at
+/// least twice the leaf splits of the level before, however often freed
+/// pages are reused, and 64 levels take more than 2^63 of them, each a
+/// committed write. Checking stops here, so a corrupt file of long page
+/// chains cannot overflow the stack.
 const MAX_DEPTH: usize = 64;
 
 /// A place among the entries of the leaves: entry `index` of leaf `leaf`,
@@ -320,6 +486,21 @@ struct Walk {
     /// Leaves in key order.
     leaves: Vec<u64>,
     leaf_depth: Option<usize>,
+}
+
+impl Walk {
+    /// Marks page `page_no` as reached, refusing a page outside the file or
+    /// one reached before.
+    fn visit(&mut self, page_no: u64) -> Result<()> {
+        let seen = page_no
+            .checked_sub(FIRST_PAGE)
+            .and_then(|i| self.seen.get_mut(usize::try_from(i).ok()?))
+            .ok_or_else(|| corrupt("page number is outside the file"))?;
+        if std::mem::replace(seen, true) {
+            return Err(corrupt("page is reached twice"));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -415,7 +596,7 @@ mod tests {
 
         for i in 0..500 {
             let (key, value) = entry(i);
-            assert_eq!(read.get(&key), Some(&value[..]), "key {i}");
+            assert_eq!(read.get(&key).as_deref(), Some(&value[..]), "key {i}");
         }
     }
 
@@ -495,7 +676,7 @@ mod tests {
         let read = reload(&tree).unwrap();
         for i in 0..n {
             let (key, value) = big_entry(i);
-            assert_eq!(read.get(&key), Some(&value[..]), "key {i}");
+            assert_eq!(read.get(&key).as_deref(), Some(&value[..]), "key {i}");
         }
     }
 
@@ -581,7 +762,10 @@ mod tests {
         // A key past the old last leaf goes to the new last one.
         let (key, value) = big_entry(1000);
         tree.put(&key, &value);
-        assert_eq!(reload(&tree).unwrap().get(&key), Some(&value[..]));
+        assert_eq!(
+            reload(&tree).unwrap().get(&key).as_deref(),
+            Some(&value[..])
+        );
     }
 
     #[test]
@@ -599,7 +783,7 @@ mod tests {
         let read = reload(&tree).unwrap();
         for i in 997..1000 {
             let (key, value) = big_entry(i);
-            assert_eq!(read.get(&key), Some(&value[..]));
+            assert_eq!(read.get(&key).as_deref(), Some(&value[..]));
         }
     }
 
@@ -705,5 +889,142 @@ mod tests {
         }
 
         assert!(matches!(reload(&tree), Err(Error::Corrupt(_))));
+    }
+
+    /// The overflow reference stored under `key`.
+    fn overflow_ref(tree: &Tree, key: &[u8]) -> OverflowRef {
+        let (_, leaf) = tree.descend(key);
+        match tree.page(leaf).get(key) {
+            Some(Value::Overflow(r)) => r,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// The pages of the chain starting at `first`.
+    fn chain(tree: &Tree, first: u64) -> Vec<u64> {
+        std::iter::successors(Some(first), |&p| tree.page(p).next()).collect()
+    }
+
+    #[test]
+    fn a_long_value_goes_to_a_chain_of_new_pages_in_page_order() {
+        let mut tree = Tree::new();
+        let value: Vec<u8> = (0..2 * OVERFLOW_DATA + 10).map(|i| i as u8).collect();
+
+        tree.put(b"k", &value);
+
+        let r = overflow_ref(&tree, b"k");
+        assert_eq!(r.len as usize, value.len());
+        assert_eq!(chain(&tree, r.first), [3, 4, 5]);
+        assert_eq!(tree.page(5).data().len(), 10);
+        assert_eq!(tree.get(b"k").as_deref(), Some(&value[..]));
+        assert_eq!(
+            reload(&tree).unwrap().get(b"k").as_deref(),
+            Some(&value[..])
+        );
+    }
+
+    #[test]
+    fn freed_pages_are_reused_before_the_file_grows() {
+        let mut tree = Tree::new();
+        tree.put(b"k", &vec![1; 3 * OVERFLOW_DATA]);
+        tree.take_dirty();
+
+        tree.delete(b"k");
+
+        let meta = tree.meta();
+        assert_eq!((meta.free_head, meta.free_count), (Some(5), 3));
+        assert_eq!(tree.take_dirty(), BTreeSet::from([2, 3, 4, 5]));
+        reload(&tree).unwrap();
+
+        tree.put(b"other", &vec![2; 3 * OVERFLOW_DATA]);
+
+        let meta = tree.meta();
+        assert_eq!(
+            (meta.page_count, meta.free_head, meta.free_count),
+            (6, None, 0)
+        );
+        assert_eq!(chain(&tree, overflow_ref(&tree, b"other").first), [5, 4, 3]);
+        reload(&tree).unwrap();
+    }
+
+    #[test]
+    fn a_split_takes_a_free_page_and_an_emptied_branch_gives_its_pages_back() {
+        let mut tree = big_tree(0..300);
+        let grown = tree.meta().page_count;
+        for i in 0..300 {
+            tree.delete(&big_entry(i).0);
+        }
+        // Everything but the root leaf is free.
+        assert_eq!(tree.meta().free_count, grown - FIRST_PAGE - 1);
+        reload(&tree).unwrap();
+
+        for i in 0..300 {
+            let (key, value) = big_entry(i);
+            tree.put(&key, &value);
+        }
+
+        assert_eq!(tree.meta().page_count, grown);
+        assert_eq!(tree.meta().free_count, 0);
+        reload(&tree).unwrap();
+    }
+
+    #[test]
+    fn files_whose_pages_are_lost_or_used_twice_are_refused() {
+        let mut tree = Tree::new();
+        tree.put(b"k", &vec![1; 2 * OVERFLOW_DATA + 1]); // pages 3, 4, 5
+        tree.put(b"gone", &vec![2; 5000]); // pages 6, 7
+        tree.delete(b"gone"); // free list: 7, then 6
+        reload(&tree).unwrap();
+        let refused = |tree: &Tree| matches!(reload(tree), Err(Error::Corrupt(_)));
+
+        // A page in no use at all.
+        let mut t = tree.clone();
+        t.push(Page::free(None));
+        assert!(refused(&t), "leaked page");
+        // The free list says it is longer than it is, or ends early.
+        let mut t = tree.clone();
+        t.free_count = 3;
+        assert!(refused(&t), "free count");
+        let mut t = tree.clone();
+        t.set(7, Page::free(None));
+        assert!(refused(&t), "free list cut short");
+        // The free list runs into a page in use, or in circles.
+        let mut t = tree.clone();
+        t.set(6, Page::free(Some(3)));
+        assert!(refused(&t), "free list into overflow page");
+        let mut t = tree.clone();
+        t.set(6, Page::free(Some(7)));
+        assert!(refused(&t), "free list in a circle");
+        // The chain is cut short, runs on, or runs into the free list.
+        let mut t = tree.clone();
+        let last = t.page(5).data().to_vec();
+        t.set(4, Page::overflow(&vec![1; OVERFLOW_DATA], None));
+        t.set(5, Page::free(t.free_head));
+        t.free_count += 1;
+        t.free_head = Some(5);
+        assert!(refused(&t), "chain too short");
+        let mut t = tree.clone();
+        t.set(5, Page::overflow(&last, Some(6)));
+        assert!(refused(&t), "chain too long");
+        // A chain page holding the wrong share of the value.
+        let mut t = tree.clone();
+        t.set(5, Page::overflow(&[1, 1], None));
+        assert!(refused(&t), "wrong share");
+        // The chain starts on a leaf, or the tree points at an overflow
+        // page.
+        let mut t = tree.clone();
+        t.page_mut(2)
+            .put_value(
+                b"k",
+                Value::Overflow(OverflowRef {
+                    first: 2,
+                    len: OVERFLOW_DATA as u32,
+                }),
+            )
+            .unwrap();
+        assert!(refused(&t), "chain on a leaf");
+        let mut t = tree.clone();
+        t.root = 3;
+        assert!(refused(&t), "root is an overflow page");
     }
 }

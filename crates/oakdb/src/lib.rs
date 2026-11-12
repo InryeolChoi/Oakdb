@@ -12,4 +12,4 @@ mod page;
 mod tree;
 
 pub use db::{Db, Scan, Txn, DATA_FILE};
-pub use error::{Error, Result, MAX_ENTRY_LEN, MAX_KEY_LEN};
+pub use error::{Error, Result, MAX_ENTRY_LEN, MAX_KEY_LEN, MAX_VALUE_LEN};

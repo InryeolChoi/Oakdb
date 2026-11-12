@@ -21,7 +21,7 @@
 //! offset  size  field
 //! 0..4    u32   checksum         reserved for CRC-32C, 0 for now
 //! 4..12   u64   page_lsn         reserved for the WAL, 0 for now
-//! 12      u8    kind             1 = leaf, 2 = internal
+//! 12      u8    kind             1 = leaf, 2 = internal (3, 4 below)
 //! 13      u8    flags            must be 0
 //! 14..16  u16   cell_count
 //! 16..18  u16   free_start       end of the slot array
@@ -34,6 +34,27 @@
 //! ...     free space
 //! ...4096 cells: key_len u16 | value_len u16 | key | value
 //! ```
+//!
+//! A value too long to stay in its leaf (key plus value over
+//! [`MAX_ENTRY_LEN`]) goes, whole, to a chain of overflow pages. Its leaf
+//! cell then holds an [`OverflowRef`] instead, and the top bit of the
+//! cell's `value_len` says so. Values that fit always stay in the leaf.
+//!
+//! Overflow pages (kind 4) hold the value in order, [`OVERFLOW_DATA`]
+//! bytes per page, the last page holding the rest. Free pages (kind 3) are
+//! pages no longer in use, chained so later writes can reuse them. Both
+//! keep the 40-byte header, with these fields:
+//!
+//! ```text
+//! offset  size  field
+//! 12      u8    kind             3 = free, 4 = overflow
+//! 14..16  u16   data_len         overflow only: value bytes on this page
+//! 24..32  u64   next             next page of the chain, 0 = last
+//! 40..    value bytes (overflow), then zeros
+//! ```
+//!
+//! Every other byte of these pages is 0, so a freed page keeps nothing of
+//! what it held.
 
 use std::ops::Bound;
 
@@ -46,8 +67,23 @@ const HEADER_SIZE: usize = 40;
 const SLOT_SIZE: usize = 4;
 const CELL_HEADER_SIZE: usize = 4;
 
+/// Value bytes one overflow page holds.
+pub(crate) const OVERFLOW_DATA: usize = PAGE_SIZE - HEADER_SIZE;
+
 const KIND_LEAF: u8 = 1;
 const KIND_INTERNAL: u8 = 2;
+const KIND_FREE: u8 = 3;
+const KIND_OVERFLOW: u8 = 4;
+
+/// Set in a leaf cell's `value_len` when the cell holds an [`OverflowRef`]
+/// rather than the value itself. Values in a page are shorter than this.
+const OVERFLOW_BIT: usize = 0x8000;
+/// Bytes of an [`OverflowRef`] in a cell.
+const REF_LEN: usize = 12;
+/// Where an overflow page records how many value bytes it holds.
+const DATA_LEN: usize = 14;
+/// Where overflow and free pages record the next page of their chain.
+const NEXT: usize = 24;
 
 const KIND: usize = 12;
 const FLAGS: usize = 13;
@@ -71,6 +107,9 @@ const _: () = assert!(4 * footprint(MAX_ENTRY_LEN, 0) <= PAGE_SIZE - HEADER_SIZE
 // A full internal page plus one more separator always splits into two that
 // fit, each with at least one separator, once the middle one moves up.
 const _: () = assert!(2 * footprint(MAX_KEY_LEN, CHILD_LEN) <= PAGE_SIZE - HEADER_SIZE);
+// A cell pointing at overflow pages is never bigger than the biggest one
+// allowed to stay in a leaf, so the guarantee above still holds.
+const _: () = assert!(MAX_KEY_LEN + REF_LEN <= MAX_ENTRY_LEN);
 
 /// [`Page::put`] found no room for the cell, even after compacting.
 #[derive(Debug, PartialEq)]
@@ -79,7 +118,64 @@ pub(crate) struct Full;
 /// Whether a cell went into a page.
 pub(crate) type Fit = std::result::Result<(), Full>;
 
-/// A leaf or internal page holding sorted cells.
+/// What a page is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Kind {
+    Leaf,
+    Internal,
+    /// Holds part of a value too long for its leaf.
+    Overflow,
+    /// Not in use, waiting to be reused.
+    Free,
+}
+
+/// Where a value too long for its leaf is: the first of the overflow pages
+/// holding it, and its length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OverflowRef {
+    pub(crate) first: u64,
+    pub(crate) len: u32,
+}
+
+impl OverflowRef {
+    /// How many overflow pages hold the value.
+    pub(crate) fn pages(self) -> usize {
+        (self.len as usize).div_ceil(OVERFLOW_DATA)
+    }
+
+    fn encode(self) -> [u8; REF_LEN] {
+        let mut bytes = [0; REF_LEN];
+        bytes[..8].copy_from_slice(&self.first.to_le_bytes());
+        bytes[8..].copy_from_slice(&self.len.to_le_bytes());
+        bytes
+    }
+
+    fn decode(bytes: &[u8]) -> Self {
+        OverflowRef {
+            first: u64::from_le_bytes(bytes[..8].try_into().unwrap()),
+            len: u32::from_le_bytes(bytes[8..REF_LEN].try_into().unwrap()),
+        }
+    }
+}
+
+/// A value as a leaf holds it: in the cell, or in overflow pages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Value<'a> {
+    Inline(&'a [u8]),
+    Overflow(OverflowRef),
+}
+
+impl Value<'_> {
+    /// Bytes the value takes in its cell.
+    fn stored_len(&self) -> usize {
+        match self {
+            Value::Inline(value) => value.len(),
+            Value::Overflow(_) => REF_LEN,
+        }
+    }
+}
+
+/// A page of any [`Kind`]. Leaf and internal pages hold sorted cells.
 #[derive(Clone)]
 pub(crate) struct Page {
     buf: Box<[u8]>,
@@ -89,6 +185,32 @@ impl Page {
     /// A leaf page with no cells.
     pub(crate) fn empty_leaf() -> Self {
         Page::empty(KIND_LEAF)
+    }
+
+    /// An overflow page holding `data`, a non-empty part of a value of at
+    /// most [`OVERFLOW_DATA`] bytes, followed by page `next` if any.
+    pub(crate) fn overflow(data: &[u8], next: Option<u64>) -> Self {
+        debug_assert!(!data.is_empty() && data.len() <= OVERFLOW_DATA);
+        let mut page = Page::zeroed(KIND_OVERFLOW);
+        page.write_u16(DATA_LEN, data.len());
+        page.write_u64(NEXT, next.unwrap_or(0));
+        page.buf[HEADER_SIZE..HEADER_SIZE + data.len()].copy_from_slice(data);
+        page
+    }
+
+    /// A free page followed in the free list by page `next`, if any.
+    pub(crate) fn free(next: Option<u64>) -> Self {
+        let mut page = Page::zeroed(KIND_FREE);
+        page.write_u64(NEXT, next.unwrap_or(0));
+        page
+    }
+
+    fn zeroed(kind: u8) -> Self {
+        let mut page = Page {
+            buf: vec![0; PAGE_SIZE].into_boxed_slice(),
+        };
+        page.buf[KIND] = kind;
+        page
     }
 
     /// An internal page whose keys below `separator` are in `left` and the
@@ -112,25 +234,58 @@ impl Page {
     }
 
     fn empty(kind: u8) -> Self {
-        let mut page = Page {
-            buf: vec![0; PAGE_SIZE].into_boxed_slice(),
-        };
-        page.buf[KIND] = kind;
+        let mut page = Page::zeroed(kind);
         page.write_u16(FREE_START, HEADER_SIZE);
         page.write_u16(FREE_END, PAGE_SIZE);
         page
     }
 
-    /// Takes a page read from disk, refusing it if its header or slots are
-    /// inconsistent, so a broken page can never send a read out of bounds.
+    /// Takes a page read from disk, refusing it if its header or contents
+    /// are inconsistent, so a broken page can never send a read out of
+    /// bounds.
     pub(crate) fn from_bytes(buf: Box<[u8]>) -> Result<Self> {
         if buf.len() != PAGE_SIZE {
             return Err(corrupt("page has the wrong size"));
         }
         let page = Page { buf };
-        if page.buf[KIND] != KIND_LEAF && page.buf[KIND] != KIND_INTERNAL {
-            return Err(corrupt("page is neither a leaf nor an internal page"));
+        match page.buf[KIND] {
+            KIND_LEAF | KIND_INTERNAL => page.check_cells()?,
+            KIND_OVERFLOW => page.check_overflow()?,
+            KIND_FREE => page.check_free()?,
+            _ => return Err(corrupt("page has an unknown kind")),
         }
+        Ok(page)
+    }
+
+    /// Overflow pages hold 1 to [`OVERFLOW_DATA`] bytes, then zeros, and
+    /// nothing in their header but the kind, the length and the next page.
+    fn check_overflow(&self) -> Result<()> {
+        let len = self.read_u16(DATA_LEN);
+        let zero = |range: std::ops::Range<usize>| self.buf[range].iter().all(|&b| b == 0);
+        if len == 0 || len > OVERFLOW_DATA {
+            return Err(corrupt("overflow page holds no data or too much"));
+        }
+        if !zero(FLAGS..DATA_LEN) || !zero(DATA_LEN + 2..NEXT) || !zero(NEXT + 8..HEADER_SIZE) {
+            return Err(corrupt("overflow page has unknown header fields"));
+        }
+        if !zero(HEADER_SIZE + len..PAGE_SIZE) {
+            return Err(corrupt("overflow page has bytes past its data"));
+        }
+        Ok(())
+    }
+
+    /// Free pages hold nothing but their kind and the next free page.
+    fn check_free(&self) -> Result<()> {
+        let zero = |range: std::ops::Range<usize>| self.buf[range].iter().all(|&b| b == 0);
+        if !zero(FLAGS..NEXT) || !zero(NEXT + 8..PAGE_SIZE) {
+            return Err(corrupt("free page is not empty"));
+        }
+        Ok(())
+    }
+
+    /// Leaf and internal pages: header, slots and cells agree.
+    fn check_cells(&self) -> Result<()> {
+        let page = self;
         if page.buf[FLAGS] != 0 || page.read_u16(RESERVED) != 0 {
             return Err(corrupt("page has unknown flags"));
         }
@@ -156,12 +311,24 @@ impl Page {
                 return Err(corrupt("slot points outside the cell area"));
             }
             let key_len = page.read_u16(offset);
-            let value_len = page.read_u16(offset + 2);
+            let raw_len = page.read_u16(offset + 2);
+            let value_len = raw_len & !OVERFLOW_BIT;
             if CELL_HEADER_SIZE + key_len + value_len != len {
                 return Err(corrupt("cell length does not match its slot"));
             }
-            if !page.is_leaf() && value_len != CHILD_LEN {
+            if !page.is_leaf() && (value_len != CHILD_LEN || raw_len != value_len) {
                 return Err(corrupt("internal cell does not hold a page number"));
+            }
+            if raw_len & OVERFLOW_BIT != 0 {
+                // Only values too long for the leaf leave it.
+                let at = offset + CELL_HEADER_SIZE + key_len;
+                let too_long = value_len == REF_LEN && {
+                    let r = OverflowRef::decode(&page.buf[at..at + REF_LEN]);
+                    r.first != 0 && key_len + r.len as usize > MAX_ENTRY_LEN
+                };
+                if !too_long {
+                    return Err(corrupt("cell points at overflow pages it does not need"));
+                }
             }
         }
         // Every byte of the cell area is either a live cell or a fragment.
@@ -174,15 +341,36 @@ impl Page {
                 return Err(corrupt("keys are not in order"));
             }
         }
-        Ok(page)
+        Ok(())
     }
 
     pub(crate) fn as_bytes(&self) -> &[u8] {
         &self.buf
     }
 
+    pub(crate) fn kind(&self) -> Kind {
+        match self.buf[KIND] {
+            KIND_LEAF => Kind::Leaf,
+            KIND_INTERNAL => Kind::Internal,
+            KIND_OVERFLOW => Kind::Overflow,
+            _ => Kind::Free,
+        }
+    }
+
     pub(crate) fn is_leaf(&self) -> bool {
         self.buf[KIND] == KIND_LEAF
+    }
+
+    /// The next page of an overflow chain or of the free list, if any.
+    pub(crate) fn next(&self) -> Option<u64> {
+        debug_assert!(matches!(self.kind(), Kind::Overflow | Kind::Free));
+        Some(self.read_u64(NEXT)).filter(|&page_no| page_no != 0)
+    }
+
+    /// The part of a value an overflow page holds.
+    pub(crate) fn data(&self) -> &[u8] {
+        debug_assert_eq!(self.kind(), Kind::Overflow);
+        &self.buf[HEADER_SIZE..HEADER_SIZE + self.read_u16(DATA_LEN)]
     }
 
     pub(crate) fn cell_count(&self) -> usize {
@@ -306,34 +494,32 @@ impl Page {
     /// with the first key of the right leaf, which separates the two.
     ///
     /// Siblings are left for the caller to set.
-    pub(crate) fn split_leaf(&self, key: &[u8], value: &[u8]) -> (Page, Vec<u8>, Page) {
+    pub(crate) fn split_leaf(&self, key: &[u8], value: Value<'_>) -> (Page, Vec<u8>, Page) {
         debug_assert!(self.is_leaf());
-        debug_assert!(key.len() + value.len() <= MAX_ENTRY_LEN);
-        let mut entries: Vec<(&[u8], &[u8])> = (0..self.cell_count())
-            .map(|i| (self.key_at(i), self.value_at(i)))
-            .collect();
+        debug_assert!(key.len() + value.stored_len() <= MAX_ENTRY_LEN);
+        let mut entries: Vec<(&[u8], Value<'_>)> =
+            (0..self.cell_count()).map(|i| self.entry_at(i)).collect();
         match self.search(key) {
             Ok(i) => entries[i] = (key, value),
             Err(i) => entries.insert(i, (key, value)),
         }
-        let total: usize = entries
-            .iter()
-            .map(|(k, v)| footprint(k.len(), v.len()))
-            .sum();
+        let size = |(k, v): &(&[u8], Value<'_>)| footprint(k.len(), v.stored_len());
+        let total: usize = entries.iter().map(size).sum();
         // The first `mid` entries go left. Pick the split that leaves the
         // fuller leaf as empty as possible, with at least one entry on
         // each side.
         let (mut left, mut mid, mut fuller) = (0, 0, usize::MAX);
-        for (i, (k, v)) in entries[..entries.len() - 1].iter().enumerate() {
-            left += footprint(k.len(), v.len());
+        for (i, entry) in entries[..entries.len() - 1].iter().enumerate() {
+            left += size(entry);
             if left.max(total - left) < fuller {
                 (mid, fuller) = (i + 1, left.max(total - left));
             }
         }
-        let build = |entries: &[(&[u8], &[u8])]| {
+        let build = |entries: &[(&[u8], Value<'_>)]| {
             let mut page = Page::empty_leaf();
-            for (k, v) in entries {
-                page.put(k, v).expect("half of a split fits in a page");
+            for &(k, v) in entries {
+                page.put_value(k, v)
+                    .expect("half of a split fits in a page");
             }
             page
         };
@@ -342,9 +528,20 @@ impl Page {
     }
 
     /// The key and value of entry `index`. Leaves only.
-    pub(crate) fn entry_at(&self, index: usize) -> (&[u8], &[u8]) {
+    pub(crate) fn entry_at(&self, index: usize) -> (&[u8], Value<'_>) {
+        (self.key_at(index), self.value(index))
+    }
+
+    /// The value of entry `index`. Leaves only.
+    pub(crate) fn value(&self, index: usize) -> Value<'_> {
         debug_assert!(self.is_leaf());
-        (self.key_at(index), self.value_at(index))
+        let (offset, _) = self.slot(index);
+        let stored = self.value_at(index);
+        if self.read_u16(offset + 2) & OVERFLOW_BIT != 0 {
+            Value::Overflow(OverflowRef::decode(stored))
+        } else {
+            Value::Inline(stored)
+        }
     }
 
     /// The index of the first entry that is not below `start`: the first
@@ -359,18 +556,35 @@ impl Page {
     }
 
     /// The value stored under `key`, if any. Leaves only.
-    pub(crate) fn get(&self, key: &[u8]) -> Option<&[u8]> {
-        debug_assert!(self.is_leaf());
+    pub(crate) fn get(&self, key: &[u8]) -> Option<Value<'_>> {
         let i = self.search(key).ok()?;
-        Some(self.value_at(i))
+        Some(self.value(i))
     }
 
-    /// Stores `value` under `key`, replacing any value already there.
+    /// Stores `value` in the cell for `key`, replacing any value already
+    /// there; see [`Page::put_value`].
+    pub(crate) fn put(&mut self, key: &[u8], value: &[u8]) -> Fit {
+        self.put_value(key, Value::Inline(value))
+    }
+
+    /// Stores `value` under `key`, replacing any value already there. A
+    /// value in overflow pages only goes in leaves.
     ///
     /// Bytes left behind by replaced cells are reclaimed by compacting the
     /// page when the new cell does not fit otherwise. On [`Full`] the page
     /// is left unchanged.
-    pub(crate) fn put(&mut self, key: &[u8], value: &[u8]) -> Fit {
+    pub(crate) fn put_value(&mut self, key: &[u8], value: Value<'_>) -> Fit {
+        let encoded;
+        let (value, flag) = match value {
+            Value::Inline(value) => (value, 0),
+            Value::Overflow(r) => {
+                debug_assert!(self.is_leaf());
+                encoded = r.encode();
+                (&encoded[..], OVERFLOW_BIT)
+            }
+        };
+        // A value that fits is shorter than a page, so its length never
+        // reaches `OVERFLOW_BIT`.
         let cell_len = CELL_HEADER_SIZE + key.len() + value.len();
         let found = self.search(key);
         // Replacing a cell gives back its slot and its bytes.
@@ -396,7 +610,7 @@ impl Page {
 
         let offset = self.read_u16(FREE_END) - cell_len;
         self.write_u16(offset, key.len());
-        self.write_u16(offset + 2, value.len());
+        self.write_u16(offset + 2, value.len() | flag);
         let key_start = offset + CELL_HEADER_SIZE;
         self.buf[key_start..key_start + key.len()].copy_from_slice(key);
         self.buf[key_start + key.len()..offset + cell_len].copy_from_slice(value);
@@ -545,7 +759,7 @@ mod tests {
         page.put(b"a", b"old").unwrap();
         page.put(b"a", b"newer").unwrap();
 
-        assert_eq!(page.get(b"a"), Some(&b"newer"[..]));
+        assert_eq!(page.get(b"a"), Some(Value::Inline(&b"newer"[..])));
         assert_eq!(page.read_u16(CELL_COUNT), 1);
         assert_eq!(page.read_u16(FRAG_BYTES), 8);
     }
@@ -568,7 +782,7 @@ mod tests {
         assert_eq!(page.free_space(), free + fragments);
         for key in 0u8..10 {
             let len = if key % 2 == 0 { 1 } else { 300 };
-            assert_eq!(page.get(&[key]), Some(&vec![key; len][..]));
+            assert_eq!(page.get(&[key]), Some(Value::Inline(&vec![key; len][..])));
         }
         Page::from_bytes(page.as_bytes().into()).unwrap();
     }
@@ -581,8 +795,8 @@ mod tests {
 
         page.put(b"a", &[3; 3100]).unwrap();
 
-        assert_eq!(page.get(b"a"), Some(&[3; 3100][..]));
-        assert_eq!(page.get(b"b"), Some(&[2; 900][..]));
+        assert_eq!(page.get(b"a"), Some(Value::Inline(&[3; 3100][..])));
+        assert_eq!(page.get(b"b"), Some(Value::Inline(&[2; 900][..])));
     }
 
     #[test]
@@ -611,7 +825,10 @@ mod tests {
             }
         }
         for key in 0..40u8 {
-            assert_eq!(page.get(&[key]), model.get(&[key]).map(Vec::as_slice));
+            assert_eq!(
+                page.get(&[key]),
+                model.get(&[key]).map(|v| Value::Inline(v))
+            );
         }
     }
 
@@ -625,7 +842,7 @@ mod tests {
         assert!(!page.delete(b"a"));
 
         assert_eq!(page.get(b"a"), None);
-        assert_eq!(page.get(b"b"), Some(&b"22"[..]));
+        assert_eq!(page.get(b"b"), Some(Value::Inline(&b"22"[..])));
         assert_eq!(page.read_u16(CELL_COUNT), 1);
         assert_eq!(page.read_u16(FRAG_BYTES), 6);
         Page::from_bytes(page.as_bytes().into()).unwrap();
@@ -643,7 +860,7 @@ mod tests {
 
         page.put(b"a", &[1; 4047]).unwrap();
 
-        assert_eq!(page.get(b"a"), Some(&[1; 4047][..]));
+        assert_eq!(page.get(b"a"), Some(Value::Inline(&[1; 4047][..])));
     }
 
     #[test]
@@ -671,8 +888,8 @@ mod tests {
 
         let read = Page::from_bytes(page.as_bytes().into()).unwrap();
 
-        assert_eq!(read.get(b"oak"), Some(&b"tree"[..]));
-        assert_eq!(read.get(b"acorn"), Some(&b"seed"[..]));
+        assert_eq!(read.get(b"oak"), Some(Value::Inline(&b"tree"[..])));
+        assert_eq!(read.get(b"acorn"), Some(Value::Inline(&b"seed"[..])));
         assert_eq!(read.get(b"elm"), None);
     }
 
@@ -722,6 +939,136 @@ mod tests {
         let mut read = Page::from_bytes(page.as_bytes().into()).unwrap();
         read.put(b"a", b"newest").unwrap();
 
-        assert_eq!(read.get(b"a"), Some(&b"newest"[..]));
+        assert_eq!(read.get(b"a"), Some(Value::Inline(&b"newest"[..])));
+    }
+
+    #[test]
+    fn an_overflow_page_round_trips_through_its_bytes() {
+        let page = Page::overflow(b"part of a value", Some(9));
+
+        let read = Page::from_bytes(page.as_bytes().into()).unwrap();
+
+        assert_eq!(read.kind(), Kind::Overflow);
+        assert_eq!(read.data(), b"part of a value");
+        assert_eq!(read.next(), Some(9));
+        let full = Page::overflow(&[7; OVERFLOW_DATA], None);
+        let read = Page::from_bytes(full.as_bytes().into()).unwrap();
+        assert_eq!(read.data(), &[7; OVERFLOW_DATA][..]);
+        assert_eq!(read.next(), None);
+    }
+
+    #[test]
+    fn a_free_page_round_trips_and_holds_nothing_else() {
+        let page = Page::free(Some(5));
+
+        let read = Page::from_bytes(page.as_bytes().into()).unwrap();
+
+        assert_eq!(read.kind(), Kind::Free);
+        assert_eq!(read.next(), Some(5));
+        assert!(page.as_bytes()[..12].iter().all(|&b| b == 0));
+        assert!(page.as_bytes()[32..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn broken_overflow_and_free_pages_are_refused() {
+        let overflow = Page::overflow(b"abc", Some(4)).as_bytes().to_vec();
+        assert_refused(overflow.clone(), |b| b[DATA_LEN..DATA_LEN + 2].fill(0));
+        assert_refused(overflow.clone(), |b| {
+            b[DATA_LEN..DATA_LEN + 2].copy_from_slice(&(OVERFLOW_DATA as u16 + 1).to_le_bytes())
+        });
+        // A byte past the data, and header fields that must be 0.
+        assert_refused(overflow.clone(), |b| b[HEADER_SIZE + 3] = 1);
+        assert_refused(overflow.clone(), |b| b[FLAGS] = 1);
+        assert_refused(overflow.clone(), |b| b[16] = 1);
+        assert_refused(overflow.clone(), |b| b[39] = 1);
+        let free = Page::free(None).as_bytes().to_vec();
+        assert_refused(free.clone(), |b| b[100] = 1);
+        assert_refused(free.clone(), |b| b[FLAGS] = 1);
+        assert_refused(free.clone(), |b| b[KIND] = 5);
+        assert_refused(free.clone(), |b| b[KIND] = 0);
+    }
+
+    #[test]
+    fn a_cell_can_point_at_overflow_pages_instead_of_holding_its_value() {
+        let r = OverflowRef {
+            first: 7,
+            len: 5000,
+        };
+        let mut page = Page::empty_leaf();
+        page.put(b"a", b"short").unwrap();
+        page.put_value(b"b", Value::Overflow(r)).unwrap();
+
+        let read = Page::from_bytes(page.as_bytes().into()).unwrap();
+
+        assert_eq!(read.get(b"a"), Some(Value::Inline(&b"short"[..])));
+        assert_eq!(read.get(b"b"), Some(Value::Overflow(r)));
+        // The cell holds 12 bytes, flagged in the top bit of value_len.
+        let (offset, len) = read.slot(1);
+        assert_eq!(len, CELL_HEADER_SIZE + 1 + REF_LEN);
+        assert_eq!(read.read_u16(offset + 2), REF_LEN | OVERFLOW_BIT);
+    }
+
+    #[test]
+    fn cells_that_point_at_overflow_pages_they_should_not_are_refused() {
+        let leaf_with = |key: &[u8], r: OverflowRef| {
+            let mut page = Page::empty_leaf();
+            page.put_value(key, Value::Overflow(r)).unwrap();
+            page.as_bytes().to_vec()
+        };
+        let r = OverflowRef {
+            first: 7,
+            len: 5000,
+        };
+        let good = leaf_with(b"a", r);
+        Page::from_bytes(good.clone().into()).unwrap();
+        // The cell is the only one, at the very end of the page.
+        let cell = PAGE_SIZE - (CELL_HEADER_SIZE + 1 + REF_LEN);
+        // No first page.
+        assert_refused(good.clone(), |b| b[cell + 5..cell + 13].fill(0));
+        // A value short enough to stay in the leaf.
+        assert_refused(
+            leaf_with(
+                b"a",
+                OverflowRef {
+                    first: 7,
+                    len: 1005,
+                },
+            ),
+            |_| {},
+        );
+        // The flag on an internal cell.
+        let mut internal = Page::new_internal(3, b"m", 4);
+        let (offset, _) = internal.slot(0);
+        internal.write_u16(offset + 2, CHILD_LEN | OVERFLOW_BIT);
+        assert_refused(internal.as_bytes().to_vec(), |_| {});
+        // The flag on a cell whose value is not a reference.
+        let mut leaf = Page::empty_leaf();
+        leaf.put(b"a", b"0123456789").unwrap();
+        let (offset, _) = leaf.slot(0);
+        leaf.write_u16(offset + 2, 10 | OVERFLOW_BIT);
+        assert_refused(leaf.as_bytes().to_vec(), |_| {});
+    }
+
+    #[test]
+    fn a_split_leaf_keeps_which_values_are_in_overflow_pages() {
+        let r = OverflowRef {
+            first: 99,
+            len: 70_000,
+        };
+        let mut page = Page::empty_leaf();
+        for key in 0u8..9 {
+            page.put(&[key], &[key; 400]).unwrap();
+        }
+        page.put_value(&[4, 1], Value::Overflow(r)).unwrap();
+
+        let (left, _, right) = page.split_leaf(&[9], Value::Inline(&[9; 400]));
+
+        let both = [&left, &right];
+        let found: Vec<Value<'_>> = both.iter().filter_map(|p| p.get(&[4, 1])).collect();
+        assert_eq!(found, [Value::Overflow(r)]);
+        for key in 0u8..10 {
+            let value: Vec<Value<'_>> = both.iter().filter_map(|p| p.get(&[key])).collect();
+            assert_eq!(value, [Value::Inline(&[key; 400][..])]);
+        }
     }
 }
