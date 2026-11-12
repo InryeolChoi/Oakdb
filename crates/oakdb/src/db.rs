@@ -144,15 +144,17 @@ impl<F: Fs> Txn<'_, F> {
         if let Some(write) = self.writes.get(key) {
             return Ok(write.clone());
         }
-        let tree = self.db.tree();
-        let r = match tree.find(key) {
-            None => return Ok(None),
-            Some(Value::Inline(value)) => return Ok(Some(value.to_vec())),
-            Some(Value::Overflow(r)) => r,
+        let (tree, r) = {
+            let locked = self.db.tree();
+            match locked.find(key) {
+                None => return Ok(None),
+                Some(Value::Inline(value)) => return Ok(Some(value.to_vec())),
+                Some(Value::Overflow(r)) => (Arc::clone(&locked), r),
+            }
+            // The lock is released here, at the end of the block that holds
+            // it, so commits do not wait while a long value is gathered
+            // from its overflow pages below.
         };
-        // Gather a long value from its overflow pages without holding the
-        // lock, so commits do not wait for the copy.
-        let tree = Arc::clone(&tree);
         Ok(Some(tree.value(Value::Overflow(r)).into_owned()))
     }
 

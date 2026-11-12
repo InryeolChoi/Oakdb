@@ -121,7 +121,9 @@ pub(crate) type Fit = std::result::Result<(), Full>;
 /// What a page is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Kind {
+    /// Holds keys and their values, or where long values are.
     Leaf,
+    /// Holds separator keys and the pages below them.
     Internal,
     /// Holds part of a value too long for its leaf.
     Overflow,
@@ -161,7 +163,18 @@ impl OverflowRef {
 /// A value as a leaf holds it: in the cell, or in overflow pages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Value<'a> {
+    /// The value itself, kept in the cell.
     Inline(&'a [u8]),
+    /// Where the value is, too long to keep in the cell.
+    Overflow(OverflowRef),
+}
+
+/// What [`Page::delete`] took out of a leaf.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Removed {
+    /// A value kept in its cell: nothing more to free.
+    Inline,
+    /// A value in overflow pages, which the caller frees.
     Overflow(OverflowRef),
 }
 
@@ -205,6 +218,7 @@ impl Page {
         page
     }
 
+    /// A page of `kind` whose other bytes are all 0.
     fn zeroed(kind: u8) -> Self {
         let mut page = Page {
             buf: vec![0; PAGE_SIZE].into_boxed_slice(),
@@ -261,7 +275,7 @@ impl Page {
     /// nothing in their header but the kind, the length and the next page.
     fn check_overflow(&self) -> Result<()> {
         let len = self.read_u16(DATA_LEN);
-        let zero = |range: std::ops::Range<usize>| self.buf[range].iter().all(|&b| b == 0);
+        let zero = |range| self.is_zero(range);
         if len == 0 || len > OVERFLOW_DATA {
             return Err(corrupt("overflow page holds no data or too much"));
         }
@@ -276,11 +290,15 @@ impl Page {
 
     /// Free pages hold nothing but their kind and the next free page.
     fn check_free(&self) -> Result<()> {
-        let zero = |range: std::ops::Range<usize>| self.buf[range].iter().all(|&b| b == 0);
-        if !zero(FLAGS..NEXT) || !zero(NEXT + 8..PAGE_SIZE) {
+        if !self.is_zero(FLAGS..NEXT) || !self.is_zero(NEXT + 8..PAGE_SIZE) {
             return Err(corrupt("free page is not empty"));
         }
         Ok(())
+    }
+
+    /// Whether every byte in `range` is 0.
+    fn is_zero(&self, range: std::ops::Range<usize>) -> bool {
+        self.buf[range].iter().all(|&b| b == 0)
     }
 
     /// Leaf and internal pages: header, slots and cells agree.
@@ -348,12 +366,14 @@ impl Page {
         &self.buf
     }
 
+    /// What this page is for.
     pub(crate) fn kind(&self) -> Kind {
         match self.buf[KIND] {
             KIND_LEAF => Kind::Leaf,
             KIND_INTERNAL => Kind::Internal,
             KIND_OVERFLOW => Kind::Overflow,
-            _ => Kind::Free,
+            KIND_FREE => Kind::Free,
+            other => unreachable!("Page::from_bytes refuses kind {other}"),
         }
     }
 
@@ -634,17 +654,19 @@ impl Page {
         Ok(old)
     }
 
-    /// Removes `key` and its value. Returns `None` if it was not there,
-    /// otherwise where the removed value's overflow pages are, if it had
-    /// any, for the caller to free.
+    /// Removes `key` and its value, and says what was removed, or `None`
+    /// if `key` was not there.
     ///
     /// The cell's bytes count as fragmented until a later put compacts the
     /// page.
-    pub(crate) fn delete(&mut self, key: &[u8]) -> Option<Option<OverflowRef>> {
+    pub(crate) fn delete(&mut self, key: &[u8]) -> Option<Removed> {
         let i = self.search(key).ok()?;
-        let old = self.overflow_at(i);
+        let removed = match self.overflow_at(i) {
+            Some(r) => Removed::Overflow(r),
+            None => Removed::Inline,
+        };
         self.remove_slot(i);
-        Some(old)
+        Some(removed)
     }
 
     /// The overflow pages of cell `index`'s value, if it is in any.

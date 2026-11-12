@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use crate::error::{corrupt, Result, MAX_ENTRY_LEN};
 use crate::meta::Meta;
-use crate::page::{Full, Kind, OverflowRef, Page, Value, OVERFLOW_DATA};
+use crate::page::{Full, Kind, OverflowRef, Page, Removed, Value, OVERFLOW_DATA};
 
 /// Page number of the first tree page. Pages 0 and 1 hold the meta slots.
 pub(crate) const FIRST_PAGE: u64 = 2;
@@ -106,16 +106,20 @@ impl Tree {
             Value::Inline(bytes) => Cow::Borrowed(bytes),
             Value::Overflow(r) => {
                 let mut bytes = Vec::with_capacity(r.len as usize);
-                let mut next = Some(r.first);
-                while let Some(page_no) = next {
-                    let page = self.page(page_no);
-                    bytes.extend_from_slice(page.data());
-                    next = page.next();
+                for page_no in self.chain(Some(r.first)) {
+                    bytes.extend_from_slice(self.page(page_no).data());
                 }
                 debug_assert_eq!(bytes.len(), r.len as usize);
                 Cow::Owned(bytes)
             }
         }
+    }
+
+    /// The pages of a chain, from `first` on through each page's next page:
+    /// an overflow chain, or the free list. Each page is only read once the
+    /// caller has taken the page before it.
+    fn chain(&self, first: Option<u64>) -> impl Iterator<Item = u64> + '_ {
+        std::iter::successors(first, |&page_no| self.page(page_no).next())
     }
 
     /// Stores `value` under `key`, splitting its leaf if it is full, and
@@ -151,7 +155,7 @@ impl Tree {
     /// tree, unless it is the root.
     pub(crate) fn delete(&mut self, key: &[u8]) {
         let (path, leaf) = self.descend(key);
-        if let Some(Some(old)) = self.page_mut(leaf).delete(key) {
+        if let Some(Removed::Overflow(old)) = self.page_mut(leaf).delete(key) {
             self.free_chain(old);
         }
         if self.page(leaf).cell_count() == 0 && !path.is_empty() {
@@ -179,9 +183,8 @@ impl Tree {
 
     /// Puts every page of the chain `r` on the free list.
     fn free_chain(&mut self, r: OverflowRef) {
-        let mut next = Some(r.first);
-        while let Some(page_no) = next {
-            next = self.page(page_no).next();
+        let pages: Vec<u64> = self.chain(Some(r.first)).collect();
+        for page_no in pages {
             self.free(page_no);
         }
     }
@@ -371,15 +374,13 @@ impl Tree {
             }
         }
         let mut free = 0;
-        let mut next = self.free_head;
-        while let Some(page_no) = next {
+        // Each page is visited and checked before the chain reads its next.
+        for page_no in self.chain(self.free_head) {
             walk.visit(page_no)?;
-            let page = self.page(page_no);
-            if page.kind() != Kind::Free {
+            if self.page(page_no).kind() != Kind::Free {
                 return Err(corrupt("free list holds a page in use"));
             }
             free += 1;
-            next = page.next();
         }
         if free != self.free_count {
             return Err(corrupt("free list is not as long as the meta page says"));
@@ -917,7 +918,7 @@ mod tests {
 
     /// The pages of the chain starting at `first`.
     fn chain(tree: &Tree, first: u64) -> Vec<u64> {
-        std::iter::successors(Some(first), |&p| tree.page(p).next()).collect()
+        tree.chain(Some(first)).collect()
     }
 
     #[test]
