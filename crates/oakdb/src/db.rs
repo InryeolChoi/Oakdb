@@ -13,7 +13,6 @@
 //! syncs them. If it added pages, it then writes the meta page and syncs
 //! again. The WAL (ADR 0007) will replace that later.
 
-use std::borrow::Cow;
 use std::collections::{btree_map, BTreeMap};
 use std::iter::{FusedIterator, Peekable};
 use std::ops::{Bound, RangeBounds};
@@ -23,7 +22,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use crate::error::{Error, Result, MAX_KEY_LEN, MAX_VALUE_LEN};
 use crate::fs::{Fs, FsFile, StdFs};
 use crate::meta::{Meta, META_LEN};
-use crate::page::{Page, PAGE_SIZE};
+use crate::page::{Page, Value, PAGE_SIZE};
 use crate::tree::{Cursor, Tree};
 
 /// Name of the data file inside the database directory.
@@ -145,10 +144,16 @@ impl<F: Fs> Txn<'_, F> {
         if let Some(write) = self.writes.get(key) {
             return Ok(write.clone());
         }
-        // Copy a long value out of its overflow pages without holding the
-        // lock, so commits do not wait for it.
-        let tree = Arc::clone(&self.db.tree());
-        Ok(tree.get(key).map(Cow::into_owned))
+        let tree = self.db.tree();
+        let r = match tree.find(key) {
+            None => return Ok(None),
+            Some(Value::Inline(value)) => return Ok(Some(value.to_vec())),
+            Some(Value::Overflow(r)) => r,
+        };
+        // Gather a long value from its overflow pages without holding the
+        // lock, so commits do not wait for the copy.
+        let tree = Arc::clone(&tree);
+        Ok(Some(tree.value(Value::Overflow(r)).into_owned()))
     }
 
     /// The entries whose keys are in `range`, in key order, including this

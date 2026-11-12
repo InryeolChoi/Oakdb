@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use crate::error::{corrupt, Result, MAX_ENTRY_LEN};
 use crate::meta::Meta;
-use crate::page::{Kind, OverflowRef, Page, Value, OVERFLOW_DATA};
+use crate::page::{Full, Kind, OverflowRef, Page, Value, OVERFLOW_DATA};
 
 /// Page number of the first tree page. Pages 0 and 1 hold the meta slots.
 pub(crate) const FIRST_PAGE: u64 = 2;
@@ -87,9 +87,16 @@ impl Tree {
     }
 
     /// The value under `key`, read from its overflow pages if it is there.
+    #[cfg(test)]
     pub(crate) fn get(&self, key: &[u8]) -> Option<Cow<'_, [u8]>> {
+        Some(self.value(self.find(key)?))
+    }
+
+    /// The value under `key` as its leaf holds it, without reading any
+    /// overflow pages.
+    pub(crate) fn find(&self, key: &[u8]) -> Option<Value<'_>> {
         let (_, leaf) = self.descend(key);
-        Some(self.value(self.page(leaf).get(key)?))
+        self.page(leaf).get(key)
     }
 
     /// The bytes of `value`: borrowed from its leaf, or gathered from its
@@ -114,19 +121,28 @@ impl Tree {
     /// Stores `value` under `key`, splitting its leaf if it is full, and
     /// its parents too if they fill up. A value too long for the leaf goes
     /// to overflow pages. The overflow pages of a value it replaces are
-    /// freed.
+    /// freed afterwards, so the new value does not reuse them; commits
+    /// delete every key first, which frees them before the put.
     pub(crate) fn put(&mut self, key: &[u8], value: &[u8]) {
         let (path, leaf) = self.descend(key);
-        if let Some(Value::Overflow(old)) = self.page(leaf).get(key) {
-            self.free_chain(old);
-        }
         let value = if key.len() + value.len() <= MAX_ENTRY_LEN {
             Value::Inline(value)
         } else {
             Value::Overflow(self.write_overflow(value))
         };
-        if self.page_mut(leaf).put_value(key, value).is_err() {
-            self.split(&path, leaf, key, value);
+        match self.page_mut(leaf).put_value(key, value) {
+            Ok(old) => {
+                if let Some(old) = old {
+                    self.free_chain(old);
+                }
+            }
+            Err(Full) => {
+                // The split replaces the old entry without looking at it.
+                if let Some(Value::Overflow(old)) = self.page(leaf).get(key) {
+                    self.free_chain(old);
+                }
+                self.split(&path, leaf, key, value);
+            }
         }
     }
 
@@ -135,10 +151,9 @@ impl Tree {
     /// tree, unless it is the root.
     pub(crate) fn delete(&mut self, key: &[u8]) {
         let (path, leaf) = self.descend(key);
-        if let Some(Value::Overflow(old)) = self.page(leaf).get(key) {
+        if let Some(Some(old)) = self.page_mut(leaf).delete(key) {
             self.free_chain(old);
         }
-        self.page_mut(leaf).delete(key);
         if self.page(leaf).cell_count() == 0 && !path.is_empty() {
             self.remove_leaf(&path, leaf);
         }
@@ -948,23 +963,46 @@ mod tests {
     }
 
     #[test]
-    fn putting_over_a_long_value_frees_its_pages_first() {
+    fn putting_over_a_long_value_frees_its_pages() {
         // Commits delete every key they write before putting it back, so
         // only a put straight on the tree replaces a long value in place.
         let mut tree = Tree::new();
-        tree.put(b"k", &vec![1; 3 * OVERFLOW_DATA]);
+        tree.put(b"k", &vec![1; 3 * OVERFLOW_DATA]); // pages 3, 4, 5
 
-        tree.put(b"k", &vec![2; 2 * OVERFLOW_DATA]);
+        tree.put(b"k", &vec![2; 2 * OVERFLOW_DATA]); // pages 6, 7
 
-        assert_eq!(tree.meta().page_count, 6);
-        assert_eq!(tree.meta().free_count, 1);
+        assert_eq!(tree.meta().page_count, 8);
+        assert_eq!(tree.meta().free_count, 3);
         assert_eq!(
             tree.get(b"k").as_deref(),
             Some(&vec![2; 2 * OVERFLOW_DATA][..])
         );
         reload(&tree).unwrap();
         tree.put(b"k", b"short");
-        assert_eq!(tree.meta().free_count, 3);
+        assert_eq!(tree.meta().free_count, 5);
+        reload(&tree).unwrap();
+    }
+
+    #[test]
+    fn a_long_value_replaced_by_a_put_that_splits_its_leaf_is_freed() {
+        // A leaf of 4-byte keys and 100-byte values with room for one more;
+        // one of them is long.
+        let mut tree = tree_with(0..35);
+        let (key, _) = entry(7);
+        tree.put(&key, &vec![1; 2 * OVERFLOW_DATA]);
+        assert_eq!(tree.meta().page_count, 2 + 1 + 2);
+        tree.put(&entry(35).0, &entry(35).1);
+        assert_eq!(height(&tree), 1, "the leaf still has room");
+
+        // Replacing it with a value of 1000 bytes no longer fits: split.
+        tree.put(&key, &[9; 1000]);
+
+        // The two freed pages became the new right leaf and the new root,
+        // so the file did not grow; reloading finds no page lost.
+        assert_eq!(height(&tree), 2);
+        assert_eq!(tree.meta().page_count, 2 + 1 + 2);
+        assert_eq!(tree.meta().free_count, 0);
+        assert_eq!(tree.get(&key).as_deref(), Some(&[9; 1000][..]));
         reload(&tree).unwrap();
     }
 

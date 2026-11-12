@@ -564,16 +564,22 @@ impl Page {
     /// Stores `value` in the cell for `key`, replacing any value already
     /// there; see [`Page::put_value`].
     pub(crate) fn put(&mut self, key: &[u8], value: &[u8]) -> Fit {
-        self.put_value(key, Value::Inline(value))
+        self.put_value(key, Value::Inline(value)).map(drop)
     }
 
-    /// Stores `value` under `key`, replacing any value already there. A
-    /// value in overflow pages only goes in leaves.
+    /// Stores `value` under `key`, replacing any value already there, and
+    /// returns where the replaced value's overflow pages are, if it had
+    /// any, for the caller to free. A value in overflow pages only goes in
+    /// leaves.
     ///
     /// Bytes left behind by replaced cells are reclaimed by compacting the
     /// page when the new cell does not fit otherwise. On [`Full`] the page
     /// is left unchanged.
-    pub(crate) fn put_value(&mut self, key: &[u8], value: Value<'_>) -> Fit {
+    pub(crate) fn put_value(
+        &mut self,
+        key: &[u8],
+        value: Value<'_>,
+    ) -> std::result::Result<Option<OverflowRef>, Full> {
         let encoded;
         let (value, flag) = match value {
             Value::Inline(value) => (value, 0),
@@ -597,12 +603,13 @@ impl Page {
             return Err(Full);
         }
 
-        let index = match found {
+        let (index, old) = match found {
             Ok(i) => {
+                let old = self.overflow_at(i);
                 self.remove_slot(i);
-                i
+                (i, old)
             }
-            Err(i) => i,
+            Err(i) => (i, None),
         };
         if SLOT_SIZE + cell_len > self.free_space() {
             self.compact();
@@ -623,20 +630,27 @@ impl Page {
         self.write_u16(slot + 2, cell_len);
         self.write_u16(FREE_START, free_start + SLOT_SIZE);
         self.write_u16(CELL_COUNT, self.cell_count() + 1);
-        Ok(())
+        Ok(old)
     }
 
-    /// Removes `key` and its value. Returns whether it was there.
+    /// Removes `key` and its value. Returns `None` if it was not there,
+    /// otherwise where the removed value's overflow pages are, if it had
+    /// any, for the caller to free.
     ///
     /// The cell's bytes count as fragmented until a later put compacts the
     /// page.
-    pub(crate) fn delete(&mut self, key: &[u8]) -> bool {
-        match self.search(key) {
-            Ok(i) => {
-                self.remove_slot(i);
-                true
-            }
-            Err(_) => false,
+    pub(crate) fn delete(&mut self, key: &[u8]) -> Option<Option<OverflowRef>> {
+        let i = self.search(key).ok()?;
+        let old = self.overflow_at(i);
+        self.remove_slot(i);
+        Some(old)
+    }
+
+    /// The overflow pages of cell `index`'s value, if it is in any.
+    fn overflow_at(&self, index: usize) -> Option<OverflowRef> {
+        match self.is_leaf().then(|| self.value(index))? {
+            Value::Overflow(r) => Some(r),
+            Value::Inline(_) => None,
         }
     }
 
@@ -838,8 +852,8 @@ mod tests {
         page.put(b"a", b"1").unwrap();
         page.put(b"b", b"22").unwrap();
 
-        assert!(page.delete(b"a"));
-        assert!(!page.delete(b"a"));
+        assert!(page.delete(b"a").is_some());
+        assert!(page.delete(b"a").is_none());
 
         assert_eq!(page.get(b"a"), None);
         assert_eq!(page.get(b"b"), Some(Value::Inline(&b"22"[..])));
@@ -855,7 +869,7 @@ mod tests {
             page.put(&[key], &[key; 350]).unwrap();
         }
         for key in 0u8..10 {
-            assert!(page.delete(&[key]));
+            assert!(page.delete(&[key]).is_some());
         }
 
         page.put(b"a", &[1; 4047]).unwrap();
