@@ -40,6 +40,8 @@ struct Disk {
     down: bool,
     /// Operations that change the disk left before the power is cut.
     ops_left: Option<u64>,
+    /// Operations that changed the disk so far, across crashes.
+    ops: u64,
     /// Directories. They are always durable: [`Fs::create_dir_all`] syncs
     /// them, and nothing else makes one.
     dirs: BTreeSet<PathBuf>,
@@ -68,6 +70,35 @@ enum Change {
     SetLen(usize),
 }
 
+/// What a crash did to the work that was never synced.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CrashReport {
+    /// Files that vanished because their directory was never synced.
+    pub vanished: Vec<PathBuf>,
+    /// Every unsynced write of the files that stayed, oldest first within
+    /// a file, files in path order.
+    pub writes: Vec<WriteFate>,
+    /// Every unsynced length change, in the same order.
+    pub lengths: Vec<LengthFate>,
+}
+
+/// One unsynced write and what became of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WriteFate {
+    pub path: PathBuf,
+    pub offset: u64,
+    pub len: usize,
+    pub landing: Landing,
+}
+
+/// One unsynced length change and whether it landed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LengthFate {
+    pub path: PathBuf,
+    pub len: u64,
+    pub landed: bool,
+}
+
 /// Whether a call on an open file counts towards [`SimFs::fail_after`].
 #[derive(Clone, Copy, PartialEq)]
 enum Access {
@@ -92,22 +123,31 @@ impl SimFs {
         self.disk().ops_left = Some(ops);
     }
 
+    /// How many operations that change the disk have succeeded since the
+    /// disk was made, counted as [`SimFs::fail_after`] counts them.
+    pub fn ops(&self) -> u64 {
+        self.disk().ops
+    }
+
     /// Cuts the power now, decides with `seed` what of the unsynced work
     /// reached the disk, and starts again with the power on. Handles opened
-    /// before stop working and their locks are released.
-    pub fn crash(&self, seed: u64) {
+    /// before stop working and their locks are released. Returns what
+    /// happened to each unsynced change.
+    pub fn crash(&self, seed: u64) -> CrashReport {
         let mut disk = self.disk();
         let mut rng = Rng(seed);
         // Files in path order, so the choices do not depend on the order of
         // anything but the operations.
+        let mut report = CrashReport::default();
         let files = std::mem::take(&mut disk.files);
         for (path, file) in files {
             if !file.entry_synced && rng.coin() {
+                report.vanished.push(path);
                 continue;
             }
             let mut data = file.synced;
             for change in file.waiting {
-                apply_after_crash(&mut data, change, &mut rng);
+                apply_after_crash(&path, &mut data, change, &mut rng, &mut report);
             }
             disk.files.insert(
                 path,
@@ -122,6 +162,7 @@ impl SimFs {
         disk.boot += 1;
         disk.down = false;
         disk.ops_left = None;
+        report
     }
 
     /// Whether a file or directory is at `path`.
@@ -143,11 +184,15 @@ fn lock(disk: &Mutex<Disk>) -> MutexGuard<'_, Disk> {
 }
 
 /// What a crash does to one unsynced write.
-enum Landing {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Landing {
     Lost,
     Kept,
-    /// Each 512-byte sector of the file the write touches lands or not.
-    Torn,
+    /// Each 512-byte sector of the file the write touches lands or not:
+    /// `sectors[i]` says whether the `i`-th sector it touches landed.
+    Torn {
+        sectors: Vec<bool>,
+    },
 }
 
 impl Landing {
@@ -156,38 +201,64 @@ impl Landing {
         match rng.below(3) {
             0 => Landing::Lost,
             1 => Landing::Kept,
-            _ => Landing::Torn,
+            _ => Landing::Torn {
+                sectors: Vec::new(),
+            },
         }
     }
 }
 
-/// What part of a change that was never synced lands on the disk.
-fn apply_after_crash(data: &mut Vec<u8>, change: Change, rng: &mut Rng) {
+/// What part of a change that was never synced lands on the disk, noted
+/// in `report`.
+fn apply_after_crash(
+    path: &Path,
+    data: &mut Vec<u8>,
+    change: Change,
+    rng: &mut Rng,
+    report: &mut CrashReport,
+) {
     match change {
         Change::SetLen(len) => {
-            if rng.coin() {
+            let landed = rng.coin();
+            if landed {
                 data.resize(len, 0);
             }
+            report.lengths.push(LengthFate {
+                path: path.to_path_buf(),
+                len: len as u64,
+                landed,
+            });
         }
-        Change::Write { offset, bytes } => match Landing::roll(rng) {
-            Landing::Lost => {}
-            Landing::Kept => write_at(data, offset, &bytes),
-            Landing::Torn => {
-                // Sectors are counted from the start of the file. A torn
-                // write past the end leaves the file as long as the last
-                // sector that landed.
-                let end = offset + bytes.len() as u64;
-                let mut start = offset;
-                while start < end {
-                    let stop = ((start / SECTOR + 1) * SECTOR).min(end);
-                    if rng.coin() {
-                        let piece = (start - offset) as usize..(stop - offset) as usize;
-                        write_at(data, start, &bytes[piece]);
+        Change::Write { offset, bytes } => {
+            let mut landing = Landing::roll(rng);
+            match landing {
+                Landing::Lost => {}
+                Landing::Kept => write_at(data, offset, &bytes),
+                Landing::Torn { ref mut sectors } => {
+                    // Sectors are counted from the start of the file. A
+                    // torn write past the end leaves the file as long as
+                    // the last sector that landed.
+                    let end = offset + bytes.len() as u64;
+                    let mut start = offset;
+                    while start < end {
+                        let stop = ((start / SECTOR + 1) * SECTOR).min(end);
+                        let landed = rng.coin();
+                        if landed {
+                            let piece = (start - offset) as usize..(stop - offset) as usize;
+                            write_at(data, start, &bytes[piece]);
+                        }
+                        sectors.push(landed);
+                        start = stop;
                     }
-                    start = stop;
                 }
             }
-        },
+            report.writes.push(WriteFate {
+                path: path.to_path_buf(),
+                offset,
+                len: bytes.len(),
+                landing,
+            });
+        }
     }
 }
 
@@ -235,9 +306,13 @@ impl Disk {
             }
             Some(ref mut left) => {
                 *left -= 1;
+                self.ops += 1;
                 Ok(())
             }
-            None => Ok(()),
+            None => {
+                self.ops += 1;
+                Ok(())
+            }
         }
     }
 
