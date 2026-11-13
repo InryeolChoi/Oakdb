@@ -10,6 +10,9 @@
 //! too long for its leaf, so overflow pages fill, are replaced, freed and
 //! reused from the free list.
 //!
+//! Each test runs on the real file system and on the simulated one
+//! (`oakdb::fs::sim`), which must give the same answers.
+//!
 //! Failing cases proptest finds are saved in `model.proptest-regressions`
 //! beside this file and run first every time; the ones that taught us
 //! something also get a named test.
@@ -18,6 +21,8 @@ use std::collections::BTreeMap;
 use std::ops::{Bound, RangeBounds};
 use std::path::Path;
 
+use oakdb::fs::sim::SimFs;
+use oakdb::fs::{Fs, StdFs};
 use oakdb::{Db, MAX_ENTRY_LEN, MAX_KEY_LEN};
 use proptest::prelude::*;
 
@@ -154,10 +159,12 @@ fn op(mix: Mix) -> impl Strategy<Value = Op> {
 /// What the database should hold.
 type Model = BTreeMap<Vec<u8>, Vec<u8>>;
 
-/// Runs `ops` against a database in `dir` and against the model, checking
-/// every read. Ends by checking every key, before and after reopening.
-fn run(dir: &Path, ops: &[Op]) -> std::result::Result<(), TestCaseError> {
-    let mut db = Db::open(dir).unwrap();
+/// Runs `ops` against a database in `dir` on `fs` and against the model,
+/// checking every read. Ends by checking every key, before and after
+/// reopening.
+fn run<F: Fs + Clone>(fs: F, dir: &Path, ops: &[Op]) -> std::result::Result<(), TestCaseError> {
+    let open = || Db::open_with(fs.clone(), dir).unwrap();
+    let mut db = open();
     let mut committed = Model::new();
     let mut ops = ops.iter();
     loop {
@@ -230,7 +237,7 @@ fn run(dir: &Path, ops: &[Op]) -> std::result::Result<(), TestCaseError> {
         }
         if reopen {
             db.close().unwrap();
-            db = Db::open(dir).unwrap();
+            db = open();
         }
         if done {
             break;
@@ -238,7 +245,7 @@ fn run(dir: &Path, ops: &[Op]) -> std::result::Result<(), TestCaseError> {
     }
     check_all(&db, &committed)?;
     db.close().unwrap();
-    check_all(&Db::open(dir).unwrap(), &committed)
+    check_all(&open(), &committed)
 }
 
 /// The first `take` entries of `model` from `from` to `to`, in order.
@@ -256,7 +263,7 @@ fn in_range(
         .collect()
 }
 
-fn check_all(db: &Db, model: &Model) -> std::result::Result<(), TestCaseError> {
+fn check_all<F: Fs>(db: &Db<F>, model: &Model) -> std::result::Result<(), TestCaseError> {
     let txn = db.begin();
     let scanned: Vec<(Vec<u8>, Vec<u8>)> = txn.scan::<&[u8]>(..).map(Result::unwrap).collect();
     prop_assert_eq!(
@@ -280,13 +287,23 @@ proptest! {
     #[test]
     fn a_growing_tree_answers_like_a_btreemap(ops in prop::collection::vec(op(GROWING), 1..3000)) {
         let dir = tempfile::tempdir().unwrap();
-        run(dir.path(), &ops)?;
+        run(StdFs, dir.path(), &ops)?;
     }
 
     #[test]
     fn a_shrinking_tree_answers_like_a_btreemap(ops in prop::collection::vec(op(SHRINKING), 1..1500)) {
         let dir = tempfile::tempdir().unwrap();
-        run(dir.path(), &ops)?;
+        run(StdFs, dir.path(), &ops)?;
+    }
+
+    #[test]
+    fn a_growing_tree_answers_like_a_btreemap_on_the_simulated_disk(ops in prop::collection::vec(op(GROWING), 1..3000)) {
+        run(SimFs::new(), Path::new("/oak"), &ops)?;
+    }
+
+    #[test]
+    fn a_shrinking_tree_answers_like_a_btreemap_on_the_simulated_disk(ops in prop::collection::vec(op(SHRINKING), 1..1500)) {
+        run(SimFs::new(), Path::new("/oak"), &ops)?;
     }
 }
 
