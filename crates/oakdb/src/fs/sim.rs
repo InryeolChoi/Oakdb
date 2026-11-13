@@ -1,85 +1,399 @@
 //! A simulated file system in memory, for crash tests.
 //!
-//! Not implemented yet: the tests in `tests/fs_contract.rs` and
-//! `tests/sim_fs.rs` describe what it must do.
+//! [`SimFs`] keeps two copies of every file: what reads see, and what is on
+//! the "disk", which is only what was synced. Until then each write and
+//! length change waits in a list. [`SimFs::crash`] cuts the power and starts
+//! again: each waiting change is kept, lost, or (for a write) torn so that
+//! only some of its 512-byte sectors land, and a file created since its
+//! directory was last synced may vanish. A seed makes every choice, so the
+//! same seed and the same operations always give the same disk.
+//!
+//! [`SimFs::fail_after`] cuts the power part way through the engine's work:
+//! after a given number of operations that change the disk, every call
+//! fails until the next crash.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use super::{Fs, FsFile};
 
+/// The unit a torn write lands in: a disk writes whole sectors or nothing.
+pub const SECTOR: u64 = 512;
+
 /// A file system that lives in memory and can lose power.
+///
+/// Clones share the same disk, so a test can keep one and hand another to
+/// the engine.
 #[derive(Clone, Default)]
-pub struct SimFs {}
+pub struct SimFs {
+    disk: Arc<Mutex<Disk>>,
+}
+
+#[derive(Default)]
+struct Disk {
+    /// Counts crashes. Handles opened before the last one stop working.
+    boot: u64,
+    /// The power is cut: every call fails until [`SimFs::crash`].
+    down: bool,
+    /// Operations that change the disk left before the power is cut.
+    ops_left: Option<u64>,
+    /// Directories. They are always durable: [`Fs::create_dir_all`] syncs
+    /// them, and nothing else makes one.
+    dirs: BTreeSet<PathBuf>,
+    files: BTreeMap<PathBuf, File>,
+    /// Gives each handle its own number, for locks.
+    next_handle: u64,
+}
+
+#[derive(Default)]
+struct File {
+    /// What reads see.
+    now: Vec<u8>,
+    /// What a crash starts from: the contents at the last sync.
+    synced: Vec<u8>,
+    /// Changes since the last sync, oldest first.
+    waiting: Vec<Change>,
+    /// The directory entry survives a crash: its directory was synced
+    /// after the file was created.
+    entry_synced: bool,
+    /// The handle holding the lock.
+    locked_by: Option<u64>,
+}
+
+enum Change {
+    Write { offset: u64, bytes: Vec<u8> },
+    SetLen(u64),
+}
 
 impl SimFs {
     /// An empty disk with the power on.
     pub fn new() -> Self {
-        SimFs {}
+        SimFs::default()
     }
 
-    /// Cuts the power after `ops` more operations that change the disk.
-    pub fn fail_after(&self, _ops: u64) {
-        todo!()
+    /// Cuts the power after `ops` more operations that change the disk:
+    /// writes, length changes, syncs, opens and directory creation. Reads,
+    /// sizes and locks do not count. The operation that finds the power
+    /// gone fails, and so does every call after it until [`SimFs::crash`].
+    pub fn fail_after(&self, ops: u64) {
+        self.disk().ops_left = Some(ops);
     }
 
-    /// Cuts the power now and starts again.
-    pub fn crash(&self, _seed: u64) {
-        todo!()
+    /// Cuts the power now, decides with `seed` what of the unsynced work
+    /// reached the disk, and starts again with the power on. Handles opened
+    /// before stop working and their locks are released.
+    pub fn crash(&self, seed: u64) {
+        let mut disk = self.disk();
+        let mut rng = Rng(seed);
+        // Files in path order, so the choices do not depend on the order of
+        // anything but the operations.
+        let files = std::mem::take(&mut disk.files);
+        for (path, file) in files {
+            if !file.entry_synced && rng.coin() {
+                continue;
+            }
+            let mut data = file.synced;
+            for change in file.waiting {
+                apply_after_crash(&mut data, change, &mut rng);
+            }
+            disk.files.insert(
+                path,
+                File {
+                    now: data.clone(),
+                    synced: data,
+                    entry_synced: true,
+                    ..File::default()
+                },
+            );
+        }
+        disk.boot += 1;
+        disk.down = false;
+        disk.ops_left = None;
     }
 
     /// Whether a file or directory is at `path`.
-    pub fn exists(&self, _path: &Path) -> bool {
-        todo!()
+    pub fn exists(&self, path: &Path) -> bool {
+        let disk = self.disk();
+        is_root(path) || disk.dirs.contains(path) || disk.files.contains_key(path)
+    }
+
+    fn disk(&self) -> MutexGuard<'_, Disk> {
+        // A panic inside a call leaves the disk as it was, or with one
+        // change fully made: every change is a single step.
+        self.disk.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
+/// What part of a change that was never synced lands on the disk.
+fn apply_after_crash(data: &mut Vec<u8>, change: Change, rng: &mut Rng) {
+    match change {
+        Change::SetLen(len) => {
+            if rng.coin() {
+                data.resize(len as usize, 0);
+            }
+        }
+        Change::Write { offset, bytes } => match rng.below(3) {
+            0 => {}
+            1 => write_at(data, offset, &bytes),
+            _ => {
+                // Torn: each sector the write touches lands or not.
+                let end = offset + bytes.len() as u64;
+                let mut start = offset;
+                while start < end {
+                    let stop = ((start / SECTOR + 1) * SECTOR).min(end);
+                    if rng.coin() {
+                        let piece = (start - offset) as usize..(stop - offset) as usize;
+                        write_at(data, start, &bytes[piece]);
+                    }
+                    start = stop;
+                }
+            }
+        },
+    }
+}
+
+fn write_at(data: &mut Vec<u8>, offset: u64, bytes: &[u8]) {
+    let start = offset as usize;
+    let end = start + bytes.len();
+    if data.len() < end {
+        data.resize(end, 0);
+    }
+    data[start..end].copy_from_slice(bytes);
+}
+
+/// The parent directory of `path`, or `None` at the root.
+fn parent(path: &Path) -> Option<&Path> {
+    path.parent().filter(|p| !p.as_os_str().is_empty())
+}
+
+fn is_root(path: &Path) -> bool {
+    parent(path).is_none() && path.file_name().is_none()
+}
+
+impl Disk {
+    /// Fails if the power is cut, and counts one operation that changes
+    /// the disk.
+    fn change(&mut self) -> io::Result<()> {
+        if self.down {
+            return Err(power_cut());
+        }
+        match self.ops_left {
+            Some(0) => {
+                self.down = true;
+                Err(power_cut())
+            }
+            Some(ref mut left) => {
+                *left -= 1;
+                Ok(())
+            }
+            None => Ok(()),
+        }
+    }
+
+    fn is_dir(&self, path: &Path) -> bool {
+        is_root(path) || self.dirs.contains(path)
+    }
+}
+
+fn power_cut() -> io::Error {
+    io::Error::other("the power is cut")
+}
+
 /// An open file on a [`SimFs`].
-pub struct SimFile {}
+pub struct SimFile {
+    disk: Arc<Mutex<Disk>>,
+    path: PathBuf,
+    /// The boot this handle was opened in.
+    boot: u64,
+    handle: u64,
+}
 
 impl Fs for SimFs {
     type File = SimFile;
 
-    fn create_dir_all(&self, _path: &Path) -> io::Result<()> {
-        todo!()
+    fn create_dir_all(&self, path: &Path) -> io::Result<()> {
+        let mut disk = self.disk();
+        disk.change()?;
+        let missing: Vec<&Path> = path.ancestors().take_while(|p| !disk.is_dir(p)).collect();
+        if let Some(file) = missing.iter().find(|p| disk.files.contains_key(**p)) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                format!("{} is a file", file.display()),
+            ));
+        }
+        for dir in missing {
+            disk.dirs.insert(dir.to_path_buf());
+        }
+        Ok(())
     }
 
-    fn open(&self, _path: &Path) -> io::Result<SimFile> {
-        todo!()
+    fn open(&self, path: &Path) -> io::Result<SimFile> {
+        let mut disk = self.disk();
+        disk.change()?;
+        if disk.is_dir(path) {
+            return Err(io::Error::new(
+                io::ErrorKind::IsADirectory,
+                format!("{} is a directory", path.display()),
+            ));
+        }
+        if !parent(path).is_none_or(|dir| disk.is_dir(dir)) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no directory for {}", path.display()),
+            ));
+        }
+        disk.files.entry(path.to_path_buf()).or_default();
+        disk.next_handle += 1;
+        Ok(SimFile {
+            disk: Arc::clone(&self.disk),
+            path: path.to_path_buf(),
+            boot: disk.boot,
+            handle: disk.next_handle,
+        })
     }
 
-    fn sync_dir(&self, _dir: &Path) -> io::Result<()> {
-        todo!()
+    fn sync_dir(&self, dir: &Path) -> io::Result<()> {
+        let mut disk = self.disk();
+        disk.change()?;
+        if !disk.is_dir(dir) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no directory {}", dir.display()),
+            ));
+        }
+        for (path, file) in disk.files.iter_mut() {
+            if parent(path) == Some(dir) {
+                file.entry_synced = true;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl SimFile {
+    /// Runs `f` on this file, if the power is on and the handle is from
+    /// this boot. `changes` says whether the call counts towards
+    /// [`SimFs::fail_after`].
+    fn with<T>(&self, changes: bool, f: impl FnOnce(&mut File, u64) -> T) -> io::Result<T> {
+        let mut disk = self.disk.lock().unwrap_or_else(|e| e.into_inner());
+        if disk.boot != self.boot {
+            return Err(io::Error::other("the file was opened before a crash"));
+        }
+        if changes {
+            disk.change()?;
+        } else if disk.down {
+            return Err(power_cut());
+        }
+        // The file exists: nothing removes one within a boot.
+        let file = disk.files.get_mut(&self.path).expect("open file exists");
+        Ok(f(file, self.handle))
     }
 }
 
 impl FsFile for SimFile {
-    fn read_exact_at(&self, _buf: &mut [u8], _offset: u64) -> io::Result<()> {
-        todo!()
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
+        self.with(false, |file, _| {
+            let start = offset as usize;
+            let bytes = file
+                .now
+                .get(start..start + buf.len())
+                .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "read past the end"))?;
+            buf.copy_from_slice(bytes);
+            Ok(())
+        })?
     }
 
-    fn write_all_at(&self, _buf: &[u8], _offset: u64) -> io::Result<()> {
-        todo!()
+    fn write_all_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
+        self.with(true, |file, _| {
+            write_at(&mut file.now, offset, buf);
+            file.waiting.push(Change::Write {
+                offset,
+                bytes: buf.to_vec(),
+            });
+        })
     }
 
     fn size(&self) -> io::Result<u64> {
-        todo!()
+        self.with(false, |file, _| file.now.len() as u64)
     }
 
-    fn set_len(&self, _len: u64) -> io::Result<()> {
-        todo!()
+    fn set_len(&self, len: u64) -> io::Result<()> {
+        self.with(true, |file, _| {
+            file.now.resize(len as usize, 0);
+            file.waiting.push(Change::SetLen(len));
+        })
     }
 
     fn try_lock(&self) -> io::Result<()> {
-        todo!()
+        self.with(false, |file, handle| match file.locked_by {
+            Some(holder) if holder != handle => Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "the file is locked",
+            )),
+            _ => {
+                file.locked_by = Some(handle);
+                Ok(())
+            }
+        })?
     }
 
     fn sync_data(&self) -> io::Result<()> {
-        todo!()
+        self.with(true, |file, _| {
+            file.synced.clone_from(&file.now);
+            file.waiting.clear();
+        })
     }
 }
 
 impl Drop for SimFile {
     /// Releases the file's lock, as closing a real file does.
-    fn drop(&mut self) {}
+    fn drop(&mut self) {
+        let mut disk = self.disk.lock().unwrap_or_else(|e| e.into_inner());
+        if disk.boot != self.boot {
+            return;
+        }
+        if let Some(file) = disk.files.get_mut(&self.path) {
+            if file.locked_by == Some(self.handle) {
+                file.locked_by = None;
+            }
+        }
+    }
+}
+
+/// SplitMix64: a small random number generator written out here, so a seed
+/// gives the same disk whatever crate versions are in use.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    fn coin(&mut self) -> bool {
+        self.next() & 1 == 1
+    }
+
+    /// A number in `0..n`. The tiny bias of `%` does not matter here.
+    fn below(&mut self, n: u64) -> u64 {
+        self.next() % n
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn splitmix64_gives_its_published_values() {
+        // The first outputs for seed 1234567, from the reference code.
+        let mut rng = Rng(1234567);
+        assert_eq!(rng.next(), 6457827717110365317);
+        assert_eq!(rng.next(), 3203168211198807973);
+    }
 }

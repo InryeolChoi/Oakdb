@@ -247,33 +247,43 @@ fn reads_do_not_count_towards_fail_after() {
 
 // The engine on the simulated disk.
 
+/// Commits key `i` for `i` in `0..commits`, with values long enough that
+/// some commits split a leaf and change the meta page, and others do not.
+fn commit_keys(db: &Db<SimFs>, commits: u32) {
+    for i in 0..commits {
+        let mut txn = db.begin();
+        txn.put(&i.to_be_bytes(), &vec![i as u8; 300]).unwrap();
+        txn.commit().unwrap();
+    }
+}
+
 #[test]
 fn the_engine_keeps_every_commit_through_a_crash() {
-    for seed in 0..SEEDS {
-        let fs = SimFs::new();
-        let db = Db::open_with(fs.clone(), dir()).unwrap();
-        for i in 0..20u32 {
+    // A crash right after each commit in turn, so the last commit before
+    // it is sometimes one that changed the meta page and sometimes not.
+    for commits in 1..=40 {
+        for seed in 0..20 {
+            let fs = SimFs::new();
+            let db = Db::open_with(fs.clone(), dir()).unwrap();
+            commit_keys(&db, commits);
+            // Work that was never committed, cut off by the crash.
             let mut txn = db.begin();
-            txn.put(&i.to_be_bytes(), &vec![i as u8; 300]).unwrap();
-            txn.commit().unwrap();
-        }
-        // Work that was never committed, cut off by the crash.
-        let mut txn = db.begin();
-        txn.put(b"uncommitted", b"x").unwrap();
-        drop(txn);
-        drop(db);
+            txn.put(b"uncommitted", b"x").unwrap();
+            drop(txn);
+            drop(db);
 
-        fs.crash(seed);
-        let db = Db::open_with(fs.clone(), dir()).unwrap();
-        let txn = db.begin();
-        for i in 0..20u32 {
-            assert_eq!(
-                txn.get(&i.to_be_bytes()).unwrap(),
-                Some(vec![i as u8; 300]),
-                "seed {seed}, key {i}"
-            );
+            fs.crash(seed);
+            let db = Db::open_with(fs.clone(), dir()).unwrap();
+            let txn = db.begin();
+            for i in 0..commits {
+                assert_eq!(
+                    txn.get(&i.to_be_bytes()).unwrap(),
+                    Some(vec![i as u8; 300]),
+                    "{commits} commits, seed {seed}, key {i}"
+                );
+            }
+            assert_eq!(txn.get(b"uncommitted").unwrap(), None);
         }
-        assert_eq!(txn.get(b"uncommitted").unwrap(), None);
     }
 }
 

@@ -329,6 +329,23 @@ canvas{width:100%;display:block;border-radius:12px;background:var(--surface2)}
 .ofp.flash{transform:scale(1.15);box-shadow:0 0 0 3px var(--hl)}
 .ofp.new{animation:pop .4s}
 
+/* 2-7 simulated disk */
+.sdrow{display:grid;grid-template-columns:110px repeat(4,1fr);gap:8px;align-items:center;margin:6px 0}
+@media (max-width:620px){.sdrow{grid-template-columns:70px repeat(4,1fr)}}
+.sdlbl{font-size:13px;font-weight:700;color:var(--muted)}
+.sdpg{border:2px solid var(--line);border-radius:8px;padding:4px;background:var(--surface);cursor:default}
+.sdpg.click{cursor:pointer}.sdpg.click:hover{border-color:var(--oak)}
+.sdpg .t{font-size:11px;color:var(--muted);text-align:center}
+.sdsec{display:grid;grid-template-columns:repeat(8,1fr);gap:2px;margin-top:3px}
+.sdsec i{display:block;height:18px;border-radius:2px;background:var(--surface2);transition:background .3s}
+.sdsec i.v1{background:#e8775a}.sdsec i.v2{background:#3b8fd0}.sdsec i.v3{background:#c28a12}.sdsec i.v4{background:#4a9b5f}.sdsec i.v5{background:#9a5fc2}
+.sdgone{opacity:.25;filter:grayscale(1)}
+.sdwait{display:flex;flex-wrap:wrap;gap:6px;min-height:28px;margin:6px 0}
+.sdwait span{font-size:12px;padding:3px 8px;border-radius:999px;background:var(--surface2)}
+.sdwait span.kept{background:var(--leaf-soft);color:var(--leaf)}
+.sdwait span.lost{background:var(--surface2);text-decoration:line-through;color:var(--muted)}
+.sdwait span.torn{background:#fbe3d6;color:#b4552d}
+
 /* 2-6 checksum */
 .ckpage{border:2px solid var(--line);border-radius:12px;padding:10px;background:var(--surface)}
 .ckhead{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:6px 10px;border-radius:8px;background:var(--violet-soft);color:var(--violet);font-size:13px;margin-bottom:8px}
@@ -389,7 +406,7 @@ svg text{font-family:"Noto Sans KR",sans-serif}
 
 <nav class="toc"><div class="wrap">
   <a class="part" href="#p1">1 기본기</a><a href="#c11">파일 vs DB</a><a href="#c12">DB의 층</a><a href="#c13">디스크</a><a href="#c14">트리</a><a href="#c15">B+Tree·LSM</a><a href="#c16">동시성</a><a href="#c17">정전·로그</a>
-  <a class="part" href="#p2">2 Oakdb</a><a href="#c21">결정 12개</a><a href="#c22">페이지</a><a href="#c23">트리</a><a href="#c24">검증</a><a href="#c25">큰 값</a><a href="#c26">체크섬</a>
+  <a class="part" href="#p2">2 Oakdb</a><a href="#c21">결정 12개</a><a href="#c22">페이지</a><a href="#c23">트리</a><a href="#c24">검증</a><a href="#c25">큰 값</a><a href="#c26">체크섬</a><a href="#c27">가짜 디스크</a>
   <a class="part" href="#p3">3 SQLite</a><a href="#c31">동시 쓰기</a><a href="#c32">서버</a><a href="#c33">비교표</a><a href="#c34">대가</a>
   <a class="part" href="#p4">4 앞으로</a><a href="#c41">지도</a><a href="#c42">충돌 판정</a><a href="#c43">그룹 커밋</a><a href="#c44">체크포인트</a><a href="#c45">SQL→키</a><a href="#c46">최종 증명</a><a href="#gl">용어</a>
 </div></nav>
@@ -717,6 +734,44 @@ svg text{font-family:"Noto Sans KR",sans-serif}
     <tr><td>메타 B에서 비트 하나</td><td>열림</td><td>열림 (B는 #23에서 읽기 시작)</td></tr>
   </table></div>
 </section>
+
+<section class="ch reveal" id="c27">
+  <span class="chno">2-7 · 티켓 08</span>
+  <h3>가짜 디스크: 정전을 연습하는 무대</h3>
+  <p>정전은 진짜로 일으키기 어렵고, 일으켜도 매번 결과가 달라요. 그래서 메모리 속에 <b>가짜 디스크</b>를 만들었어요. 엔진은 진짜 디스크인 줄 알고 그대로 써요. 우리는 원하는 순간 정전을 일으키고, 무엇이 살아남을지는 <b>시드</b>가 정해요. 같은 시드면 언제나 같은 결과가 나와요.</p>
+  <div class="analogy"><b>비유: 책상 위 메모와 금고 속 장부.</b> 쓰기는 먼저 책상 위 메모지에 적혀요(읽기도 여기를 봐요). <code>sync</code>는 메모를 금고에 넣는 일이에요. 정전이 나면 바람이 불어요. 책상 위 메모 하나하나가 <b>남거나, 날아가거나, 찢겨서 일부만</b> 남아요. 찢기면 512바이트 칸마다 따로 남거나 날아가요. 금고는 그대로예요.</div>
+  <div class="card">
+    <div class="controls">
+      <span class="small">책상 위 페이지를 누르면 새 버전을 써요.</span>
+      <button id="sdSync">🔒 sync (금고에 넣기)</button>
+      <button id="sdDir">📁 디렉터리 sync</button>
+      시드 <input id="sdSeed" type="number" value="42" style="width:70px">
+      <button class="primary" id="sdCrash">⚡ 정전</button>
+      <button id="sdReset">처음부터</button>
+    </div>
+    <div class="sdrow"><span class="sdlbl">책상 위<br><small>(읽기가 보는 것)</small></span><div id="sdNow" style="display:contents"></div></div>
+    <div class="sdrow"><span class="sdlbl">금고<br><small>(디스크)</small></span><div id="sdSafe" style="display:contents"></div></div>
+    <div class="small">아직 금고에 안 들어간 쓰기 (오래된 순):</div>
+    <div class="sdwait" id="sdWait"></div>
+    <div class="log" id="sdLog"></div>
+    <p class="small">페이지 한 장(4096바이트)은 512바이트 칸 8개예요. 색이 버전이에요. 이 화면의 주사위는 Oakdb의 <code>SimFs::crash</code>와 같은 순서, 같은 SplitMix64로 굴려요.</p>
+  </div>
+  <div class="tablewrap"><table>
+    <tr><th>가짜 디스크가 흉내 내는 것</th><th>왜 필요한가</th></tr>
+    <tr><td>sync 안 된 쓰기가 <b>사라짐</b></td><td>커밋이 "OK"를 너무 일찍 주면 들켜요</td></tr>
+    <tr><td>나중 쓰기는 남고 먼저 쓰기는 사라짐</td><td>디스크는 순서를 바꿔 써요. "메타는 마지막에 쓰니 안전"이 sync 없이는 거짓이에요</td></tr>
+    <tr><td>한 페이지가 <b>찢김</b> (칸 일부만 새 내용)</td><td>실험 0006의 반쯤 쓴 페이지. 체크섬(2-6)이 알아채고, WAL(10번)이 고쳐요</td></tr>
+    <tr><td>디렉터리 sync 전에 만든 파일이 <b>통째로 사라짐</b></td><td>내용을 sync해도 "파일이 있다"는 기록은 디렉터리에 따로 있어요</td></tr>
+    <tr><td><code>fail_after(n)</code>: n번째 작업 뒤 정전</td><td>커밋 <b>도중</b> 아무 시점에서나 끊기 (09번 정전 실험)</td></tr>
+  </table></div>
+  <div class="tablewrap"><table>
+    <tr><th>실험 0007: 엔진에서 sync 하나를 빼면</th><th>진짜 디스크 테스트</th><th>가짜 디스크 테스트</th></tr>
+    <tr><td>새 DB 만든 뒤 디렉터리 sync</td><td>호출 기록 테스트만 잡음</td><td>잡음 (파일이 사라짐)</td></tr>
+    <tr><td>새 DB 만든 뒤 데이터 sync</td><td style="color:var(--warn)"><b>못 잡음</b></td><td>잡음</td></tr>
+    <tr><td>커밋에서 메타보다 먼저 하는 sync</td><td style="color:var(--warn)"><b>못 잡음</b></td><td>잡음</td></tr>
+    <tr><td>커밋에서 메타를 쓴 뒤 sync</td><td style="color:var(--warn)"><b>못 잡음</b></td><td>처음엔 못 잡음 → "커밋마다 직후에 정전"으로 고친 뒤 잡음</td></tr>
+  </table></div>
+</section>
 </div>
 
 <!-- ================= PART 3 ================= -->
@@ -826,7 +881,7 @@ svg text{font-family:"Noto Sans KR",sans-serif}
 
 <!-- ================= PART 4 ================= -->
 <div class="wrap">
-<div class="partbanner" id="p4"><div class="num">PART 4</div><h2>앞으로의 길</h2><p>27개 티켓 중 01~06을 merge했고, 07(체크섬)은 PR이 열려 있어요. 남은 길을 지도로 보고, 앞으로 만들 핵심 장치들을 미리 움직여 봐요.</p></div>
+<div class="partbanner" id="p4"><div class="num">PART 4</div><h2>앞으로의 길</h2><p>27개 티켓 중 01~07을 merge해서 저장 엔진 구간을 마쳤고, 08(가짜 파일시스템)은 PR이 열려 있어요. 남은 길을 지도로 보고, 앞으로 만들 핵심 장치들을 미리 움직여 봐요.</p></div>
 
 <section class="ch reveal" id="c41">
   <span class="chno">4-1</span>
@@ -1249,6 +1304,32 @@ $('scRun').onclick=async()=>{trRender({});const t=scanTok;const from=+$('scFrom'
  $('ckReset2').onclick=reset;reset();
 })();
 
+/* ===== 2-7 simulated disk ===== */
+(function(){
+ const M=(1n<<64n)-1n;
+ const Rng=seed=>{let s=BigInt.asUintN(64,BigInt(seed));const next=()=>{s=(s+0x9E3779B97F4A7C15n)&M;let z=s;z=((z^(z>>30n))*0xBF58476D1CE4E5B9n)&M;z=((z^(z>>27n))*0x94D049BB133111EBn)&M;return z^(z>>31n);};return {coin:()=>(next()&1n)===1n,below:n=>Number(next()%BigInt(n))};};
+ const P=4,S=8;let now,safe,wait,entry,gone,ver;
+ const page=v=>Array(S).fill(v);
+ const log=(m,c)=>{const l=$('sdLog');l.className='log'+(c?' '+c:'');l.innerHTML=m;};
+ function reset(){now=[...Array(P)].map(()=>page(0));safe=now.map(p=>p.slice());wait=[];entry=false;gone=false;ver=[0,0,0,0];render();
+  log('새 파일을 만들었어요. 내용은 아직 아무것도 금고에 없고, "파일이 있다"는 기록도 디렉터리에 sync되지 않았어요.','');}
+ const cells=(p,click,i)=>`<div class="sdpg${click?' click':''}${gone?' sdgone':''}" ${click?`data-i="${i}"`:''}><div class="t">페이지 ${i}</div><div class="sdsec">${p.map(v=>`<i class="${v?'v'+((v-1)%5+1):''}"></i>`).join('')}</div></div>`;
+ function render(marks){$('sdNow').innerHTML=now.map((p,i)=>cells(p,true,i)).join('');$('sdSafe').innerHTML=safe.map((p,i)=>cells(p,false,i)).join('');
+  $('sdWait').innerHTML=(marks||wait.map(w=>[w,'']) ).map(([w,c])=>`<span class="${c}">페이지 ${w.page} ← v${w.v}${c==='kept'?' 남음':c==='lost'?' 사라짐':c==='torn'?' 찢김':''}</span>`).join('')||'<span class="small">없음</span>';
+  $('sdDir').textContent=entry?'📁 디렉터리 sync됨':'📁 디렉터리 sync';}
+ $('sdNow').onclick=e=>{const d=e.target.closest('.sdpg');if(!d||gone)return;const i=+d.dataset.i;const v=++ver[i]+i*0; now[i]=page(v);wait.push({page:i,v});render();log(`페이지 ${i}에 v${v}를 썼어요. 읽기는 바로 새 내용을 보지만, 금고에는 아직 없어요.`,'');};
+ $('sdSync').onclick=()=>{if(gone)return;safe=now.map(p=>p.slice());wait=[];render();log('sync! 책상 위 내용이 모두 금고에 들어갔어요. 이제 정전이 나도 이 내용은 남아요.','good');};
+ $('sdDir').onclick=()=>{if(gone)return;entry=true;render();log('디렉터리를 sync했어요. 이제 정전이 나도 파일 자체가 사라지지는 않아요.','good');};
+ $('sdCrash').onclick=()=>{if(gone)return;const seed=+$('sdSeed').value||0;const r=Rng(seed);
+  if(!entry&&r.coin()){gone=true;now=now.map(()=>page(0));safe=safe.map(()=>page(0));render(wait.map(w=>[w,'lost']));wait=[];
+   log(`⚡ 시드 ${seed}: 디렉터리를 sync하지 않아서 <b>파일이 통째로 사라졌어요.</b> 내용을 sync했어도 소용없어요. "처음부터"를 눌러 다시 해 보세요.`,'err');return;}
+  const d=safe.map(p=>p.slice());const marks=[];let t=0,l=0,k=0;
+  for(const w of wait){const roll=r.below(3);if(roll===0){marks.push([w,'lost']);l++;}else if(roll===1){d[w.page]=page(w.v);marks.push([w,'kept']);k++;}else{for(let s=0;s<S;s++)if(r.coin())d[w.page][s]=w.v;marks.push([w,'torn']);t++;}}
+  now=d.map(p=>p.slice());safe=d;entry=true;const n=wait.length;wait=[];render(marks);
+  log(n?`⚡ 시드 ${seed}: sync 안 된 쓰기 ${n}개 중 <b>남음 ${k}, 사라짐 ${l}, 찢김 ${t}</b>. 같은 시드로 다시 해 보면 똑같이 나와요. 시드를 바꾸면 결과가 달라져요.`:`⚡ 시드 ${seed}: sync 안 된 쓰기가 없어서 잃은 것이 없어요.`,n&&(l||t)?'err':'good');};
+ $('sdReset').onclick=reset;reset();
+})();
+
 /* ===== 3-1 gantt ===== */
 (function(){const S=3,GAP=.7;
  const lbl=()=>{$('gNv').textContent=$('gN').value+'명';$('gTv').textContent=$('gT').value+'ms';};
@@ -1280,15 +1361,15 @@ $('scRun').onclick=async()=>{trRender({});const t=scanTok;const from=+$('scFrom'
 
 /* ===== 4-1 roadmap ===== */
 (function(){const ST=[
- ['📦','저장 엔진','01~07','B+Tree에 저장하고 읽기','01~06 merge (06은 큰 값의 부록 사슬과 빈 페이지 재사용: 2-5). <b>07 체크섬</b>(페이지 지문 CRC-32C: 2-6) PR 리뷰 중. 저장 엔진 구간의 마지막이에요.','책: 돛단배 책의 B+-tree 장'],
- ['⚡','정전에도 안전','08~12','"OK면 남는다"를 지키기','<b>08 가짜 파일시스템</b>(정전을 시드로 재현) → <b>09 지금은 깨진다는 걸 보이기</b> → <b>10 WAL</b> → <b>11 체크포인트·메타 슬롯</b> → <b>12 디스크 실패 시 엔진 정지</b>. 프로젝트에서 가장 어려운 구간이에요.','책: 복구(Recovery) 장'],
+ ['📦','저장 엔진','01~07','B+Tree에 저장하고 읽기','01~07 모두 merge ✅ (06은 큰 값의 부록 사슬과 빈 페이지 재사용: 2-5, 07은 페이지 지문 CRC-32C: 2-6).','책: 돛단배 책의 B+-tree 장'],
+ ['⚡','정전에도 안전','08~12','"OK면 남는다"를 지키기','<b>08 가짜 파일시스템</b>(정전을 시드로 재현: 2-7) PR 리뷰 중 → <b>09 지금은 깨진다는 걸 보이기</b> → <b>10 WAL</b> → <b>11 체크포인트·메타 슬롯</b> → <b>12 디스크 실패 시 엔진 정지</b>. 프로젝트에서 가장 어려운 구간이에요.','책: 복구(Recovery) 장'],
  ['👥','동시 쓰기','13~18','차별점 ①','<b>13 스냅샷 읽기</b> → <b>14 충돌 판정</b> → <b>15 여러 스레드와 커밋 창구</b> → <b>16 그룹 커밋</b> → <b>17 동시성 검증</b>(이력 검사, loom) → <b>18 벤치마크</b>.','책: 동시성 제어 · 스냅샷 격리 절'],
  ['🗣','SQL','19~23','사람의 말로 묻기','<b>19 렉서·파서·실행기</b> → <b>20 WHERE·범위</b> → <b>21 UPDATE·DELETE</b> → <b>22 타입 검사</b> → <b>23 트랜잭션 명령</b>. 행을 정렬이 유지되는 키로 바꾸는 게 핵심이에요(4-5).','책: 질의 처리 장 (가볍게)'],
  ['🌐','네트워크 서버','24~27','차별점 ②','<b>24 통신 규칙과 CLI</b> → <b>25 여러 클라이언트와 접속별 트랜잭션</b> → <b>26 정상 종료</b> → <b>27 네트워크 벤치마크</b>(최종 그래프, 4-6).','—'],
  ];const xs=ST.map((_,i)=>10+i*20);const rail=$('rail');
- ST.forEach((s,i)=>{const d=document.createElement('div');d.className='station'+(i===0?' on':'');d.style.left=`calc(${xs[i]}% )`;d.innerHTML=`<div class="dot">${s[0]}</div><div class="nm">${s[1]}</div><div class="rg">${s[2]}</div>`;d.onclick=()=>show(i);rail.appendChild(d);});
+ ST.forEach((s,i)=>{const d=document.createElement('div');d.className='station'+(i===1?' on':'');d.style.left=`calc(${xs[i]}% )`;d.innerHTML=`<div class="dot">${s[0]}</div><div class="nm">${s[1]}</div><div class="rg">${s[2]}</div>`;d.onclick=()=>show(i);rail.appendChild(d);});
  function show(i){document.querySelectorAll('.station').forEach((e,j)=>e.classList.toggle('on',j===i));const s=ST[i];$('stDetail').innerHTML=`<div style="font-size:22px">${s[0]} <b>${s[1]}</b> <span class="mono small">${s[2]}</span></div><div class="small" style="color:var(--oak);font-weight:700">${s[3]}</div><p>${s[4]}</p><div class="small">📚 ${s[5]}</div>`;}
- show(0);new IntersectionObserver((es,o)=>{if(es[0].isIntersecting){$('railDone').style.width=`calc(${xs[0]+20*0.7}% - 30px)`;$('train').style.left=`calc(${xs[0]+20*0.7}% - 0px)`;o.disconnect();}},{threshold:.5}).observe(rail);})();
+ show(1);new IntersectionObserver((es,o)=>{if(es[0].isIntersecting){$('railDone').style.width=`calc(${xs[1]+20*0.1}% - 30px)`;$('train').style.left=`calc(${xs[1]+20*0.1}% - 0px)`;o.disconnect();}},{threshold:.5}).observe(rail);})();
 
 /* ===== 4-2 first committer wins ===== */
 (function(){let tok=0;
