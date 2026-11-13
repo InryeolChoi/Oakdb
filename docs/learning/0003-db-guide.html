@@ -329,6 +329,21 @@ canvas{width:100%;display:block;border-radius:12px;background:var(--surface2)}
 .ofp.flash{transform:scale(1.15);box-shadow:0 0 0 3px var(--hl)}
 .ofp.new{animation:pop .4s}
 
+/* 2-8 crash experiment */
+.cxbar{display:flex;height:34px;border-radius:8px;overflow:hidden;margin:8px 0;font-size:12px;font-weight:700;color:#fff}
+.cxbar div{display:flex;align-items:center;justify-content:center;white-space:nowrap;overflow:hidden;cursor:pointer;transition:filter .2s}
+.cxbar div:hover{filter:brightness(1.1)}
+.cxcards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin:10px 0}
+.cxcard{border:2px solid var(--line);border-radius:10px;padding:8px 10px;cursor:pointer;background:var(--surface);font-size:13px}
+.cxcard.on{border-color:var(--oak);box-shadow:0 0 0 3px var(--hl)}
+.cxcard b{display:block;font-size:14px}
+.cxpages{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}
+.cxpages span{padding:6px 10px;border-radius:8px;font-family:"JetBrains Mono",monospace;font-size:12px}
+.cxpages .kept{background:var(--leaf-soft);color:var(--leaf)}
+.cxpages .lost{background:var(--surface2);color:var(--muted);text-decoration:line-through}
+.cxpages .torn{background:#fbe3d6;color:#b4552d}
+.cxpages .none{background:var(--surface2);color:var(--muted)}
+
 /* 2-7 simulated disk */
 .sdrow{display:grid;grid-template-columns:110px repeat(4,1fr);gap:8px;align-items:center;margin:6px 0}
 @media (max-width:620px){.sdrow{grid-template-columns:70px repeat(4,1fr)}}
@@ -406,7 +421,7 @@ svg text{font-family:"Noto Sans KR",sans-serif}
 
 <nav class="toc"><div class="wrap">
   <a class="part" href="#p1">1 기본기</a><a href="#c11">파일 vs DB</a><a href="#c12">DB의 층</a><a href="#c13">디스크</a><a href="#c14">트리</a><a href="#c15">B+Tree·LSM</a><a href="#c16">동시성</a><a href="#c17">정전·로그</a>
-  <a class="part" href="#p2">2 Oakdb</a><a href="#c21">결정 12개</a><a href="#c22">페이지</a><a href="#c23">트리</a><a href="#c24">검증</a><a href="#c25">큰 값</a><a href="#c26">체크섬</a><a href="#c27">가짜 디스크</a>
+  <a class="part" href="#p2">2 Oakdb</a><a href="#c21">결정 12개</a><a href="#c22">페이지</a><a href="#c23">트리</a><a href="#c24">검증</a><a href="#c25">큰 값</a><a href="#c26">체크섬</a><a href="#c27">가짜 디스크</a><a href="#c28">정전 실험</a>
   <a class="part" href="#p3">3 SQLite</a><a href="#c31">동시 쓰기</a><a href="#c32">서버</a><a href="#c33">비교표</a><a href="#c34">대가</a>
   <a class="part" href="#p4">4 앞으로</a><a href="#c41">지도</a><a href="#c42">충돌 판정</a><a href="#c43">그룹 커밋</a><a href="#c44">체크포인트</a><a href="#c45">SQL→키</a><a href="#c46">최종 증명</a><a href="#gl">용어</a>
 </div></nav>
@@ -772,6 +787,30 @@ svg text{font-family:"Noto Sans KR",sans-serif}
     <tr><td>커밋에서 메타를 쓴 뒤 sync</td><td style="color:var(--warn)"><b>못 잡음</b></td><td>처음엔 못 잡음 → "커밋마다 직후에 정전"으로 고친 뒤 잡음</td></tr>
   </table></div>
 </section>
+
+<section class="ch reveal" id="c28">
+  <span class="chno">2-8 · 티켓 09</span>
+  <h3>정전 실험: 지금은 깨진다</h3>
+  <p>가짜 디스크 위에서 <b>충돌 시험</b>을 했어요. 시드 하나가 무작위 작업(커밋 1~30개), 정전 시점(커밋 도중 아무 데나), 정전 때 무엇이 남을지를 정해요. 다시 열어서 약속을 확인해요: <b>① 열린다 ② OK 받은 커밋은 모두 있다 ③ 정전에 걸린 커밋은 전부 있거나 전부 없다.</b></p>
+  <div class="analogy"><b>비유: 자동차 충돌 시험.</b> 08에서 시험장을 지었고, 이번엔 차를 1만 번 부딪쳐서 어디가 찌그러지는지 사진을 찍었어요. 고치지는 않아요. 에어백(WAL)은 10번에서 달아요. 이 사진들이 "에어백이 무엇을 막아야 하나"의 목록이 돼요.</div>
+  <div class="card">
+    <div class="small">시드 1만 개의 결과 (막대를 누르면 설명이 나와요)</div>
+    <div class="cxbar" id="cxBar"></div>
+    <div class="log" id="cxBarLog"></div>
+    <div class="small" style="margin-top:12px">깨지는 방식 다섯 가지: 카드를 누르면 그 시드의 정전 순간이 보여요</div>
+    <div class="cxcards" id="cxCards"></div>
+    <div class="cxpages" id="cxPages"></div>
+    <div class="log" id="cxLog"></div>
+    <p class="small">초록 = 정전에도 남은 쓰기, 회색 줄 = 사라진 쓰기, 주황 = 찢긴 쓰기(#은 남은 512바이트 칸). <code>cargo run --example crash_sim -- one 시드</code>로 똑같이 재현돼요.</p>
+  </div>
+  <div class="tablewrap"><table>
+    <tr><th>가설</th><th>판정</th></tr>
+    <tr><td>분할 도중 끊기면 열기에 실패한다</td><td><b>채택, 더 넓다</b>: 분할이 아니어도 46%가 열기 실패</td></tr>
+    <tr><td>반쪽 커밋이 나온다</td><td><b>채택</b>: 2.8%. 오류 없이 틀린 상태라 가장 위험</td></tr>
+    <tr><td>OK 받은 커밋은 사라지지 않는다</td><td><b>채택</b>: 11만 개 시드에서 0건 (증명은 아님)</td></tr>
+  </table></div>
+  <div class="term"><b>덤으로 찾은 버그</b>: debug 빌드에서 다시 열다가 <b>panic</b>(0.2%). 빈 페이지 목록을 따라가는 반복자(<code>successors</code>)가 페이지 종류를 확인하기 <b>전에</b> 다음 번호를 먼저 읽어요. 06번 정리 때 제가 넣은 버그예요.</div>
+</section>
 </div>
 
 <!-- ================= PART 3 ================= -->
@@ -881,7 +920,7 @@ svg text{font-family:"Noto Sans KR",sans-serif}
 
 <!-- ================= PART 4 ================= -->
 <div class="wrap">
-<div class="partbanner" id="p4"><div class="num">PART 4</div><h2>앞으로의 길</h2><p>27개 티켓 중 01~07을 merge해서 저장 엔진 구간을 마쳤고, 08(가짜 파일시스템)은 PR이 열려 있어요. 남은 길을 지도로 보고, 앞으로 만들 핵심 장치들을 미리 움직여 봐요.</p></div>
+<div class="partbanner" id="p4"><div class="num">PART 4</div><h2>앞으로의 길</h2><p>27개 티켓 중 01~08을 merge했고(저장 엔진 구간 완료, 정전 안전 구간 시작), 09(정전 실험)는 PR이 열려 있어요. 남은 길을 지도로 보고, 앞으로 만들 핵심 장치들을 미리 움직여 봐요.</p></div>
 
 <section class="ch reveal" id="c41">
   <span class="chno">4-1</span>
@@ -1330,6 +1369,29 @@ $('scRun').onclick=async()=>{trRender({});const t=scanTok;const from=+$('scFrom'
  $('sdReset').onclick=reset;reset();
 })();
 
+/* ===== 2-8 crash experiment ===== */
+(function(){
+ const BAR=[['약속 지킴',5096,'var(--ok)','정전 시점이 sync와 sync 사이가 아니거나, 남은 쓰기가 운 좋게 맞아떨어진 경우예요. 절반 정도예요.'],
+  ['열기 실패',4368,'#c0603a','커밋 도중 정전. 찢긴 페이지는 체크섬이, 어긋난 페이지는 구조 검사가 잡아서 <b>열기를 거절</b>해요. 조용히 틀리진 않지만, 되살릴 사본이 없어서 DB 전체가 안 열려요.'],
+  ['만들다 만 DB',236,'#8a4fb5','새 DB를 만드는 도중 정전. 잃은 커밋은 없지만 파일을 손으로 지워야 해요.'],
+  ['반쪽 커밋',282,'#c28a12','열리고 읽히는데 커밋의 일부 키만 새 값이에요. <b>오류 없이 틀린 상태</b>라 가장 위험해요.'],
+  ['panic',18,'#333','debug 빌드에서 다시 열다가 멈춰요. 엔진 버그예요 (아래 상자).']];
+ const tot=BAR.reduce((a,b)=>a+b[1],0);
+ $('cxBar').innerHTML=BAR.map((b,i)=>`<div data-i="${i}" style="width:${Math.max(b[1]/tot*100,1.2)}%;background:${b[2]}">${b[1]/tot>.08?b[0]+' '+(b[1]/tot*100).toFixed(0)+'%':''}</div>`).join('');
+ $('cxBar').onclick=e=>{const d=e.target.closest('[data-i]');if(!d)return;const b=BAR[+d.dataset.i];const l=$('cxBarLog');l.className='log';l.innerHTML=`<b>${b[0]}: ${b[1].toLocaleString()}개 (${(b[1]/tot*100).toFixed(1)}%)</b> ${b[3]}`;};
+ const W=[
+  {t:'만들다 만 DB',seed:184,sub:'만드는 도중',pages:[['page 2','torn ###.#.#.']],why:'새 DB는 "리프 → 메타 A·B → sync" 순서로 만들어요. 리프가 찢긴 채 남고 메타는 못 썼어요. 파일이 비어 있지 않으니 엔진은 "있는 DB"로 열려다 <b>not an Oakdb data file</b>로 거절해요.'},
+  {t:'찢긴 페이지',seed:84,sub:'첫 커밋 도중',pages:[['page 2','torn #.###..#']],why:'8칸 중 5칸만 새 내용. 체크섬(2-6)이 <b>page 2 has a wrong checksum</b>으로 잡아요. 알아채기만 하고 되살리진 못해요. 가장 흔한 실패예요.'},
+  {t:'파일 밖을 가리킴',seed:213,sub:'첫 커밋 도중',pages:[['page 2','kept']],why:'리프는 새 내용으로 남았는데, 그 리프가 가리킬 새 페이지(파일 끝에 붙일 것)는 쓰이기 전이었어요. <b>page number is outside the file</b>.'},
+  {t:'반쪽 커밋',seed:1680,sub:'커밋 5 도중',pages:[['page 2','kept'],['다른 리프','쓰기 전']],why:'커밋 5는 리프 두 장을 고쳐요. 첫 장만 쓰고 끊겼어요. 키 24·55는 새 값, 105·106·140은 옛 값. <b>열리고 읽혀요.</b> 그래서 위험해요.'},
+  {t:'디스크가 완벽해도',seed:159,sub:'커밋 11, 메타 직전',pages:[],why:'남거나 사라질 쓰기가 <b>하나도 없었어요.</b> 새 페이지는 sync까지 끝났고 메타를 쓰려던 순간 끊겼어요. 제자리에서 덮어쓴 새 페이지와 옛 메타가 어긋나서 <b>page is reached twice</b>. "메타를 마지막에"는 덮어쓰지 않을 때만 안전해요.'}];
+ const show=i=>{document.querySelectorAll('.cxcard').forEach((c,j)=>c.classList.toggle('on',i===j));const w=W[i];
+  $('cxPages').innerHTML=w.pages.length?w.pages.map(([p,f])=>`<span class="${f.startsWith('kept')?'kept':f.startsWith('torn')?'torn':f==='쓰기 전'?'none':'lost'}">${p}: ${f}</span>`).join(''):'<span class="none">sync 안 된 쓰기 없음</span>';
+  const l=$('cxLog');l.className='log err';l.innerHTML=`<b>시드 ${w.seed}</b> (${w.sub}) ${w.why}`;};
+ $('cxCards').innerHTML=W.map((w,i)=>`<div class="cxcard" data-i="${i}"><b>${i+1}. ${w.t}</b><span class="small">시드 ${w.seed}</span></div>`).join('');
+ $('cxCards').onclick=e=>{const d=e.target.closest('.cxcard');if(d)show(+d.dataset.i);};show(0);
+})();
+
 /* ===== 3-1 gantt ===== */
 (function(){const S=3,GAP=.7;
  const lbl=()=>{$('gNv').textContent=$('gN').value+'명';$('gTv').textContent=$('gT').value+'ms';};
@@ -1362,14 +1424,14 @@ $('scRun').onclick=async()=>{trRender({});const t=scanTok;const from=+$('scFrom'
 /* ===== 4-1 roadmap ===== */
 (function(){const ST=[
  ['📦','저장 엔진','01~07','B+Tree에 저장하고 읽기','01~07 모두 merge ✅ (06은 큰 값의 부록 사슬과 빈 페이지 재사용: 2-5, 07은 페이지 지문 CRC-32C: 2-6).','책: 돛단배 책의 B+-tree 장'],
- ['⚡','정전에도 안전','08~12','"OK면 남는다"를 지키기','<b>08 가짜 파일시스템</b>(정전을 시드로 재현: 2-7) PR 리뷰 중 → <b>09 지금은 깨진다는 걸 보이기</b> → <b>10 WAL</b> → <b>11 체크포인트·메타 슬롯</b> → <b>12 디스크 실패 시 엔진 정지</b>. 프로젝트에서 가장 어려운 구간이에요.','책: 복구(Recovery) 장'],
+ ['⚡','정전에도 안전','08~12','"OK면 남는다"를 지키기','<b>08 가짜 파일시스템</b>(2-7) ✅ → <b>09 지금은 깨진다는 걸 보이기</b>(2-8) PR 리뷰 중 → <b>10 WAL</b> → <b>11 체크포인트·메타 슬롯</b> → <b>12 디스크 실패 시 엔진 정지</b>. 프로젝트에서 가장 어려운 구간이에요.','책: 복구(Recovery) 장'],
  ['👥','동시 쓰기','13~18','차별점 ①','<b>13 스냅샷 읽기</b> → <b>14 충돌 판정</b> → <b>15 여러 스레드와 커밋 창구</b> → <b>16 그룹 커밋</b> → <b>17 동시성 검증</b>(이력 검사, loom) → <b>18 벤치마크</b>.','책: 동시성 제어 · 스냅샷 격리 절'],
  ['🗣','SQL','19~23','사람의 말로 묻기','<b>19 렉서·파서·실행기</b> → <b>20 WHERE·범위</b> → <b>21 UPDATE·DELETE</b> → <b>22 타입 검사</b> → <b>23 트랜잭션 명령</b>. 행을 정렬이 유지되는 키로 바꾸는 게 핵심이에요(4-5).','책: 질의 처리 장 (가볍게)'],
  ['🌐','네트워크 서버','24~27','차별점 ②','<b>24 통신 규칙과 CLI</b> → <b>25 여러 클라이언트와 접속별 트랜잭션</b> → <b>26 정상 종료</b> → <b>27 네트워크 벤치마크</b>(최종 그래프, 4-6).','—'],
  ];const xs=ST.map((_,i)=>10+i*20);const rail=$('rail');
  ST.forEach((s,i)=>{const d=document.createElement('div');d.className='station'+(i===1?' on':'');d.style.left=`calc(${xs[i]}% )`;d.innerHTML=`<div class="dot">${s[0]}</div><div class="nm">${s[1]}</div><div class="rg">${s[2]}</div>`;d.onclick=()=>show(i);rail.appendChild(d);});
  function show(i){document.querySelectorAll('.station').forEach((e,j)=>e.classList.toggle('on',j===i));const s=ST[i];$('stDetail').innerHTML=`<div style="font-size:22px">${s[0]} <b>${s[1]}</b> <span class="mono small">${s[2]}</span></div><div class="small" style="color:var(--oak);font-weight:700">${s[3]}</div><p>${s[4]}</p><div class="small">📚 ${s[5]}</div>`;}
- show(1);new IntersectionObserver((es,o)=>{if(es[0].isIntersecting){$('railDone').style.width=`calc(${xs[1]+20*0.1}% - 30px)`;$('train').style.left=`calc(${xs[1]+20*0.1}% - 0px)`;o.disconnect();}},{threshold:.5}).observe(rail);})();
+ show(1);new IntersectionObserver((es,o)=>{if(es[0].isIntersecting){$('railDone').style.width=`calc(${xs[1]+20*0.25}% - 30px)`;$('train').style.left=`calc(${xs[1]+20*0.25}% - 0px)`;o.disconnect();}},{threshold:.5}).observe(rail);})();
 
 /* ===== 4-2 first committer wins ===== */
 (function(){let tok=0;
