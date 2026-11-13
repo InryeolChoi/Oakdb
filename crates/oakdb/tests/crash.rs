@@ -118,3 +118,107 @@ fn a_cut_while_opening_a_new_database_loses_nothing_it_promised() {
         assert!(run.verdict.is_intact(), "{:?}", run.verdict);
     }
 }
+
+#[test]
+fn no_seed_loses_an_acknowledged_commit_or_makes_up_a_value() {
+    // What the current design does keep: a commit is only acknowledged
+    // after its pages are synced, so a power cut can break the database
+    // but has not been seen to lose an acknowledged commit silently.
+    for seed in 0..2000 {
+        let verdict = Case::from_seed(seed).run().verdict;
+        assert!(
+            !matches!(
+                verdict,
+                Verdict::LostAcknowledged(_) | Verdict::WrongValue(_)
+            ),
+            "seed {seed}: {verdict:?}"
+        );
+    }
+}
+
+// Seeds where the current design breaks (docs/experiments/0008). Each is
+// the shortest example of its kind in seeds 0..600. They must all pass
+// once the WAL (#22) lands; until then they are ignored.
+// Replay one with `cargo run --example crash_sim -- one <seed>`.
+
+fn stays_intact(seed: u64) {
+    let run = Case::from_seed(seed).run();
+    assert!(run.verdict.is_intact(), "seed {seed}: {:?}", run.verdict);
+}
+
+/// Cut while creating the database: the first leaf landed, the meta page
+/// did not, and the file is no longer empty, so it is opened as a database
+/// and refused ("not an Oakdb data file").
+#[test]
+#[ignore = "needs the WAL (#22)"]
+fn a_cut_while_creating_leaves_a_file_that_can_be_opened() {
+    stays_intact(184);
+}
+
+/// Cut while creating: the meta page landed, the leaf did not ("data file
+/// is shorter than its meta page says").
+#[test]
+#[ignore = "needs the WAL (#22)"]
+fn a_cut_while_creating_after_the_meta_page_is_written() {
+    stays_intact(536);
+}
+
+/// The first commit's leaf landed, but the overflow pages it points to,
+/// past the old end of the file, did not ("page number is outside the
+/// file").
+#[test]
+#[ignore = "needs the WAL (#22)"]
+fn a_leaf_lands_without_its_new_overflow_pages() {
+    stays_intact(213);
+}
+
+/// A torn leaf: the checksum notices, but nothing can repair it yet
+/// ("page 2 has a wrong checksum").
+#[test]
+#[ignore = "needs the WAL (#22)"]
+fn a_torn_page_is_repaired() {
+    stays_intact(495);
+}
+
+/// A split part way: leaves landed, lost and torn, so the sibling chain
+/// breaks ("leaves do not point to the next leaf").
+#[test]
+#[ignore = "needs the WAL (#22)"]
+fn a_split_cut_part_way() {
+    stays_intact(319);
+}
+
+/// A commit over two leaves: one landed, the other was never written, so
+/// half its keys are new ("half a commit").
+#[test]
+#[ignore = "needs the WAL (#22)"]
+fn a_commit_over_two_leaves_lands_whole_or_not_at_all() {
+    stays_intact(1680);
+    stays_intact(406);
+}
+
+/// Every page write was synced and nothing was lost or torn; the power
+/// went as the meta page was about to be written. Overwritten pages and
+/// the old meta page disagree ("page is reached twice"): the design breaks
+/// even on a disk that never loses a write.
+#[test]
+#[ignore = "needs the WAL (#22)"]
+fn a_cut_between_the_page_sync_and_the_meta_page() {
+    stays_intact(159);
+}
+
+/// The meta page write was lost, so the old free list head now names a
+/// page that has since been reused. Opening checks the free list, but
+/// `successors` reads each page's next before the check sees the page, so
+/// a debug build panics on a `debug_assert` instead of refusing the file.
+/// Not a WAL matter: found by this experiment, waiting on a decision.
+#[test]
+#[ignore = "engine bug found by this experiment (PR for #21)"]
+fn a_free_list_head_on_a_page_in_use_is_refused_without_panicking() {
+    let run = Case::from_seed(529).run();
+    assert!(
+        !matches!(run.verdict, Verdict::Panicked(_)),
+        "{:?}",
+        run.verdict
+    );
+}

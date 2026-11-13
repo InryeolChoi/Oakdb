@@ -3,7 +3,7 @@
 
 Run from the repository root:
 
-    python3 docs/experiments/scripts/mutants.py sim      # 12 bugs in SimFs
+    python3 docs/experiments/scripts/mutants.py sim      # 14 bugs in SimFs
     python3 docs/experiments/scripts/mutants.py engine   # experiment 0007
 
 Each bug is a text replacement in one source file. The file is restored
@@ -19,16 +19,18 @@ DB = "crates/oakdb/src/db.rs"
 SIM_BUGS = [
     ("unsynced writes always kept", "Landing::Lost => {}", "Landing::Lost => write_at(data, offset, &bytes),"),
     ("unsynced writes always lost", "Landing::Kept => write_at(data, offset, &bytes),", "Landing::Kept => {}"),
-    ("never torn", "_ => Landing::Torn,", "_ => Landing::Kept,"),
+    ("never torn", "match rng.below(3) {", "match rng.below(2) {"),
     ("torn ignores sector bounds", "let stop = ((start / SECTOR + 1) * SECTOR).min(end);", "let stop = (start + 100).min(end);"),
     ("sync_dir does nothing", "file.entry_synced = true;\n            }", "let _ = file;\n            }"),
     ("files never vanish", "if !file.entry_synced && rng.coin() {", "if false && !file.entry_synced && rng.coin() {"),
-    ("length changes always land", "            if rng.coin() {\n                data.resize", "            if true {\n                data.resize"),
+    ("length changes always land", "let landed = rng.coin();\n            if landed {", "let landed = rng.coin() || true;\n            if landed {"),
     ("seed ignored", "let mut rng = Rng(seed);", "let mut rng = Rng(seed * 0);"),
     ("reads count towards fail_after", "self.with(Access::Read, |file, _| file.now.len() as u64)", "self.with(Access::Change, |file, _| file.now.len() as u64)"),
     ("lock not released on drop", "file.locked_by = None;", "let _ = file;"),
     ("old handles keep working", "disk.boot += 1;", "disk.boot += 0;"),
     ("power stays cut after a crash", "disk.down = false;", "disk.down = disk.down;"),
+    ("ops miscounted", "None => {\n                self.ops += 1;", "None => {\n                self.ops += 2;"),
+    ("report lies about torn sectors", "sectors.push(landed);", "sectors.push(!landed);"),
 ]
 
 ENGINE_BUGS = [
