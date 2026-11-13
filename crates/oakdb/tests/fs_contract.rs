@@ -44,6 +44,25 @@ fn reading_past_the_end_fails(fs: impl Fs, dir: &Path) {
     assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
 }
 
+fn an_empty_read_past_the_end_succeeds(fs: impl Fs, dir: &Path) {
+    let file = fs.open(&dir.join("data")).unwrap();
+    file.read_exact_at(&mut [], 4096).unwrap();
+}
+
+fn offsets_too_large_for_a_file_fail_without_panicking(fs: impl Fs, dir: &Path) {
+    let file = fs.open(&dir.join("data")).unwrap();
+    let mut buf = [0u8; 8];
+    assert!(file.read_exact_at(&mut buf, u64::MAX - 3).is_err());
+    assert!(file.write_all_at(&buf, u64::MAX - 3).is_err());
+}
+
+fn opening_under_a_file_fails_with_not_a_directory(fs: impl Fs, dir: &Path) {
+    let file = dir.join("file");
+    fs.open(&file).unwrap();
+    let err = fs.open(&file.join("data")).err().unwrap();
+    assert_eq!(err.kind(), io::ErrorKind::NotADirectory);
+}
+
 fn opening_keeps_existing_contents(fs: impl Fs, dir: &Path) {
     let path = dir.join("data");
     fs.open(&path).unwrap().write_all_at(b"keep", 0).unwrap();
@@ -116,7 +135,7 @@ macro_rules! on_both {
                 #[test]
                 fn $check() {
                     let fs = super::SimFs::new();
-                    let dir = std::path::Path::new("/tmp/oak");
+                    let dir = std::path::Path::new("/oak");
                     super::Fs::create_dir_all(&fs, dir).unwrap();
                     super::$check(fs, dir);
                 }
@@ -129,6 +148,9 @@ on_both!(
     written_data_reads_back_after_reopen,
     unsynced_writes_are_read_back,
     reading_past_the_end_fails,
+    an_empty_read_past_the_end_succeeds,
+    offsets_too_large_for_a_file_fail_without_panicking,
+    opening_under_a_file_fails_with_not_a_directory,
     opening_keeps_existing_contents,
     opening_in_a_missing_directory_fails,
     create_dir_all_creates_missing_parents,
