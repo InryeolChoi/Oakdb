@@ -3,7 +3,17 @@
 이슈 #20의 검증 기록이다.
 
 - 환경: macOS (Apple silicon), APFS, debug 빌드
-- 도구: 엔진(`db.rs`)에서 sync 호출을 하나씩 지운 네 버전. 각 버전에서 테스트 세 묶음을 돌렸다.
+- 도구: `docs/experiments/scripts/mutants.py`. 엔진(`db.rs`)에서 sync 호출을 하나씩 지운 네 버전을 만들고, 각 버전에서 테스트 세 묶음을 돌린 뒤 원래대로 되돌린다. 어느 줄을 지우는지는 스크립트의 `ENGINE_BUGS`에 있다.
+
+```sh
+python3 docs/experiments/scripts/mutants.py engine
+```
+
+| 테스트 묶음 | 무엇 |
+|---|---|
+| 진짜 디스크 통합 테스트 | `single_page`, `delete_and_overwrite`, `split`, `multi_level`, `scan`, `overflow`, `checksum` |
+| 정답 모델 테스트 | `model`에서 가짜 디스크용 둘을 뺀 것 |
+| 가짜 디스크 정전 테스트 | `sim_fs` |
 
 **질문**: sync를 하나 빠뜨리는 것은 DB에서 가장 흔하고 가장 안 보이는 버그다. 정전이 나기 전에는 아무 차이가 없기 때문이다. 진짜 디스크 위의 테스트와 가짜 디스크(`SimFs`) 위의 정전 테스트 중 누가 이 버그를 알아챌까?
 

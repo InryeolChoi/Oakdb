@@ -8,13 +8,12 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use oakdb::fs::sim::SimFs;
+use oakdb::fs::sim::{SimFs, SECTOR};
 use oakdb::fs::{Fs, FsFile};
 use oakdb::{Db, DATA_FILE};
 
 const SEEDS: u64 = 200;
 const PAGE: usize = 4096;
-const SECTOR: usize = 512;
 
 fn dir() -> PathBuf {
     PathBuf::from("/oak")
@@ -66,7 +65,7 @@ fn an_unsynced_write_is_kept_lost_or_torn_by_sector() {
         fs.crash(seed);
         let after = contents(&fs, &path);
         assert_eq!(after.len(), PAGE, "seed {seed}");
-        for sector in after.chunks(SECTOR) {
+        for sector in after.chunks(SECTOR as usize) {
             let first = sector[0];
             assert!(
                 (first == 1 || first == 2) && sector.iter().all(|&b| b == first),

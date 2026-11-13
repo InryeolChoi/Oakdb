@@ -14,6 +14,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -64,7 +65,14 @@ struct File {
 
 enum Change {
     Write { offset: u64, bytes: Vec<u8> },
-    SetLen(u64),
+    SetLen(usize),
+}
+
+/// Whether a call on an open file counts towards [`SimFs::fail_after`].
+#[derive(Clone, Copy, PartialEq)]
+enum Access {
+    Read,
+    Change,
 }
 
 impl SimFs {
@@ -74,9 +82,12 @@ impl SimFs {
     }
 
     /// Cuts the power after `ops` more operations that change the disk:
-    /// writes, length changes, syncs, opens and directory creation. Reads,
-    /// sizes and locks do not count. The operation that finds the power
-    /// gone fails, and so does every call after it until [`SimFs::crash`].
+    /// writes, length changes, syncs, directory creation, and opens (of an
+    /// existing file too). Reads, sizes and locks do not count. The next
+    /// such operation after those finds the power gone and fails without
+    /// touching the disk, and so does every call after it, reads included,
+    /// until [`SimFs::crash`]. Until that operation comes, reads still work:
+    /// `fail_after(0)` cuts the power at the next change, not at once.
     pub fn fail_after(&self, ops: u64) {
         self.disk().ops_left = Some(ops);
     }
@@ -116,13 +127,37 @@ impl SimFs {
     /// Whether a file or directory is at `path`.
     pub fn exists(&self, path: &Path) -> bool {
         let disk = self.disk();
-        is_root(path) || disk.dirs.contains(path) || disk.files.contains_key(path)
+        disk.is_dir(path) || disk.files.contains_key(path)
     }
 
     fn disk(&self) -> MutexGuard<'_, Disk> {
-        // A panic inside a call leaves the disk as it was, or with one
-        // change fully made: every change is a single step.
-        self.disk.lock().unwrap_or_else(|e| e.into_inner())
+        lock(&self.disk)
+    }
+}
+
+fn lock(disk: &Mutex<Disk>) -> MutexGuard<'_, Disk> {
+    // A panic inside a call leaves the disk as it was, or with one change
+    // fully made: every change is a single step. So a poisoned lock still
+    // guards a whole disk, and dropping a handle never panics.
+    disk.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// What a crash does to one unsynced write.
+enum Landing {
+    Lost,
+    Kept,
+    /// Each 512-byte sector of the file the write touches lands or not.
+    Torn,
+}
+
+impl Landing {
+    /// One of the three, each a third of the time.
+    fn roll(rng: &mut Rng) -> Landing {
+        match rng.below(3) {
+            0 => Landing::Lost,
+            1 => Landing::Kept,
+            _ => Landing::Torn,
+        }
     }
 }
 
@@ -131,14 +166,16 @@ fn apply_after_crash(data: &mut Vec<u8>, change: Change, rng: &mut Rng) {
     match change {
         Change::SetLen(len) => {
             if rng.coin() {
-                data.resize(len as usize, 0);
+                data.resize(len, 0);
             }
         }
-        Change::Write { offset, bytes } => match rng.below(3) {
-            0 => {}
-            1 => write_at(data, offset, &bytes),
-            _ => {
-                // Torn: each sector the write touches lands or not.
+        Change::Write { offset, bytes } => match Landing::roll(rng) {
+            Landing::Lost => {}
+            Landing::Kept => write_at(data, offset, &bytes),
+            Landing::Torn => {
+                // Sectors are counted from the start of the file. A torn
+                // write past the end leaves the file as long as the last
+                // sector that landed.
                 let end = offset + bytes.len() as u64;
                 let mut start = offset;
                 while start < end {
@@ -154,13 +191,25 @@ fn apply_after_crash(data: &mut Vec<u8>, change: Change, rng: &mut Rng) {
     }
 }
 
+/// Writes `bytes` at `offset`, filling any gap with zeros. The range was
+/// checked by [`range`] when the write was made.
 fn write_at(data: &mut Vec<u8>, offset: u64, bytes: &[u8]) {
-    let start = offset as usize;
-    let end = start + bytes.len();
-    if data.len() < end {
-        data.resize(end, 0);
+    let at = range(offset, bytes.len()).expect("checked when written");
+    if data.len() < at.end {
+        data.resize(at.end, 0);
     }
-    data[start..end].copy_from_slice(bytes);
+    data[at].copy_from_slice(bytes);
+}
+
+/// The bytes `offset..offset + len` as memory indexes, or the error a real
+/// file gives for an offset no file can reach. A file in memory cannot be
+/// sparse: a large offset takes that much memory.
+fn range(offset: u64, len: usize) -> io::Result<Range<usize>> {
+    usize::try_from(offset)
+        .ok()
+        .and_then(|start| Some(start..start.checked_add(len)?))
+        .filter(|r| u64::try_from(r.end).is_ok_and(|end| end <= i64::MAX as u64))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "offset too large for a file"))
 }
 
 /// The parent directory of `path`, or `None` at the root.
@@ -238,11 +287,19 @@ impl Fs for SimFs {
                 format!("{} is a directory", path.display()),
             ));
         }
-        if !parent(path).is_none_or(|dir| disk.is_dir(dir)) {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("no directory for {}", path.display()),
-            ));
+        if let Some(dir) = parent(path) {
+            if disk.files.contains_key(dir) {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotADirectory,
+                    format!("{} is a file", dir.display()),
+                ));
+            }
+            if !disk.is_dir(dir) {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("no directory for {}", path.display()),
+                ));
+            }
         }
         disk.files.entry(path.to_path_buf()).or_default();
         disk.next_handle += 1;
@@ -274,14 +331,13 @@ impl Fs for SimFs {
 
 impl SimFile {
     /// Runs `f` on this file, if the power is on and the handle is from
-    /// this boot. `changes` says whether the call counts towards
-    /// [`SimFs::fail_after`].
-    fn with<T>(&self, changes: bool, f: impl FnOnce(&mut File, u64) -> T) -> io::Result<T> {
-        let mut disk = self.disk.lock().unwrap_or_else(|e| e.into_inner());
+    /// this boot.
+    fn with<T>(&self, access: Access, f: impl FnOnce(&mut File, u64) -> T) -> io::Result<T> {
+        let mut disk = lock(&self.disk);
         if disk.boot != self.boot {
             return Err(io::Error::other("the file was opened before a crash"));
         }
-        if changes {
+        if access == Access::Change {
             disk.change()?;
         } else if disk.down {
             return Err(power_cut());
@@ -294,11 +350,13 @@ impl SimFile {
 
 impl FsFile for SimFile {
     fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
-        self.with(false, |file, _| {
-            let start = offset as usize;
-            let bytes = file
-                .now
-                .get(start..start + buf.len())
+        self.with(Access::Read, |file, _| {
+            if buf.is_empty() {
+                return Ok(());
+            }
+            let bytes = range(offset, buf.len())
+                .ok()
+                .and_then(|at| file.now.get(at))
                 .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "read past the end"))?;
             buf.copy_from_slice(bytes);
             Ok(())
@@ -306,7 +364,8 @@ impl FsFile for SimFile {
     }
 
     fn write_all_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
-        self.with(true, |file, _| {
+        range(offset, buf.len())?;
+        self.with(Access::Change, |file, _| {
             write_at(&mut file.now, offset, buf);
             file.waiting.push(Change::Write {
                 offset,
@@ -316,18 +375,19 @@ impl FsFile for SimFile {
     }
 
     fn size(&self) -> io::Result<u64> {
-        self.with(false, |file, _| file.now.len() as u64)
+        self.with(Access::Read, |file, _| file.now.len() as u64)
     }
 
     fn set_len(&self, len: u64) -> io::Result<()> {
-        self.with(true, |file, _| {
-            file.now.resize(len as usize, 0);
+        let len = range(len, 0)?.end;
+        self.with(Access::Change, |file, _| {
+            file.now.resize(len, 0);
             file.waiting.push(Change::SetLen(len));
         })
     }
 
     fn try_lock(&self) -> io::Result<()> {
-        self.with(false, |file, handle| match file.locked_by {
+        self.with(Access::Read, |file, handle| match file.locked_by {
             Some(holder) if holder != handle => Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "the file is locked",
@@ -340,7 +400,7 @@ impl FsFile for SimFile {
     }
 
     fn sync_data(&self) -> io::Result<()> {
-        self.with(true, |file, _| {
+        self.with(Access::Change, |file, _| {
             file.synced.clone_from(&file.now);
             file.waiting.clear();
         })
@@ -350,7 +410,7 @@ impl FsFile for SimFile {
 impl Drop for SimFile {
     /// Releases the file's lock, as closing a real file does.
     fn drop(&mut self) {
-        let mut disk = self.disk.lock().unwrap_or_else(|e| e.into_inner());
+        let mut disk = lock(&self.disk);
         if disk.boot != self.boot {
             return;
         }
