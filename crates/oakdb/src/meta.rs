@@ -6,9 +6,9 @@
 //!
 //! ```text
 //! offset  size  field
-//! 0..4    u32   checksum        reserved for CRC-32C, 0 for now
+//! 0..4    u32   checksum        CRC-32C, filled in when written (checksum.rs)
 //! 4..12   [u8]  magic           "oakdb\0\0\0"
-//! 12..16  u32   format_version  2
+//! 12..16  u32   format_version  3
 //! 16..20  u32   page_size       4096
 //! 20..28  u64   root_page
 //! 28..36  u64   page_count
@@ -16,14 +16,15 @@
 //! 44..52  u64   free_count      pages on the free list
 //! ```
 //!
-//! Version 1 files had no free list and could hold pages in no use at all.
-//! They are refused; no such file holds anyone's data.
+//! Version 1 files had no free list and could hold pages in no use at all;
+//! version 2 files had no page checksums. Both are refused, by version,
+//! before any checksum is checked; no such file holds anyone's data.
 
 use crate::error::{Error, Result};
 use crate::page::PAGE_SIZE;
 
 const MAGIC: &[u8; 8] = b"oakdb\0\0\0";
-const FORMAT_VERSION: u32 = 2;
+const FORMAT_VERSION: u32 = 3;
 
 /// Bytes at the start of the meta page that hold its fields.
 pub(crate) const META_LEN: usize = 52;
@@ -38,14 +39,19 @@ pub(crate) struct Meta {
 
 impl Meta {
     /// Encodes a full meta page.
-    pub(crate) fn encode(&self) -> Vec<u8> {
+    pub(crate) fn encode(&self) -> [u8; PAGE_SIZE] {
         encode_with_page_size(self, PAGE_SIZE as u32)
+            .try_into()
+            .expect("the meta page is PAGE_SIZE bytes")
     }
 
-    /// Reads the meta fields from the first [`META_LEN`] bytes of the file.
+    /// Checks that the first [`META_LEN`] bytes of a file start an Oakdb
+    /// data file of this page size and format version.
     ///
-    /// The page size is checked before anything else that depends on it.
-    pub(crate) fn decode(bytes: &[u8]) -> Result<Meta> {
+    /// This comes before the meta page's checksum: the page size says how
+    /// much of the file is the page, and an older version has no checksum
+    /// to check, so it is refused by its version.
+    pub(crate) fn check_header(bytes: &[u8]) -> Result<()> {
         if bytes.len() < META_LEN || &bytes[4..12] != MAGIC {
             return Err(Error::Corrupt("not an Oakdb data file".into()));
         }
@@ -60,6 +66,19 @@ impl Meta {
         if version != FORMAT_VERSION {
             return Err(Error::Corrupt(format!("unknown format version {version}")));
         }
+        Ok(())
+    }
+
+    /// Checks the header, then reads the meta fields.
+    #[cfg(test)]
+    pub(crate) fn decode(bytes: &[u8]) -> Result<Meta> {
+        Meta::check_header(bytes)?;
+        Meta::read_fields(bytes)
+    }
+
+    /// Reads the meta fields from the first [`META_LEN`] bytes of the meta
+    /// page, whose header [`Meta::check_header`] has already accepted.
+    pub(crate) fn read_fields(bytes: &[u8]) -> Result<Meta> {
         let meta = Meta {
             root_page: u64_at(bytes, 20),
             page_count: u64_at(bytes, 28),
@@ -151,14 +170,16 @@ mod tests {
     #[test]
     fn an_unknown_version_is_refused() {
         let mut bytes = META.encode();
-        bytes[12] = 3;
+        bytes[12] = 4;
 
         assert!(matches!(Meta::decode(&bytes), Err(Error::Corrupt(_))));
     }
 
     #[test]
-    fn a_version_1_file_is_refused() {
+    fn version_1_and_2_files_are_refused() {
         let mut bytes = META.encode();
+        bytes[12] = 2;
+        assert!(matches!(Meta::decode(&bytes), Err(Error::Corrupt(_))));
         bytes[12] = 1;
 
         assert!(matches!(Meta::decode(&bytes), Err(Error::Corrupt(_))));

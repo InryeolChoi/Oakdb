@@ -541,7 +541,7 @@ mod tests {
     /// Reads `tree` back through its bytes, as opening a file would.
     fn reload(tree: &Tree) -> Result<Tree> {
         Tree::load(tree.meta(), |page_no| {
-            Page::from_bytes(tree.page(page_no).as_bytes().into())
+            Page::from_bytes(tree.page(page_no).as_bytes()[..].into())
         })
     }
 

@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+crc32c = "0.6.9"
 libc = "0.2"
 
 [dev-dependencies]

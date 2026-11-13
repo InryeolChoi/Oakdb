@@ -4,6 +4,7 @@
 //! All file access goes through [`fs::Fs`], which is the only place that knows
 //! about the operating system.
 
+mod checksum;
 mod db;
 mod error;
 pub mod fs;
