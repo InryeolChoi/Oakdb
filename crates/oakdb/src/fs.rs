@@ -1,8 +1,8 @@
 //! File access for the engine.
 //!
 //! Every read, write and sync the engine does goes through the [`Fs`] trait.
-//! Production code uses [`StdFs`]; crash tests will plug in a simulated file
-//! system that can drop writes that were never synced.
+//! Production code uses [`StdFs`]; crash tests plug in [`sim::SimFs`], a
+//! file system in memory that can lose writes that were never synced.
 //!
 //! Durability differs by platform, so it is handled here and nowhere else:
 //! on macOS `fsync` only hands data to the drive, so we use `F_FULLFSYNC` to
@@ -11,6 +11,8 @@
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::Path;
+
+pub mod sim;
 
 /// A file system the engine can store data in.
 pub trait Fs {
@@ -155,83 +157,4 @@ fn full_sync(file: &File) -> io::Result<()> {
 #[cfg(target_os = "linux")]
 fn data_sync(file: &File) -> io::Result<()> {
     file.sync_data()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn written_data_reads_back_after_reopen() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("data");
-
-        let file = StdFs.open(&path).unwrap();
-        file.write_all_at(b"oak", 4096).unwrap();
-        file.sync_data().unwrap();
-        StdFs.sync_dir(dir.path()).unwrap();
-        drop(file);
-
-        let file = StdFs.open(&path).unwrap();
-        let mut buf = [0u8; 3];
-        file.read_exact_at(&mut buf, 4096).unwrap();
-        assert_eq!(&buf, b"oak");
-        assert_eq!(file.size().unwrap(), 4099);
-    }
-
-    #[test]
-    fn opening_keeps_existing_contents() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("data");
-        StdFs.open(&path).unwrap().write_all_at(b"keep", 0).unwrap();
-
-        let file = StdFs.open(&path).unwrap();
-        let mut buf = [0u8; 4];
-        file.read_exact_at(&mut buf, 0).unwrap();
-        assert_eq!(&buf, b"keep");
-    }
-
-    #[test]
-    fn create_dir_all_creates_missing_parents() {
-        let root = tempfile::tempdir().unwrap();
-        let dir = root.path().join("a").join("b");
-
-        StdFs.create_dir_all(&dir).unwrap();
-        StdFs.create_dir_all(&dir).unwrap();
-
-        assert!(dir.is_dir());
-    }
-
-    #[test]
-    fn create_dir_all_fails_when_a_file_is_in_the_way() {
-        let root = tempfile::tempdir().unwrap();
-        let file = root.path().join("file");
-        std::fs::write(&file, b"").unwrap();
-
-        assert!(StdFs.create_dir_all(&file.join("db")).is_err());
-    }
-
-    #[test]
-    fn a_locked_file_cannot_be_locked_again_until_it_is_closed() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("data");
-        let first = StdFs.open(&path).unwrap();
-        first.try_lock().unwrap();
-
-        let second = StdFs.open(&path).unwrap();
-        let err = second.try_lock().unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
-
-        drop(first);
-        second.try_lock().unwrap();
-    }
-
-    #[test]
-    fn set_len_truncates() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = StdFs.open(&dir.path().join("data")).unwrap();
-        file.write_all_at(&[1; 100], 0).unwrap();
-        file.set_len(10).unwrap();
-        assert_eq!(file.size().unwrap(), 10);
-    }
 }
