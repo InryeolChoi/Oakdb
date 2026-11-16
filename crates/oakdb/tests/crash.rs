@@ -98,7 +98,7 @@ fn without_a_power_cut_every_commit_is_there() {
         let workload = Workload::generate(seed);
         let total = workload.total_ops();
         let run = run(&workload, total, seed);
-        assert_eq!(run.acked, workload.commits.len(), "seed {seed}");
+        assert_eq!(run.acked_commits, workload.commits.len(), "seed {seed}");
         assert_eq!(run.cut_commit, None);
         assert_eq!(
             run.verdict,
@@ -113,14 +113,14 @@ fn without_a_power_cut_every_commit_is_there() {
 fn a_cut_while_opening_a_new_database_loses_nothing_it_promised() {
     for crash_seed in 0..20 {
         let run = run(&Workload::generate(7), 0, crash_seed);
-        assert_eq!(run.acked, 0);
+        assert_eq!(run.acked_commits, 0);
         assert_eq!(run.cut_commit, None);
         assert!(run.verdict.is_intact(), "{:?}", run.verdict);
     }
 }
 
 #[test]
-fn no_seed_loses_an_acknowledged_commit_or_makes_up_a_value() {
+fn no_seed_ends_in_lost_acknowledged_or_wrong_value() {
     // What the current design does keep: a commit is only acknowledged
     // after its pages are synced, so a power cut can break the database
     // but has not been seen to lose an acknowledged commit silently.
@@ -136,8 +136,8 @@ fn no_seed_loses_an_acknowledged_commit_or_makes_up_a_value() {
     }
 }
 
-// Seeds where the current design breaks (docs/experiments/0008). Each is
-// the shortest example of its kind in seeds 0..600. They must all pass
+// Seeds where the current design breaks (docs/experiments/0008), each a
+// short example of its kind found in seeds 0..2000. They must all pass
 // once the WAL (#22) lands; until then they are ignored.
 // Replay one with `cargo run --example crash_sim -- one <seed>`.
 
@@ -163,12 +163,12 @@ fn a_cut_while_creating_after_the_meta_page_is_written() {
     stays_intact(536);
 }
 
-/// The first commit's leaf landed, but the overflow pages it points to,
-/// past the old end of the file, did not ("page number is outside the
-/// file").
+/// The first commit's leaf landed, but the pages it points to past the old
+/// end of the file, leaves from a split or the overflow pages of a long
+/// value, did not ("page number is outside the file").
 #[test]
 #[ignore = "needs the WAL (#22)"]
-fn a_leaf_lands_without_its_new_overflow_pages() {
+fn a_page_lands_without_the_new_pages_it_points_to() {
     stays_intact(213);
 }
 
@@ -177,7 +177,7 @@ fn a_leaf_lands_without_its_new_overflow_pages() {
 #[test]
 #[ignore = "needs the WAL (#22)"]
 fn a_torn_page_is_repaired() {
-    stays_intact(495);
+    stays_intact(84);
 }
 
 /// A split part way: leaves landed, lost and torn, so the sibling chain

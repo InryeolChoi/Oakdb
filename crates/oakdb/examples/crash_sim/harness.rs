@@ -25,9 +25,12 @@ pub const KEYS: u32 = 200;
 /// What the database holds: key number → value.
 pub type Model = BTreeMap<u32, Vec<u8>>;
 
+/// One change inside a transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Op {
+    /// Stores the value under the key, replacing any value it had.
     Put(u32, Vec<u8>),
+    /// Removes the key, if it is there.
     Delete(u32),
 }
 
@@ -38,14 +41,17 @@ pub struct Workload {
 }
 
 impl Workload {
-    /// A random workload: up to 30 commits of up to 8 puts and deletes,
-    /// some values long enough for overflow pages.
+    /// A random workload: up to 30 commits of up to 8 puts and deletes
+    /// (1 in 5 a delete). Of the puts, 1 in 6 is a long value of 1500 to
+    /// 13 499 bytes, more than a leaf can hold, so it goes to overflow
+    /// pages; the rest are under 400 bytes.
     pub fn generate(seed: u64) -> Workload {
         let mut rng = Rng(seed);
         let commits = (0..1 + rng.below(30))
             .map(|_| {
                 (0..1 + rng.below(8))
                     .map(|_| {
+                        // Below KEYS, so it fits.
                         let key = rng.below(u64::from(KEYS)) as u32;
                         if rng.below(5) == 0 {
                             return Op::Delete(key);
@@ -55,6 +61,7 @@ impl Workload {
                         } else {
                             rng.below(400)
                         };
+                        // Any byte will do as the start: keep the low one.
                         Op::Put(key, value(len as usize, rng.next() as u8))
                     })
                     .collect()
@@ -91,6 +98,7 @@ pub struct Case {
 }
 
 impl Case {
+    /// The case `seed` names: the same seed always gives the same case.
     pub fn from_seed(seed: u64) -> Case {
         let mut rng = Rng(seed);
         let workload = Workload::generate(rng.next());
@@ -103,6 +111,7 @@ impl Case {
         }
     }
 
+    /// Plays the case. The same case always runs the same way.
     pub fn run(&self) -> Run {
         run(&self.workload, self.cut_after, self.crash_seed)
     }
@@ -127,6 +136,8 @@ impl Op {
 /// A value of `len` bytes that changes along its length, so a sector of
 /// it in the wrong place shows.
 fn value(len: usize, fill: u8) -> Vec<u8> {
+    // The step wraps around every 256 * 7 bytes, which is fine: it only
+    // has to differ from one sector to the next.
     (0..len).map(|i| fill.wrapping_add((i / 7) as u8)).collect()
 }
 
@@ -145,10 +156,12 @@ pub enum Verdict {
     ReadFailed(String),
     /// Keys an acknowledged commit wrote are missing or old.
     LostAcknowledged(Vec<u32>),
-    /// Keys hold a value no commit ever gave them.
+    /// Keys the commit the power cut short changed hold neither their old
+    /// nor their new value. (A key it did not change holding anything but
+    /// its acknowledged value is [`Verdict::LostAcknowledged`].)
     WrongValue(Vec<u32>),
     /// The commit the power cut short is there for some keys and not
-    /// others.
+    /// others. Holds every key it changed, old and new alike.
     HalfCommit(Vec<u32>),
 }
 
@@ -212,11 +225,12 @@ pub fn judge(after: &Model, acked: &Model, cut: Option<&Model>) -> Verdict {
 /// What happened in one run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Run {
-    /// Commits acknowledged before the power went.
-    pub acked: usize,
+    /// How many commits were acknowledged before the power went.
+    pub acked_commits: usize,
     /// The commit the power cut short, or `None` if it went while opening
     /// or not at all.
     pub cut_commit: Option<usize>,
+    /// What the crash did to each write that was never synced.
     pub report: CrashReport,
     pub verdict: Verdict,
     /// What the acknowledged commits left, what the cut commit would have
@@ -229,26 +243,43 @@ pub struct Run {
 /// Opens a new database on a simulated disk, cuts the power after
 /// `cut_after` operations that change the disk, commits `workload` until
 /// then, crashes with `crash_seed`, reopens and judges.
+///
+/// Panics if opening or a commit fails before the power is cut: the
+/// verdict only means something for failures the power cut caused.
 pub fn run(workload: &Workload, cut_after: u64, crash_seed: u64) -> Run {
     let fs = SimFs::new();
     fs.fail_after(cut_after);
+    let caused_by_the_cut = |what: &str, e: oakdb::Error| {
+        assert_eq!(
+            fs.ops(),
+            cut_after,
+            "{what} failed with the power still on: {e}"
+        );
+    };
     let mut acked = Model::new();
     let mut acked_commits = 0;
     let mut cut = None;
-    if let Ok(db) = Db::open_with(fs.clone(), DIR) {
-        for (i, ops) in workload.commits.iter().enumerate() {
-            let mut next = acked.clone();
-            let mut txn = db.begin();
-            for op in ops {
-                op.apply_to(&mut txn);
-                op.apply_to_model(&mut next);
-            }
-            if txn.commit().is_ok() {
-                acked = next;
-                acked_commits += 1;
-            } else {
-                cut = Some((i, next));
-                break;
+    match Db::open_with(fs.clone(), DIR) {
+        Err(e) => caused_by_the_cut("creating the database", e),
+        Ok(db) => {
+            for (i, ops) in workload.commits.iter().enumerate() {
+                let mut next = acked.clone();
+                let mut txn = db.begin();
+                for op in ops {
+                    op.apply_to(&mut txn);
+                    op.apply_to_model(&mut next);
+                }
+                match txn.commit() {
+                    Ok(()) => {
+                        acked = next;
+                        acked_commits += 1;
+                    }
+                    Err(e) => {
+                        caused_by_the_cut(&format!("commit {i}"), e);
+                        cut = Some((i, next));
+                        break;
+                    }
+                }
             }
         }
     }
@@ -276,7 +307,7 @@ pub fn run(workload: &Workload, cut_after: u64, crash_seed: u64) -> Run {
         });
     let (cut_commit, cut_state) = cut.unzip();
     Run {
-        acked: acked_commits,
+        acked_commits,
         cut_commit,
         report,
         verdict,
