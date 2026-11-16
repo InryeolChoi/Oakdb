@@ -116,8 +116,9 @@ impl Tree {
     }
 
     /// The pages of a chain, from `first` on through each page's next page:
-    /// an overflow chain, or the free list. Each page is only read once the
-    /// caller has taken the page before it.
+    /// an overflow chain, or the free list. It reads each page's next as it
+    /// hands the page out, so it is only for chains [`Tree::check`] has
+    /// already checked.
     fn chain(&self, first: Option<u64>) -> impl Iterator<Item = u64> + '_ {
         std::iter::successors(first, |&page_no| self.page(page_no).next())
     }
@@ -374,13 +375,18 @@ impl Tree {
             }
         }
         let mut free = 0;
-        // Each page is visited and checked before the chain reads its next.
-        for page_no in self.chain(self.free_head) {
+        // Not `chain`: it reads a page's next before handing the page out,
+        // and only a free page has a next to read. Each page is visited and
+        // checked first.
+        let mut next = self.free_head;
+        while let Some(page_no) = next {
             walk.visit(page_no)?;
-            if self.page(page_no).kind() != Kind::Free {
+            let page = self.page(page_no);
+            if page.kind() != Kind::Free {
                 return Err(corrupt("free list holds a page in use"));
             }
             free += 1;
+            next = page.next();
         }
         if free != self.free_count {
             return Err(corrupt("free list is not as long as the meta page says"));

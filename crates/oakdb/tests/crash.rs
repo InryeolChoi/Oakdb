@@ -208,12 +208,11 @@ fn a_cut_between_the_page_sync_and_the_meta_page() {
 }
 
 /// The meta page write was lost, so the old free list head now names a
-/// page that has since been reused. Opening checks the free list, but
-/// `successors` reads each page's next before the check sees the page, so
-/// a debug build panics on a `debug_assert` instead of refusing the file.
-/// Not a WAL matter: found by this experiment, waiting on a decision.
+/// page that has since been reused. Opening used to read that page's next
+/// before checking it was free, and a debug build panicked on a
+/// `debug_assert` instead of refusing the file. Fixed in this PR; the
+/// refusal itself still needs the WAL.
 #[test]
-#[ignore = "engine bug found by this experiment (PR for #21)"]
 fn a_free_list_head_on_a_page_in_use_is_refused_without_panicking() {
     let run = Case::from_seed(529).run();
     assert!(
