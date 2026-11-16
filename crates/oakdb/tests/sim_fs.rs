@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use oakdb::fs::sim::{SimFs, SECTOR};
+use oakdb::fs::sim::{Landing, LengthFate, SimFs, WriteFate, SECTOR};
 use oakdb::fs::{Fs, FsFile};
 use oakdb::{Db, DATA_FILE};
 
@@ -242,6 +242,91 @@ fn reads_do_not_count_towards_fail_after() {
     }
     file.sync_data().unwrap();
     assert!(file.write_all_at(&[2; PAGE], 0).is_err());
+}
+
+#[test]
+fn ops_counts_what_fail_after_counts() {
+    let fs = SimFs::new();
+    assert_eq!(fs.ops(), 0);
+    fs.create_dir_all(&dir()).unwrap();
+    let file = fs.open(&dir().join("data")).unwrap();
+    file.write_all_at(b"oak", 0).unwrap();
+    file.set_len(10).unwrap();
+    file.sync_data().unwrap();
+    fs.sync_dir(&dir()).unwrap();
+    // Reads, sizes and locks do not count.
+    file.read_exact_at(&mut [0; 3], 0).unwrap();
+    file.size().unwrap();
+    file.try_lock().unwrap();
+    assert_eq!(fs.ops(), 6);
+
+    // Cutting the power after the operations so far: the next one fails
+    // and does not count.
+    fs.fail_after(0);
+    assert!(file.write_all_at(b"x", 0).is_err());
+    assert_eq!(fs.ops(), 6);
+    // The count goes on across a crash.
+    fs.crash(0);
+    fs.open(&dir().join("data")).unwrap();
+    assert_eq!(fs.ops(), 7);
+}
+
+#[test]
+fn a_crash_reports_what_became_of_each_unsynced_change() {
+    let mut seen = BTreeSet::new();
+    for seed in 0..SEEDS {
+        let (fs, path) = disk();
+        let file = fs.open(&path).unwrap();
+        file.write_all_at(&[1; PAGE], 0).unwrap();
+        file.sync_data().unwrap();
+        file.write_all_at(&[2; PAGE], 0).unwrap();
+        file.set_len(2 * PAGE as u64).unwrap();
+        let new = dir().join("new");
+        fs.open(&new).unwrap();
+        drop(file);
+
+        let report = fs.crash(seed);
+        assert_eq!(report.writes.len(), 1, "seed {seed}");
+        let WriteFate {
+            path: written,
+            offset,
+            len,
+            landing,
+        } = &report.writes[0];
+        assert_eq!((written, *offset, *len), (&path, 0, PAGE));
+        // The report agrees with the disk, sector by sector.
+        let after = contents(&fs, &path);
+        let landed: Vec<bool> = after[..PAGE]
+            .chunks(SECTOR as usize)
+            .map(|sector| sector[0] == 2)
+            .collect();
+        match landing {
+            Landing::Lost => assert!(landed.iter().all(|&l| !l), "seed {seed}"),
+            Landing::Kept => assert!(landed.iter().all(|&l| l), "seed {seed}"),
+            Landing::Torn { sectors } => assert_eq!(sectors, &landed, "seed {seed}"),
+        }
+        let [LengthFate {
+            path: resized,
+            len,
+            landed,
+        }] = report.lengths.as_slice()
+        else {
+            panic!("seed {seed}: one length change expected");
+        };
+        assert_eq!((resized, *len), (&path, 2 * PAGE as u64));
+        assert_eq!(*landed, after.len() == 2 * PAGE, "seed {seed}");
+        assert_eq!(
+            report.vanished.contains(&new),
+            !fs.exists(&new),
+            "seed {seed}"
+        );
+        seen.insert(match landing {
+            Landing::Lost => "lost",
+            Landing::Kept => "kept",
+            Landing::Torn { .. } => "torn",
+        });
+    }
+    assert_eq!(seen.len(), 3);
 }
 
 // The engine on the simulated disk.
