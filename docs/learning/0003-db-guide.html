@@ -809,7 +809,7 @@ svg text{font-family:"Noto Sans KR",sans-serif}
     <tr><td>반쪽 커밋이 나온다</td><td><b>채택</b>: 2.8%. 오류 없이 틀린 상태라 가장 위험</td></tr>
     <tr><td>OK 받은 커밋은 사라지지 않는다</td><td><b>채택</b>: 11만 개 시드에서 0건 (증명은 아님)</td></tr>
   </table></div>
-  <div class="term"><b>덤으로 찾은 버그</b>: debug 빌드에서 다시 열다가 <b>panic</b>(0.2%). 빈 페이지 목록을 따라가는 반복자(<code>successors</code>)가 페이지 종류를 확인하기 <b>전에</b> 다음 번호를 먼저 읽어요. 06번 정리 때 제가 넣은 버그예요.</div>
+  <div class="term"><b>덤으로 찾은 버그</b>: debug 빌드에서 다시 열다가 <b>panic</b>(0.2%). 빈 페이지 목록을 따라가는 반복자(<code>successors</code>)가 페이지 종류를 확인하기 <b>전에</b> 다음 번호를 먼저 읽어요. 06번 정리 때 제가 넣은 버그예요. 디딘 계단이 단단한지 보기 전에 다음 계단으로 발부터 내민 셈이에요. 이 PR에서 "확인하고 → 다음 번호 읽기" 순서의 반복문으로 고쳐서, 이제 panic 없이 <b>열기 거절</b>로 끝나요.</div>
 </section>
 </div>
 
@@ -1372,10 +1372,9 @@ $('scRun').onclick=async()=>{trRender({});const t=scanTok;const from=+$('scFrom'
 /* ===== 2-8 crash experiment ===== */
 (function(){
  const BAR=[['약속 지킴',5096,'var(--ok)','정전 시점이 sync와 sync 사이가 아니거나, 남은 쓰기가 운 좋게 맞아떨어진 경우예요. 절반 정도예요.'],
-  ['열기 실패',4368,'#c0603a','커밋 도중 정전. 찢긴 페이지는 체크섬이, 어긋난 페이지는 구조 검사가 잡아서 <b>열기를 거절</b>해요. 조용히 틀리진 않지만, 되살릴 사본이 없어서 DB 전체가 안 열려요.'],
+  ['열기 실패',4386,'#c0603a','커밋 도중 정전. 찢긴 페이지는 체크섬이, 어긋난 페이지는 구조 검사가 잡아서 <b>열기를 거절</b>해요. 조용히 틀리진 않지만, 되살릴 사본이 없어서 DB 전체가 안 열려요. (고치기 전엔 이 중 18건이 panic이었어요.)'],
   ['만들다 만 DB',236,'#8a4fb5','새 DB를 만드는 도중 정전. 잃은 커밋은 없지만 파일을 손으로 지워야 해요.'],
-  ['반쪽 커밋',282,'#c28a12','열리고 읽히는데 커밋의 일부 키만 새 값이에요. <b>오류 없이 틀린 상태</b>라 가장 위험해요.'],
-  ['panic',18,'#333','debug 빌드에서 다시 열다가 멈춰요. 엔진 버그예요 (아래 상자).']];
+  ['반쪽 커밋',282,'#c28a12','열리고 읽히는데 커밋의 일부 키만 새 값이에요. <b>오류 없이 틀린 상태</b>라 가장 위험해요.']];
  const tot=BAR.reduce((a,b)=>a+b[1],0);
  $('cxBar').innerHTML=BAR.map((b,i)=>`<div data-i="${i}" style="width:${Math.max(b[1]/tot*100,1.2)}%;background:${b[2]}">${b[1]/tot>.08?b[0]+' '+(b[1]/tot*100).toFixed(0)+'%':''}</div>`).join('');
  $('cxBar').onclick=e=>{const d=e.target.closest('[data-i]');if(!d)return;const b=BAR[+d.dataset.i];const l=$('cxBarLog');l.className='log';l.innerHTML=`<b>${b[0]}: ${b[1].toLocaleString()}개 (${(b[1]/tot*100).toFixed(1)}%)</b> ${b[3]}`;};

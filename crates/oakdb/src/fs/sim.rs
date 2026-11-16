@@ -237,7 +237,8 @@ fn apply_after_crash(
                 Landing::Torn { ref mut sectors } => {
                     // Sectors are counted from the start of the file. A
                     // torn write past the end leaves the file as long as
-                    // the last sector that landed.
+                    // the end of the last piece that landed, never past
+                    // the end of the write.
                     let end = offset + bytes.len() as u64;
                     let mut start = offset;
                     while start < end {
