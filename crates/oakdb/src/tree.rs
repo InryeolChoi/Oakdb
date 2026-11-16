@@ -1055,6 +1055,15 @@ mod tests {
         let mut t = tree.clone();
         t.set(6, Page::free(Some(7)));
         assert!(refused(&t), "free list in a circle");
+        // The free list starts on, or runs into, a tree page, which has no
+        // next page to read: refused, not a panic (seed 529 of
+        // docs/experiments/0008).
+        let mut t = tree.clone();
+        t.free_head = Some(2);
+        assert!(refused(&t), "free list starts on a leaf");
+        let mut t = tree.clone();
+        t.set(6, Page::free(Some(2)));
+        assert!(refused(&t), "free list into a leaf");
         // The chain is cut short, runs on, or runs into the free list.
         let mut t = tree.clone();
         let last = t.page(5).data().to_vec();
