@@ -46,15 +46,18 @@ ENGINE_BUGS = [
 
 # Engine bugs of the WAL (#22), each in db.rs or wal.rs.
 WAL_BUGS = [
-    ("W1 commit: no sync", WAL, "self.file.sync_data()?;\n        self.end +=", "self.end +="),
-    ("W2 open: tail not cut off", DB, "if wal_file.size()? > replayed.end {", "if false && wal_file.size()? > replayed.end {"),
-    ("W3 open: new WAL, no directory sync", DB, "if replayed.end == 0 {\n            fs.sync_dir(dir)?;", "if false {\n            fs.sync_dir(dir)?;"),
-    ("W4 replay: pages applied without a commit", WAL, "pending.push((u64_at(1), Box::<[u8]>::from(&body[9..])));", "done.pages.insert(u64_at(1), Box::<[u8]>::from(&body[9..]));"),
+    ("W1 commit: no sync", WAL, "self.file.sync_data()?;\n        self.tail = Tail {", "self.tail = Tail {"),
+    ("W2 open: tail not cut off", DB, "            wal_file.set_len(tail.end)?;", ""),
+    ("W3 open: new WAL, no directory sync", DB, "if tail == Tail::EMPTY {\n            fs.sync_dir(dir)?;", "if false {\n            fs.sync_dir(dir)?;"),
+    ("W4 replay: pages applied without a commit", WAL, "pending.push((u64_at(PAGE_NO_AT), Box::new(image)));", "done.pages.insert(u64_at(PAGE_NO_AT), Box::new(image));"),
     ("W5 crc not chained", WAL, [("let crc = crc32c::crc32c_append(prev, &out[start..]);", "let crc = crc32c::crc32c_append(START, &out[start..]); let _ = prev;"),
                                  ("crc = crc32c::crc32c_append(crc, body);", "crc = crc32c::crc32c_append(START, body);")]),
-    ("W6 commit: end not moved on", WAL, "self.end += bytes.len() as u64;", "self.end += 0;"),
+    ("W6 commit: end not moved on", WAL, "end: self.tail.end + bytes.len() as u64,", "end: self.tail.end,"),
     ("W7 replay: bad crc ignored", WAL, "if stored != crc.to_le_bytes() {\n            return done;", "if false && stored != crc.to_le_bytes() {\n            return done;"),
-    ("W8 replay: last commit's crc not kept", WAL, "done.crc = crc;", "done.crc = START;"),
+    ("W9 open: cut bytes not kept", DB, "kept.write_all_at(cut, kept.size()?)?;", "let _ = (&kept, cut);"),
+    ("W10 open: a long WAL with no commit made into a new DB", DB, "None if bytes.len() as u64 > wal::commit_len(1) => {", "None if false => {"),
+    ("W11 commit: a commit of nothing written anyway", DB, "if next.has_dirty() || next.meta() != tree.meta() {", "if true {"),
+    ("W8 replay: last commit's crc not kept", WAL, "            end: at as u64,\n            crc,", "            end: at as u64,\n            crc: START,"),
 ]
 WAL_TESTS = ["--lib", "--test", "wal", "--test", "crash", "--test", "sim_fs"]
 

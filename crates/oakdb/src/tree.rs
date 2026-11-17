@@ -81,6 +81,11 @@ impl Tree {
         &self.pages[(page_no - FIRST_PAGE) as usize]
     }
 
+    /// Whether any page changed since the last [`Tree::take_dirty`].
+    pub(crate) fn has_dirty(&self) -> bool {
+        !self.dirty.is_empty()
+    }
+
     /// The pages changed since the last call, to be written out.
     pub(crate) fn take_dirty(&mut self) -> BTreeSet<u64> {
         std::mem::take(&mut self.dirty)
@@ -151,11 +156,15 @@ impl Tree {
         }
     }
 
-    /// Removes `key`, freeing its overflow pages. Its leaf is written at
-    /// commit even if `key` was not there. A leaf left empty leaves the
-    /// tree, unless it is the root.
+    /// Removes `key`, if it is there, freeing its overflow pages. A leaf
+    /// left empty leaves the tree, unless it is the root.
     pub(crate) fn delete(&mut self, key: &[u8]) {
         let (path, leaf) = self.descend(key);
+        // A key that is not there changes no page, so a commit of nothing
+        // but such deletes writes nothing.
+        if self.page(leaf).get(key).is_none() {
+            return;
+        }
         if let Some(Removed::Overflow(old)) = self.page_mut(leaf).delete(key) {
             self.free_chain(old);
         }
