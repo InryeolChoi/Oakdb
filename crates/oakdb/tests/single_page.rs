@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use oakdb::fs::{Fs, StdFs};
-use oakdb::{Db, Error, DATA_FILE, MAX_KEY_LEN};
+use oakdb::{Db, Error, DATA_FILE, MAX_KEY_LEN, WAL_FILE};
 
 #[test]
 fn opening_creates_a_missing_directory() {
@@ -163,10 +163,7 @@ fn space_freed_by_shrinking_values_takes_new_keys_after_reopening() {
     txn.commit().unwrap();
 
     // Still one leaf: the space was reused instead of splitting.
-    let size = std::fs::metadata(root.path().join(DATA_FILE))
-        .unwrap()
-        .len();
-    assert_eq!(size, 3 * 4096);
+    assert_eq!(db.page_count(), 3);
     let txn = db.begin();
     for new in [b"new0", b"new1", b"new2"] {
         assert_eq!(txn.get(new).unwrap(), Some(vec![1; 1000]));
@@ -268,6 +265,7 @@ fn file_access_goes_through_the_given_file_system() {
         [
             Call::CreateDirAll(dir.clone()),
             Call::Open(dir.join(DATA_FILE)),
+            Call::Open(dir.join(WAL_FILE)),
             // A new file is only durable once its directory is synced.
             Call::SyncDir(dir.clone()),
         ]

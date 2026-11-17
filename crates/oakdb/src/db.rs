@@ -121,6 +121,12 @@ impl<F: Fs> Db<F> {
         }
     }
 
+    /// How many pages the database uses, free ones included, counting the
+    /// two meta pages: what its data file holds once checkpointed.
+    pub fn page_count(&self) -> u64 {
+        todo!()
+    }
+
     /// Closes the database. Every committed transaction is already durable,
     /// so this only releases the file and its lock.
     pub fn close(self) -> Result<()> {
@@ -429,6 +435,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "the data file is written by checkpoints (#23)"]
     fn a_new_database_records_the_page_size_in_both_meta_slots() {
         let dir = tempfile::tempdir().unwrap();
         Db::open(dir.path()).unwrap().close().unwrap();

@@ -120,25 +120,18 @@ fn a_cut_while_opening_a_new_database_loses_nothing_it_promised() {
 }
 
 #[test]
-fn no_seed_ends_in_lost_acknowledged_or_wrong_value() {
-    // What the current design does keep: a commit is only acknowledged
-    // after its pages are synced, so a power cut can break the database
-    // but has not been seen to lose an acknowledged commit silently.
+fn every_seed_keeps_the_promise() {
+    // With the WAL (#22): every acknowledged commit is there, and the cut
+    // commit is all there or not at all, for every seed.
     for seed in 0..2000 {
         let verdict = Case::from_seed(seed).run().verdict;
-        assert!(
-            !matches!(
-                verdict,
-                Verdict::LostAcknowledged(_) | Verdict::WrongValue(_)
-            ),
-            "seed {seed}: {verdict:?}"
-        );
+        assert!(verdict.is_intact(), "seed {seed}: {verdict:?}");
     }
 }
 
-// Seeds where the current design breaks (docs/experiments/0008), each a
-// short example of its kind found in seeds 0..2000. They must all pass
-// once the WAL (#22) lands; until then they are ignored.
+// Seeds where the design before the WAL broke (docs/experiments/0008),
+// each a short example of its kind found in seeds 0..2000. The WAL (#22)
+// must keep them all intact.
 // Replay one with `cargo run --example crash_sim -- one <seed>`.
 
 fn stays_intact(seed: u64) {
@@ -150,7 +143,6 @@ fn stays_intact(seed: u64) {
 /// did not, and the file is no longer empty, so it is opened as a database
 /// and refused ("not an Oakdb data file").
 #[test]
-#[ignore = "needs the WAL (#22)"]
 fn a_cut_while_creating_leaves_a_file_that_can_be_opened() {
     stays_intact(184);
 }
@@ -158,7 +150,6 @@ fn a_cut_while_creating_leaves_a_file_that_can_be_opened() {
 /// Cut while creating: the meta page landed, the leaf did not ("data file
 /// is shorter than its meta page says").
 #[test]
-#[ignore = "needs the WAL (#22)"]
 fn a_cut_while_creating_after_the_meta_page_is_written() {
     stays_intact(536);
 }
@@ -167,7 +158,6 @@ fn a_cut_while_creating_after_the_meta_page_is_written() {
 /// end of the file, leaves from a split or the overflow pages of a long
 /// value, did not ("page number is outside the file").
 #[test]
-#[ignore = "needs the WAL (#22)"]
 fn a_page_lands_without_the_new_pages_it_points_to() {
     stays_intact(213);
 }
@@ -175,7 +165,6 @@ fn a_page_lands_without_the_new_pages_it_points_to() {
 /// A torn leaf: the checksum notices, but nothing can repair it yet
 /// ("page 2 has a wrong checksum").
 #[test]
-#[ignore = "needs the WAL (#22)"]
 fn a_torn_page_is_repaired() {
     stays_intact(84);
 }
@@ -183,7 +172,6 @@ fn a_torn_page_is_repaired() {
 /// A split part way: leaves landed, lost and torn, so the sibling chain
 /// breaks ("leaves do not point to the next leaf").
 #[test]
-#[ignore = "needs the WAL (#22)"]
 fn a_split_cut_part_way() {
     stays_intact(319);
 }
@@ -191,7 +179,6 @@ fn a_split_cut_part_way() {
 /// A commit over two leaves: one landed, the other was never written, so
 /// half its keys are new ("half a commit").
 #[test]
-#[ignore = "needs the WAL (#22)"]
 fn a_commit_over_two_leaves_lands_whole_or_not_at_all() {
     stays_intact(1680);
     stays_intact(406);
@@ -202,7 +189,6 @@ fn a_commit_over_two_leaves_lands_whole_or_not_at_all() {
 /// the old meta page disagree ("page is reached twice"): the design breaks
 /// even on a disk that never loses a write.
 #[test]
-#[ignore = "needs the WAL (#22)"]
 fn a_cut_between_the_page_sync_and_the_meta_page() {
     stays_intact(159);
 }

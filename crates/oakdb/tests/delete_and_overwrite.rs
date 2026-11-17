@@ -1,9 +1,8 @@
 //! Deleting keys and overwriting values through the engine API.
 
 use std::collections::BTreeMap;
-use std::path::Path;
 
-use oakdb::{Db, Error, DATA_FILE, MAX_KEY_LEN};
+use oakdb::{Db, Error, MAX_KEY_LEN};
 
 #[test]
 fn a_deleted_key_reads_as_missing() {
@@ -104,9 +103,6 @@ fn deleting_a_key_longer_than_512_bytes_is_rejected() {
 }
 
 /// How many 4 KB pages the data file has. A database of one leaf has 3.
-fn pages_in_file(dir: &Path) -> u64 {
-    std::fs::metadata(dir.join(DATA_FILE)).unwrap().len() / 4096
-}
 
 /// Fills most of the page with ten 350-byte values under keys 0..10.
 fn fill_with_ten_values(db: &Db) {
@@ -140,7 +136,7 @@ fn space_freed_by_deletes_takes_new_keys_after_reopening() {
     db.close().unwrap();
 
     let db = Db::open(root.path()).unwrap();
-    assert_eq!(pages_in_file(root.path()), 3);
+    assert_eq!(db.page_count(), 3);
     let txn = db.begin();
     for new in [b"new0", b"new1", b"new2"] {
         assert_eq!(txn.get(new).unwrap(), Some(vec![1; 1000]));
@@ -172,7 +168,7 @@ fn a_commit_fits_if_its_end_result_fits_whatever_the_key_order() {
     db.close().unwrap();
 
     let db = Db::open(root.path()).unwrap();
-    assert_eq!(pages_in_file(root.path()), 3);
+    assert_eq!(db.page_count(), 3);
     let txn = db.begin();
     assert_eq!(txn.get(b"\x00new0").unwrap(), Some(vec![1; 1000]));
     assert_eq!(txn.get(b"\x00new1").unwrap(), Some(vec![1; 1000]));
@@ -230,5 +226,5 @@ fn random_puts_and_deletes_match_a_btreemap() {
             );
         }
     }
-    assert!(pages_in_file(root.path()) > 10, "leaves never split");
+    assert!(db.page_count() > 10, "leaves never split");
 }
