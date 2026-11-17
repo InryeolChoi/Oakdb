@@ -191,3 +191,121 @@ fn a_power_cut_while_creating_leaves_a_database_that_opens() {
         }
     }
 }
+
+// Decisions after the review of PR #54.
+
+/// Where opening keeps what it cuts off the WAL.
+const CUT_FILE: &str = "oakdb.wal.cut";
+
+/// The bytes a new database's first commit takes: one page record for its
+/// empty leaf and a commit record.
+const CREATE_LEN: u64 = 4109 + 37;
+
+fn contents(fs: &SimFs, path: &Path) -> Vec<u8> {
+    let file = fs.open(path).unwrap();
+    let mut buf = vec![0; file.size().unwrap() as usize];
+    file.read_exact_at(&mut buf, 0).unwrap();
+    buf
+}
+
+#[test]
+fn what_is_cut_off_the_wal_is_kept_in_the_cut_file() {
+    let fs = SimFs::new();
+    let db = Db::open_with(fs.clone(), dir()).unwrap();
+    put(&db, b"a", b"1");
+    let after_a = wal_size(&fs);
+    put(&db, b"b", b"2");
+    drop(db);
+    // Damage in the middle: the commit of "b", acknowledged, is after it.
+    scribble(&fs, after_a + 20, &[0xFF]);
+    let tail = contents(&fs, &dir().join(WAL_FILE))[after_a as usize..].to_vec();
+
+    let db = Db::open_with(fs.clone(), dir()).unwrap();
+
+    assert_eq!(get(&db, b"b"), None);
+    assert_eq!(wal_size(&fs), after_a);
+    assert_eq!(contents(&fs, &dir().join(CUT_FILE)), tail);
+}
+
+#[test]
+fn the_cut_file_survives_a_crash() {
+    for seed in 0..SEEDS {
+        let fs = SimFs::new();
+        let db = Db::open_with(fs.clone(), dir()).unwrap();
+        put(&db, b"a", b"1");
+        drop(db);
+        let end = wal_size(&fs);
+        scribble(&fs, end, &[0xAB; 100]);
+        drop(Db::open_with(fs.clone(), dir()).unwrap());
+
+        fs.crash(seed);
+
+        assert_eq!(
+            contents(&fs, &dir().join(CUT_FILE)),
+            [0xAB; 100],
+            "seed {seed}"
+        );
+    }
+}
+
+#[test]
+fn a_wal_longer_than_a_new_database_with_no_whole_commit_is_refused() {
+    let fs = SimFs::new();
+    let db = Db::open_with(fs.clone(), dir()).unwrap();
+    put(&db, b"a", b"1");
+    put(&db, b"b", b"2");
+    drop(db);
+    // The first record damaged: no commit checks out any more.
+    scribble(&fs, 20, &[0xFF]);
+    let before = contents(&fs, &dir().join(WAL_FILE));
+
+    let err = Db::open_with(fs.clone(), dir()).unwrap_err();
+
+    assert!(matches!(err, oakdb::Error::Corrupt(_)), "{err:?}");
+    assert_eq!(contents(&fs, &dir().join(WAL_FILE)), before, "nothing cut");
+}
+
+#[test]
+fn a_wal_cut_short_while_creating_still_makes_a_new_database() {
+    for len in [1, 100, CREATE_LEN - 1] {
+        let fs = SimFs::new();
+        drop(Db::open_with(fs.clone(), dir()).unwrap());
+        let wal = fs.open(&dir().join(WAL_FILE)).unwrap();
+        wal.set_len(len).unwrap();
+        wal.sync_data().unwrap();
+
+        let db = Db::open_with(fs.clone(), dir()).unwrap();
+        assert_eq!(db.page_count(), 3, "len {len}");
+    }
+}
+
+#[test]
+fn a_data_file_that_is_refused_leaves_the_wal_as_it_was() {
+    let fs = SimFs::new();
+    let db = Db::open_with(fs.clone(), dir()).unwrap();
+    put(&db, b"a", b"1");
+    drop(db);
+    scribble(&fs, wal_size(&fs), &[0xAB; 100]);
+    let data = fs.open(&dir().join(DATA_FILE)).unwrap();
+    data.write_all_at(&[0xCD; 8192], 0).unwrap();
+    data.sync_data().unwrap();
+    let before = contents(&fs, &dir().join(WAL_FILE));
+
+    assert!(Db::open_with(fs.clone(), dir()).is_err());
+    assert_eq!(contents(&fs, &dir().join(WAL_FILE)), before);
+    assert!(!fs.exists(&dir().join(CUT_FILE)));
+}
+
+#[test]
+fn a_commit_that_changes_nothing_writes_nothing() {
+    let fs = SimFs::new();
+    let db = Db::open_with(fs.clone(), dir()).unwrap();
+    put(&db, b"a", b"1");
+    let before = wal_size(&fs);
+
+    let mut txn = db.begin();
+    txn.delete(b"not there").unwrap();
+    txn.commit().unwrap();
+
+    assert_eq!(wal_size(&fs), before);
+}
