@@ -5,6 +5,9 @@ Run from the repository root:
 
     python3 docs/experiments/scripts/mutants.py sim      # 14 bugs in SimFs
     python3 docs/experiments/scripts/mutants.py engine   # experiment 0007
+    python3 docs/experiments/scripts/mutants.py wal      # experiment 0009
+
+A bug is one replacement, or a list of them for a bug that spans places.
 
 Each bug is a text replacement in one source file. The file is restored
 after every run, even if a run fails.
@@ -15,6 +18,7 @@ import sys
 
 SIM = "crates/oakdb/src/fs/sim.rs"
 DB = "crates/oakdb/src/db.rs"
+WAL = "crates/oakdb/src/wal.rs"
 
 SIM_BUGS = [
     ("unsynced writes always kept", "Landing::Lost => {}", "Landing::Lost => write_at(data, offset, &bytes),"),
@@ -40,6 +44,20 @@ ENGINE_BUGS = [
     ("E4 commit: no sync after meta", "            write_meta(file, next.meta())?;\n            file.sync_data()?;", "            write_meta(file, next.meta())?;"),
 ]
 
+# Engine bugs of the WAL (#22), each in db.rs or wal.rs.
+WAL_BUGS = [
+    ("W1 commit: no sync", WAL, "self.file.sync_data()?;\n        self.end +=", "self.end +="),
+    ("W2 open: tail not cut off", DB, "if wal_file.size()? > replayed.end {", "if false && wal_file.size()? > replayed.end {"),
+    ("W3 open: new WAL, no directory sync", DB, "if replayed.end == 0 {\n            fs.sync_dir(dir)?;", "if false {\n            fs.sync_dir(dir)?;"),
+    ("W4 replay: pages applied without a commit", WAL, "pending.push((u64_at(1), Box::<[u8]>::from(&body[9..])));", "done.pages.insert(u64_at(1), Box::<[u8]>::from(&body[9..]));"),
+    ("W5 crc not chained", WAL, [("let crc = crc32c::crc32c_append(prev, &out[start..]);", "let crc = crc32c::crc32c_append(START, &out[start..]); let _ = prev;"),
+                                 ("crc = crc32c::crc32c_append(crc, body);", "crc = crc32c::crc32c_append(START, body);")]),
+    ("W6 commit: end not moved on", WAL, "self.end += bytes.len() as u64;", "self.end += 0;"),
+    ("W7 replay: bad crc ignored", WAL, "if stored != crc.to_le_bytes() {\n            return done;", "if false && stored != crc.to_le_bytes() {\n            return done;"),
+    ("W8 replay: last commit's crc not kept", WAL, "done.crc = crc;", "done.crc = START;"),
+]
+WAL_TESTS = ["--lib", "--test", "wal", "--test", "crash", "--test", "sim_fs"]
+
 REAL_DISK = [a for t in ["single_page", "delete_and_overwrite", "split", "multi_level", "scan", "overflow", "checksum"] for a in ("--test", t)]
 
 
@@ -50,8 +68,29 @@ def run(args):
     return ("caught" if r.returncode else "missed") + (f" {failed}" if failed else "")
 
 
+def wal():
+    """Plants each WAL bug, which may change db.rs or wal.rs in places."""
+    originals = {path: open(path).read() for path in (DB, WAL)}
+    try:
+        for name, path, *change in WAL_BUGS:
+            pairs = change[0] if len(change) == 1 else [tuple(change)]
+            text = originals[path]
+            for old, new in pairs:
+                assert text.count(old) == 1, f"{name}: pattern not found exactly once"
+                text = text.replace(old, new)
+            open(path, "w").write(text)
+            print(name)
+            print("  WAL, crash and sim tests:", run(WAL_TESTS))
+            open(path, "w").write(originals[path])
+    finally:
+        for path, text in originals.items():
+            open(path, "w").write(text)
+
+
 def main():
     which = sys.argv[1] if len(sys.argv) > 1 else "sim"
+    if which == "wal":
+        return wal()
     path, bugs = (SIM, SIM_BUGS) if which == "sim" else (DB, ENGINE_BUGS)
     original = open(path).read()
     try:

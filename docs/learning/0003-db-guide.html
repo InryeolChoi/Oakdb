@@ -338,6 +338,11 @@ canvas{width:100%;display:block;border-radius:12px;background:var(--surface2)}
 .cxcard.on{border-color:var(--oak);box-shadow:0 0 0 3px var(--hl)}
 .cxcard b{display:block;font-size:14px}
 .cxpages{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}
+.waltape{display:flex;flex-wrap:wrap;gap:4px;min-height:44px;padding:8px;border:1px dashed var(--line);border-radius:10px;margin:8px 0;background:var(--surface2)}
+.waltape span{padding:5px 8px;border-radius:7px;font-family:"JetBrains Mono",monospace;font-size:12px;background:var(--leaf-soft);color:var(--leaf)}
+.waltape span.stamp{background:var(--oak);color:#fff;font-weight:700}
+.waltape span.junk{background:#fbe3d6;color:#b4552d;text-decoration:line-through}
+.waltape span.cut{opacity:.35}
 .cxpages span{padding:6px 10px;border-radius:8px;font-family:"JetBrains Mono",monospace;font-size:12px}
 .cxpages .kept{background:var(--leaf-soft);color:var(--leaf)}
 .cxpages .lost{background:var(--surface2);color:var(--muted);text-decoration:line-through}
@@ -421,7 +426,7 @@ svg text{font-family:"Noto Sans KR",sans-serif}
 
 <nav class="toc"><div class="wrap">
   <a class="part" href="#p1">1 기본기</a><a href="#c11">파일 vs DB</a><a href="#c12">DB의 층</a><a href="#c13">디스크</a><a href="#c14">트리</a><a href="#c15">B+Tree·LSM</a><a href="#c16">동시성</a><a href="#c17">정전·로그</a>
-  <a class="part" href="#p2">2 Oakdb</a><a href="#c21">결정 12개</a><a href="#c22">페이지</a><a href="#c23">트리</a><a href="#c24">검증</a><a href="#c25">큰 값</a><a href="#c26">체크섬</a><a href="#c27">가짜 디스크</a><a href="#c28">정전 실험</a>
+  <a class="part" href="#p2">2 Oakdb</a><a href="#c21">결정 12개</a><a href="#c22">페이지</a><a href="#c23">트리</a><a href="#c24">검증</a><a href="#c25">큰 값</a><a href="#c26">체크섬</a><a href="#c27">가짜 디스크</a><a href="#c28">정전 실험</a><a href="#c29">WAL</a>
   <a class="part" href="#p3">3 SQLite</a><a href="#c31">동시 쓰기</a><a href="#c32">서버</a><a href="#c33">비교표</a><a href="#c34">대가</a>
   <a class="part" href="#p4">4 앞으로</a><a href="#c41">지도</a><a href="#c42">충돌 판정</a><a href="#c43">그룹 커밋</a><a href="#c44">체크포인트</a><a href="#c45">SQL→키</a><a href="#c46">최종 증명</a><a href="#gl">용어</a>
 </div></nav>
@@ -811,6 +816,37 @@ svg text{font-family:"Noto Sans KR",sans-serif}
   </table></div>
   <div class="term"><b>덤으로 찾은 버그</b>: debug 빌드에서 다시 열다가 <b>panic</b>(0.2%). 빈 페이지 목록을 따라가는 반복자(<code>successors</code>)가 페이지 종류를 확인하기 <b>전에</b> 다음 번호를 먼저 읽어요. 06번 정리 때 제가 넣은 버그예요. 디딘 계단이 단단한지 보기 전에 다음 계단으로 발부터 내민 셈이에요. 이 PR에서 "확인하고 → 다음 번호 읽기" 순서의 반복문으로 고쳐서, 이제 panic 없이 <b>열기 거절</b>로 끝나요.</div>
 </section>
+
+<section class="ch reveal" id="c29">
+  <span class="chno">2-9 · 티켓 10</span>
+  <h3>WAL: 일지에 먼저 쓰고, 도장을 찍고, 그다음에 OK</h3>
+  <p>2-8에서 찍은 찌그러진 사진들을 고치는 에어백이에요. 커밋은 이제 장부(데이터 파일)를 건드리지 않아요. 바뀐 페이지를 <b>통째로</b> 일지(WAL) 끝에 붙이고, 마지막 줄에 <b>"여기까지 커밋" 도장</b>을 찍고, 디스크에 한 번 sync한 뒤에야 OK를 줘요.</p>
+  <div class="analogy"><b>비유: 은행 창구의 거래 일지.</b> 장부를 바로 고치다 정전이 나면 장부가 찢겨요. 대신 일지에 "3번 페이지는 이제 이렇게 생겼다"를 통째로 적고 도장을 찍어요. 정전 뒤에는 일지를 처음부터 읽으며 <b>도장까지 찍힌 것만</b> 옮기고, 도장 없이 끝난 꼬리는 찢어 버려요.</div>
+  <div class="card">
+    <div class="controls">
+      <button class="primary" id="wlCommit">✍️ 커밋 (페이지 2장 + 도장)</button>
+      <button class="danger" id="wlCrash">💥 커밋 도중 정전</button>
+      <button id="wlOpen">🔄 다시 열기</button>
+      <button id="wlReset">다시</button>
+    </div>
+    <div class="small">일지(WAL) 테이프: 초록 = 페이지 사본, 주황 = 도장(커밋 레코드), 빨강 = 정전으로 반쯤 쓰인 쓰레기</div>
+    <div class="waltape" id="wlTape"></div>
+    <div class="log" id="wlLog">커밋을 몇 번 하고, 정전을 일으킨 다음, 다시 열어 보세요.</div>
+  </div>
+  <div class="tablewrap"><table>
+    <tr><th>정할 것</th><th>결정</th><th>이유</th></tr>
+    <tr><td>장부는 언제 고치나</td><td>체크포인트(11번)만</td><td>WAL에만 쓰면 커밋이 단순해요. 대신 11번 전까지 일지가 계속 길어져요</td></tr>
+    <tr><td>새 DB 만들기</td><td>일지의 첫 커밋</td><td>"장부가 비었고 도장 찍힌 커밋이 없으면 새 DB". 만들다 만 DB 문제가 사라져요</td></tr>
+    <tr><td>체크섬</td><td>사슬 체크섬 + 꼬리 자르기</td><td>각 레코드의 체크섬이 앞 레코드의 체크섬에서 이어져요. 옛 레코드가 엉뚱한 자리에 끼어들 수 없어요</td></tr>
+  </table></div>
+  <div class="term"><b>꼬리를 꼭 잘라야 하는 이유</b>: 쓰레기 뒤에 다음 커밋을 붙이면, 다음에 열 때 재생이 쓰레기에서 멈춰서 <b>OK까지 받은 새 커밋을 못 봐요</b>. 그래서 열 때 마지막 도장 뒤를 잘라 내고 sync해요. 위 장치에서 "다시 열기"를 누르면 빨간 칸이 사라지는 게 그거예요.</div>
+  <div class="tablewrap"><table>
+    <tr><th>정전 실험 (시드 1만 개)</th><th>WAL 전 (2-8)</th><th>WAL 뒤</th></tr>
+    <tr><td>약속 지킴</td><td>51%</td><td><b>100%</b></td></tr>
+    <tr><td>열기 실패</td><td>46%</td><td>0</td></tr>
+    <tr><td>반쪽 커밋</td><td>2.8%</td><td>0</td></tr>
+  </table></div>
+</section>
 </div>
 
 <!-- ================= PART 3 ================= -->
@@ -920,7 +956,7 @@ svg text{font-family:"Noto Sans KR",sans-serif}
 
 <!-- ================= PART 4 ================= -->
 <div class="wrap">
-<div class="partbanner" id="p4"><div class="num">PART 4</div><h2>앞으로의 길</h2><p>27개 티켓 중 01~08을 merge했고(저장 엔진 구간 완료, 정전 안전 구간 시작), 09(정전 실험)는 PR이 열려 있어요. 남은 길을 지도로 보고, 앞으로 만들 핵심 장치들을 미리 움직여 봐요.</p></div>
+<div class="partbanner" id="p4"><div class="num">PART 4</div><h2>앞으로의 길</h2><p>27개 티켓 중 01~09를 merge했고(저장 엔진 구간 완료, 정전 안전 구간 진행 중), 10(WAL)은 PR이 열려 있어요. 남은 길을 지도로 보고, 앞으로 만들 핵심 장치들을 미리 움직여 봐요.</p></div>
 
 <section class="ch reveal" id="c41">
   <span class="chno">4-1</span>
@@ -1369,6 +1405,18 @@ $('scRun').onclick=async()=>{trRender({});const t=scanTok;const from=+$('scFrom'
  $('sdReset').onclick=reset;reset();
 })();
 
+/* ===== 2-9 WAL tape ===== */
+(function(){
+ let tape=[],n=0;
+ const draw=()=>{$('wlTape').innerHTML=tape.length?tape.map(r=>`<span class="${r.k}">${r.t}</span>`).join(''):'<span class="cut">(비어 있음)</span>';};
+ const log=t=>{$('wlLog').innerHTML=t;};
+ $('wlCommit').onclick=()=>{n++;tape.push({k:'',t:`C${n}·p${2+n%3}`},{k:'',t:`C${n}·p${5+n%2}`},{k:'stamp',t:`도장 C${n}`});draw();log(`커밋 C${n}: 페이지 사본 2장과 도장을 붙이고 <b>sync 한 번</b> → 그다음에 OK.`);};
+ $('wlCrash').onclick=()=>{n++;const r=Math.random();if(r<.5){tape.push({k:'',t:`C${n}·p2`},{k:'junk',t:`C${n}·p?? 찢김`});}else{tape.push({k:'',t:`C${n}·p2`},{k:'',t:`C${n}·p4`},{k:'junk',t:'도장 반쪽'});}draw();log(`C${n}을 쓰다가 정전! 도장을 다 찍지 못했으니 C${n}은 <b>OK를 받은 적이 없어요</b>.`);};
+ $('wlOpen').onclick=()=>{let last=-1;tape.forEach((r,i)=>{if(r.k==='stamp')last=i;});const cut=tape.length-1-last;const ok=tape.filter(r=>r.k==='stamp').length;tape=tape.slice(0,last+1);draw();log(cut?`처음부터 읽으며 도장 ${ok}개까지 옮겼어요. 도장 없는 꼬리 ${cut}칸은 <b>잘라 내고 sync</b>. 다음 커밋은 마지막 도장 바로 뒤에 붙어요.`:`도장 ${ok}개까지 모두 옮겼어요. 잘라 낼 꼬리는 없어요.`);};
+ $('wlReset').onclick=()=>{tape=[];n=0;draw();log('커밋을 몇 번 하고, 정전을 일으킨 다음, 다시 열어 보세요.');};
+ draw();
+})();
+
 /* ===== 2-8 crash experiment ===== */
 (function(){
  const BAR=[['약속 지킴',5096,'var(--ok)','정전 시점이 sync와 sync 사이가 아니거나, 남은 쓰기가 운 좋게 맞아떨어진 경우예요. 절반 정도예요.'],
@@ -1423,7 +1471,7 @@ $('scRun').onclick=async()=>{trRender({});const t=scanTok;const from=+$('scFrom'
 /* ===== 4-1 roadmap ===== */
 (function(){const ST=[
  ['📦','저장 엔진','01~07','B+Tree에 저장하고 읽기','01~07 모두 merge ✅ (06은 큰 값의 부록 사슬과 빈 페이지 재사용: 2-5, 07은 페이지 지문 CRC-32C: 2-6).','책: 돛단배 책의 B+-tree 장'],
- ['⚡','정전에도 안전','08~12','"OK면 남는다"를 지키기','<b>08 가짜 파일시스템</b>(2-7) ✅ → <b>09 지금은 깨진다는 걸 보이기</b>(2-8) PR 리뷰 중 → <b>10 WAL</b> → <b>11 체크포인트·메타 슬롯</b> → <b>12 디스크 실패 시 엔진 정지</b>. 프로젝트에서 가장 어려운 구간이에요.','책: 복구(Recovery) 장'],
+ ['⚡','정전에도 안전','08~12','"OK면 남는다"를 지키기','<b>08 가짜 파일시스템</b>(2-7) ✅ → <b>09 지금은 깨진다는 걸 보이기</b>(2-8) ✅ → <b>10 WAL</b>(2-9) PR 리뷰 중 → <b>11 체크포인트·메타 슬롯</b> → <b>12 디스크 실패 시 엔진 정지</b>. 프로젝트에서 가장 어려운 구간이에요.','책: 복구(Recovery) 장'],
  ['👥','동시 쓰기','13~18','차별점 ①','<b>13 스냅샷 읽기</b> → <b>14 충돌 판정</b> → <b>15 여러 스레드와 커밋 창구</b> → <b>16 그룹 커밋</b> → <b>17 동시성 검증</b>(이력 검사, loom) → <b>18 벤치마크</b>.','책: 동시성 제어 · 스냅샷 격리 절'],
  ['🗣','SQL','19~23','사람의 말로 묻기','<b>19 렉서·파서·실행기</b> → <b>20 WHERE·범위</b> → <b>21 UPDATE·DELETE</b> → <b>22 타입 검사</b> → <b>23 트랜잭션 명령</b>. 행을 정렬이 유지되는 키로 바꾸는 게 핵심이에요(4-5).','책: 질의 처리 장 (가볍게)'],
  ['🌐','네트워크 서버','24~27','차별점 ②','<b>24 통신 규칙과 CLI</b> → <b>25 여러 클라이언트와 접속별 트랜잭션</b> → <b>26 정상 종료</b> → <b>27 네트워크 벤치마크</b>(최종 그래프, 4-6).','—'],
