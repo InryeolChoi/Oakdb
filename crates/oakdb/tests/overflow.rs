@@ -7,8 +7,6 @@ use oakdb::{Db, DATA_FILE, MAX_ENTRY_LEN, MAX_KEY_LEN};
 /// Value bytes one overflow page holds: a 4 KB page minus its header.
 const PER_PAGE: usize = 4096 - 40;
 
-/// How many 4 KB pages the data file has.
-
 /// A value of `len` bytes that differs at every position and with every
 /// `seed`, so a page read out of order or from the wrong chain shows.
 fn value(len: usize, seed: u8) -> Vec<u8> {

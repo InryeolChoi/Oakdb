@@ -3,8 +3,6 @@
 
 use oakdb::{Db, MAX_ENTRY_LEN, MAX_KEY_LEN};
 
-/// How many 4 KB pages the data file has: two meta pages, then the tree.
-
 /// The biggest entry there is: a 512-byte key and a 494-byte value. Four of
 /// them fill a leaf, and an internal page has room for only 7 separators of
 /// 512 bytes, so a two-level tree holds about 20 of them at most.

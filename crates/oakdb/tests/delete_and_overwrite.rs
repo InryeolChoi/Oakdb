@@ -102,8 +102,6 @@ fn deleting_a_key_longer_than_512_bytes_is_rejected() {
     assert!(matches!(err, Error::KeyTooLarge { len: 513, max: 512 }));
 }
 
-/// How many 4 KB pages the data file has. A database of one leaf has 3.
-
 /// Fills most of the page with ten 350-byte values under keys 0..10.
 fn fill_with_ten_values(db: &Db) {
     let mut txn = db.begin();

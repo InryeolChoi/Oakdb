@@ -39,6 +39,10 @@ pub(crate) struct Meta {
 
 impl Meta {
     /// Encodes a full meta page.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "checkpoints (#23) write the meta page")
+    )]
     pub(crate) fn encode(&self) -> [u8; PAGE_SIZE] {
         encode_with_page_size(self, PAGE_SIZE as u32)
             .try_into()
@@ -99,6 +103,10 @@ impl Meta {
     }
 }
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "checkpoints (#23) write the meta page")
+)]
 fn encode_with_page_size(meta: &Meta, page_size: u32) -> Vec<u8> {
     let mut page = vec![0; PAGE_SIZE];
     page[4..12].copy_from_slice(MAGIC);

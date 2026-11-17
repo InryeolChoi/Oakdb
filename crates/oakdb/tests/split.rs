@@ -1,13 +1,6 @@
 //! Splitting a full leaf into two leaves under a root internal page.
 
-use std::path::Path;
-
-use oakdb::{Db, DATA_FILE, MAX_ENTRY_LEN, MAX_KEY_LEN};
-
-/// How many 4 KB pages the data file has: two meta pages, then the tree.
-fn pages_in_file(dir: &Path) -> u64 {
-    std::fs::metadata(dir.join(DATA_FILE)).unwrap().len() / 4096
-}
+use oakdb::{Db, MAX_ENTRY_LEN, MAX_KEY_LEN};
 
 /// A 4-byte key that sorts in the order of `i`.
 fn key(i: u32) -> [u8; 4] {
@@ -34,14 +27,14 @@ fn a_full_leaf_splits_into_two_leaves_under_a_new_root() {
         txn.put(&key(i), &value(i)).unwrap();
     }
     txn.commit().unwrap();
-    assert_eq!(pages_in_file(root.path()), 3);
+    assert_eq!(db.page_count(), 3);
 
     let mut txn = db.begin();
     txn.put(&key(36), &value(36)).unwrap();
     txn.commit().unwrap();
 
     // The old leaf, a new right leaf and the new root.
-    assert_eq!(pages_in_file(root.path()), 5);
+    assert_eq!(db.page_count(), 5);
     let txn = db.begin();
     for i in 0..37 {
         assert_eq!(txn.get(&key(i)).unwrap(), Some(value(i)), "key {i}");
@@ -62,7 +55,7 @@ fn a_split_tree_is_the_same_after_reopening() {
 
     let db = Db::open(root.path()).unwrap();
 
-    assert_eq!(pages_in_file(root.path()), 5);
+    assert_eq!(db.page_count(), 5);
     let txn = db.begin();
     for i in 0..37 {
         assert_eq!(txn.get(&key(i)).unwrap(), Some(value(i)), "key {i}");
@@ -94,7 +87,7 @@ fn put_in_order_and_check(order: impl Iterator<Item = u32>) {
 
     let db = Db::open(root.path()).unwrap();
     check(&db);
-    assert!(pages_in_file(root.path()) > 20);
+    assert!(db.page_count() > 20);
 }
 
 #[test]

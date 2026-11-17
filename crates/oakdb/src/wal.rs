@@ -21,6 +21,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::error::Result;
+use crate::fs::FsFile;
 use crate::meta::Meta;
 use crate::page::PAGE_SIZE;
 
@@ -29,7 +31,7 @@ pub const WAL_FILE: &str = "oakdb.wal";
 
 /// The crc the chain starts from. Not 0, so a WAL of zeros never checks
 /// out.
-pub(crate) const START: u32 = 0x0AC_DB_10;
+pub(crate) const START: u32 = 0x0AC0_DB10;
 
 /// What replaying a WAL found.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -44,6 +46,38 @@ pub(crate) struct Replayed {
     pub(crate) crc: u32,
 }
 
+/// The end of the WAL, where commits are appended.
+pub(crate) struct Wal<F: FsFile> {
+    file: F,
+    /// Where the last commit ends.
+    end: u64,
+    /// The crc of the last commit record.
+    crc: u32,
+}
+
+impl<F: FsFile> Wal<F> {
+    /// The WAL in `file`, whose last commit ends at `end` with `crc`.
+    pub(crate) fn new(file: F, end: u64, crc: u32) -> Self {
+        Wal { file, end, crc }
+    }
+
+    /// Appends a commit of `pages` and `meta` and syncs it. If that fails,
+    /// the end stays where it was, so the next commit writes over whatever
+    /// part of this one reached the file.
+    pub(crate) fn append<'p>(
+        &mut self,
+        pages: impl IntoIterator<Item = (u64, &'p [u8; PAGE_SIZE])>,
+        meta: Meta,
+    ) -> Result<()> {
+        let (bytes, crc) = encode_commit(self.crc, pages, meta);
+        self.file.write_all_at(&bytes, self.end)?;
+        self.file.sync_data()?;
+        self.end += bytes.len() as u64;
+        self.crc = crc;
+        Ok(())
+    }
+}
+
 /// The records of one commit: `pages` (number and image), then a commit
 /// record for `meta`, chained on from `prev`. Returns the bytes and the
 /// crc the next commit carries on from.
@@ -52,15 +86,84 @@ pub(crate) fn encode_commit<'p>(
     pages: impl IntoIterator<Item = (u64, &'p [u8; PAGE_SIZE])>,
     meta: Meta,
 ) -> (Vec<u8>, u32) {
-    let _ = (prev, pages.into_iter().count(), meta);
-    todo!()
+    let mut out = Vec::new();
+    let mut crc = prev;
+    for (page_no, page) in pages {
+        let start = out.len();
+        out.push(PAGE);
+        out.extend_from_slice(&page_no.to_le_bytes());
+        out.extend_from_slice(page);
+        crc = seal(&mut out, start, crc);
+    }
+    let start = out.len();
+    out.push(COMMIT);
+    for field in [
+        meta.root_page,
+        meta.page_count,
+        meta.free_head.unwrap_or(0),
+        meta.free_count,
+    ] {
+        out.extend_from_slice(&field.to_le_bytes());
+    }
+    crc = seal(&mut out, start, crc);
+    (out, crc)
+}
+
+const PAGE: u8 = 1;
+const COMMIT: u8 = 2;
+const CRC_LEN: usize = 4;
+/// A page record's bytes before its crc: kind, page number, page.
+const PAGE_BODY: usize = 1 + 8 + PAGE_SIZE;
+/// A commit record's bytes before its crc: kind and four meta fields.
+const COMMIT_BODY: usize = 1 + 4 * 8;
+
+/// Appends the crc of `out[start..]`, carried on from `prev`, and returns it.
+fn seal(out: &mut Vec<u8>, start: usize, prev: u32) -> u32 {
+    let crc = crc32c::crc32c_append(prev, &out[start..]);
+    out.extend_from_slice(&crc.to_le_bytes());
+    crc
 }
 
 /// Replays the WAL `bytes`: every commit up to the first record that does
 /// not check out.
 pub(crate) fn replay(bytes: &[u8]) -> Replayed {
-    let _ = bytes;
-    todo!()
+    let mut done = Replayed {
+        crc: START,
+        ..Replayed::default()
+    };
+    // Pages of the commit being read, applied once its commit record is.
+    let mut pending = Vec::new();
+    let (mut at, mut crc) = (0, START);
+    loop {
+        let body = match bytes.get(at) {
+            Some(&PAGE) => PAGE_BODY,
+            Some(&COMMIT) => COMMIT_BODY,
+            _ => return done,
+        };
+        let Some(record) = bytes.get(at..at + body + CRC_LEN) else {
+            return done;
+        };
+        let (body, stored) = record.split_at(body);
+        crc = crc32c::crc32c_append(crc, body);
+        if stored != crc.to_le_bytes() {
+            return done;
+        }
+        at += record.len();
+        let u64_at = |i: usize| u64::from_le_bytes(body[i..i + 8].try_into().unwrap());
+        if body[0] == PAGE {
+            pending.push((u64_at(1), Box::<[u8]>::from(&body[9..])));
+            continue;
+        }
+        done.pages.extend(pending.drain(..));
+        done.meta = Some(Meta {
+            root_page: u64_at(1),
+            page_count: u64_at(9),
+            free_head: Some(u64_at(17)).filter(|&page_no| page_no != 0),
+            free_count: u64_at(25),
+        });
+        done.end = at as u64;
+        done.crc = crc;
+    }
 }
 
 #[cfg(test)]
