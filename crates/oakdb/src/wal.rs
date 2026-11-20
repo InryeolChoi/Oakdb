@@ -165,10 +165,14 @@ impl<F: FsFile> Wal<F> {
     }
 
     /// Appends a commit of `pages` and `meta` and syncs it. If that fails,
-    /// the tail stays where it was and the engine stops: nothing is written
-    /// to the WAL again until the database is opened again, which finds
-    /// the whole commit or cuts off what part of it reached the file.
-    pub(crate) fn append(&mut self, pages: &[(u64, &[u8; PAGE_SIZE])], meta: Meta) -> Result<()> {
+    /// the tail stays where it was, and the caller stops the engine: it
+    /// writes nothing to the WAL again, and opening the database again
+    /// finds the whole commit or cuts off what part of it reached the file.
+    pub(crate) fn append(
+        &mut self,
+        pages: &[(u64, &[u8; PAGE_SIZE])],
+        meta: Meta,
+    ) -> std::io::Result<()> {
         let (bytes, crc) = encode_commit(self.tail.crc, pages, meta);
         self.file.write_all_at(&bytes, self.tail.end)?;
         self.file.sync_data()?;

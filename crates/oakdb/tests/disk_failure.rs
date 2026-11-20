@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use oakdb::fs::sim::SimFs;
 use oakdb::fs::{Fs, FsFile};
@@ -168,23 +169,18 @@ fn every_request_after_a_failure_says_the_engine_stopped() {
     let txn = db.begin();
     let mut scan = txn.scan::<&[u8]>(..);
     match scan.next() {
-        Some(Err(Error::Stopped(cause))) => {
-            assert!(matches!(*cause, Error::Io(_)), "the cause: {cause:?}");
-            assert!(cause.to_string().contains(&source_message(&failed)));
-        }
+        // The cause is the error the failed commit got, shared, not a copy.
+        Some(Err(Error::Stopped(cause))) => match (&*cause, &failed) {
+            (Error::OutcomeUnknown(kept), Error::OutcomeUnknown(got)) => {
+                assert!(Arc::ptr_eq(kept, got), "the cause is a copy");
+            }
+            other => panic!("the cause and the failure: {other:?}"),
+        },
         other => panic!("expected Stopped, got {other:?}"),
     }
     drop(scan);
     drop(txn);
     assert!(is_stopped(db.close()), "close");
-}
-
-/// The message of the I/O error an [`Error::OutcomeUnknown`] carries.
-fn source_message(err: &Error) -> String {
-    match err {
-        Error::OutcomeUnknown(e) => e.to_string(),
-        other => panic!("expected OutcomeUnknown, got {other:?}"),
-    }
 }
 
 #[test]

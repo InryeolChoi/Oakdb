@@ -440,29 +440,6 @@ fn a_power_cut_anywhere_in_a_checkpoint_keeps_every_commit() {
 }
 
 #[test]
-fn a_failed_checkpoint_stops_the_engine() {
-    let fs = SimFs::new();
-    let db = Db::open_with(fs.clone(), dir()).unwrap();
-    let model = fill(&db, 50);
-
-    fs.fail_once_after(0);
-    assert!(matches!(db.checkpoint(), Err(Error::Io(_))));
-
-    // The disk works again, but the engine does not trust it (#24).
-    let mut txn = db.begin();
-    assert!(matches!(txn.put(b"after", b"1"), Err(Error::Stopped(_))));
-    assert!(matches!(txn.commit(), Err(Error::Stopped(_))));
-    assert!(matches!(db.checkpoint(), Err(Error::Stopped(_))));
-    assert!(matches!(db.begin().get(b"after"), Err(Error::Stopped(_))));
-    drop(db);
-
-    let db = Db::open_with(fs.clone(), dir()).unwrap();
-    assert_holds(&db, &model, "after reopening");
-    put(&db, b"after", b"1");
-    assert_eq!(get(&db, b"after"), Some(b"1".to_vec()));
-}
-
-#[test]
 fn a_data_file_shorter_than_its_meta_slot_says_is_refused() {
     // Mutant C14: nothing cut the data file short before.
     let fs = SimFs::new();

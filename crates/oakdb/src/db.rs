@@ -28,7 +28,6 @@
 //! [`Error::Stopped`]. Opening the database again recovers it.
 
 use std::collections::{btree_map, BTreeMap, BTreeSet};
-use std::io;
 use std::iter::{FusedIterator, Peekable};
 use std::ops::{Bound, RangeBounds};
 use std::path::Path;
@@ -92,7 +91,7 @@ impl<F: Fs> Db<F> {
         let file = fs.open(&dir.join(DATA_FILE))?;
         file.try_lock().map_err(|e| match e.kind() {
             std::io::ErrorKind::WouldBlock => Error::AlreadyOpen,
-            _ => Error::Io(e),
+            _ => Error::from(e),
         })?;
         let wal_file = fs.open(&dir.join(WAL_FILE))?;
         let bytes = read_all(&wal_file)?;
@@ -218,10 +217,11 @@ impl<F: Fs> Db<F> {
         }
     }
 
-    /// Stops the engine because of `cause`. Called holding `tree`, so the
-    /// first failure is the one kept.
+    /// Stops the engine because of `cause`, the error the failing call
+    /// returns, which every request after it reports. Called holding
+    /// `tree`, so the first failure is the one kept.
     fn stop(&self, cause: &Error) {
-        let _ = self.stopped.set(Arc::new(copy_of(cause)));
+        let _ = self.stopped.set(Arc::new(cause.clone()));
     }
 
     fn wal(&self) -> MutexGuard<'_, Wal<F::File>> {
@@ -278,23 +278,21 @@ impl<F: Fs> Txn<'_, F> {
     /// it runs do not change what it yields. If the engine stopped, its
     /// only item is [`Error::Stopped`].
     pub fn scan<K: AsRef<[u8]>>(&self, range: impl RangeBounds<K>) -> Scan<'_> {
-        let stopped = self.db.check_running().err();
-        let (start, end) = match stopped {
-            // A range that holds no key.
-            Some(_) => (Bound::Included(&[][..]), Bound::Excluded(&[][..])),
-            None => empty_if_backwards(
-                range.start_bound().map(AsRef::as_ref),
-                range.end_bound().map(AsRef::as_ref),
-            ),
-        };
         let tree = Arc::clone(&self.db.tree());
+        if let Err(e) = self.db.check_running() {
+            return Scan::stopped(tree, e);
+        }
+        let (start, end) = empty_if_backwards(
+            range.start_bound().map(AsRef::as_ref),
+            range.end_bound().map(AsRef::as_ref),
+        );
         let mut scan = Scan {
             cursor: tree.seek(start),
             tree,
             end: end.map(<[u8]>::to_vec),
             committed: None,
             writes: self.writes.range::<[u8], _>((start, end)).peekable(),
-            stopped,
+            stopped: None,
         };
         scan.read_committed();
         scan
@@ -359,13 +357,13 @@ impl<F: Fs> Txn<'_, F> {
         let mut wal = self.db.wal();
         if next.has_dirty() || next.meta() != tree.meta() {
             if let Err(e) = append(&mut wal, &mut next) {
-                // The tree is not swapped and the WAL tail stays where it
-                // was, but neither is used again: the engine stops.
+                // Appending only fails writing or syncing, so whatever it
+                // is, the outcome is unknown. The tree is not swapped and
+                // the WAL tail stays where it was, but neither is used
+                // again: the engine stops.
+                let e = Error::OutcomeUnknown(Arc::new(e));
                 self.db.stop(&e);
-                return Err(match e {
-                    Error::Io(e) => Error::OutcomeUnknown(e),
-                    other => other,
-                });
+                return Err(e);
             }
         }
         *tree = Arc::new(next);
@@ -417,8 +415,8 @@ pub struct Scan<'txn> {
     /// with the next write.
     committed: Option<(Vec<u8>, Vec<u8>)>,
     writes: Peekable<btree_map::Range<'txn, Vec<u8>, Option<Vec<u8>>>>,
-    /// The engine stopped before the scan started: the first item reports
-    /// it, and the range is empty.
+    /// The engine stopped before the scan started: the only item reports
+    /// it.
     stopped: Option<Error>,
 }
 
@@ -428,7 +426,22 @@ impl std::fmt::Debug for Scan<'_> {
     }
 }
 
+/// No key, for the scan of a stopped engine.
+static NO_WRITES: BTreeMap<Vec<u8>, Option<Vec<u8>>> = BTreeMap::new();
+
 impl Scan<'_> {
+    /// The scan of a stopped engine: its only item is `e`.
+    fn stopped<'txn>(tree: Arc<Tree>, e: Error) -> Scan<'txn> {
+        Scan {
+            cursor: tree.seek(Bound::Unbounded),
+            tree,
+            end: Bound::Unbounded,
+            committed: None,
+            writes: NO_WRITES.range::<[u8], _>(..).peekable(),
+            stopped: Some(e),
+        }
+    }
+
     /// Reads the next committed entry into `committed`, or `None` past the
     /// end of the range.
     fn read_committed(&mut self) {
@@ -503,26 +516,13 @@ fn check_key(key: &[u8]) -> Result<()> {
 
 /// Commits to `wal` the pages of `tree` changed since the last commit,
 /// with their checksums, and its meta fields, and syncs.
-fn append(wal: &mut Wal<impl FsFile>, tree: &mut Tree) -> Result<()> {
+fn append(wal: &mut Wal<impl FsFile>, tree: &mut Tree) -> std::io::Result<()> {
     let dirty = tree.take_dirty();
     let pages: Vec<(u64, &[u8; PAGE_SIZE])> = dirty
         .iter()
         .map(|&page_no| (page_no, tree.page(page_no).as_bytes()))
         .collect();
     wal.append(&pages, tree.meta())
-}
-
-/// A copy of `e` to keep as the cause of a stop, which every request after
-/// it reports. An [`io::Error`] cannot be cloned, so it is copied by its
-/// kind and message.
-fn copy_of(e: &Error) -> Error {
-    match e {
-        Error::Io(e) | Error::OutcomeUnknown(e) => {
-            Error::Io(io::Error::new(e.kind(), e.to_string()))
-        }
-        Error::Corrupt(reason) => Error::Corrupt(reason.clone()),
-        other => Error::Io(io::Error::other(other.to_string())),
-    }
 }
 
 /// What opening does with the WAL it found.
@@ -754,7 +754,7 @@ mod tests {
             choose_base(other_size, Some(0), true),
             Err(Error::PageSizeMismatch { .. })
         ));
-        let failed_read = Err(Error::Io(std::io::Error::other("read failed")));
+        let failed_read = Err(Error::from(std::io::Error::other("read failed")));
         assert!(matches!(
             choose_base(failed_read, Some(0), true),
             Err(Error::Io(_))

@@ -20,25 +20,30 @@ pub const MAX_ENTRY_LEN: usize = 1006;
 pub const MAX_VALUE_LEN: usize = u32::MAX as usize;
 
 /// Everything that can go wrong in the engine.
-#[derive(Debug)]
+///
+/// It clones cheaply: an I/O error is shared, not copied, so the error
+/// every request reports after the engine stops is the very one the disk
+/// gave, with its kind and OS error code ([`io::Error::raw_os_error`]).
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum Error {
     /// The file system failed: while opening, or in a checkpoint called
-    /// directly ([`crate::Db::checkpoint`], [`crate::Db::close`]). After a
-    /// failed checkpoint the engine stops, as after
-    /// [`Error::OutcomeUnknown`].
-    Io(io::Error),
+    /// directly ([`crate::Db::checkpoint`], [`crate::Db::close`]). A
+    /// checkpoint leaves no commit's outcome in doubt, so it is not
+    /// [`Error::OutcomeUnknown`], but the engine stops after it all the
+    /// same.
+    Io(Arc<io::Error>),
     /// Writing or syncing this commit failed, so whether it is on disk is
     /// unknown: opening the database again shows it either completely or
     /// not at all. The engine stopped (ADR 0007): it does not retry, since
     /// a sync that failed once may say it worked the next time although
     /// the data never reached the disk. Drop the database and open it
     /// again.
-    OutcomeUnknown(io::Error),
+    OutcomeUnknown(Arc<io::Error>),
     /// The engine stopped after the disk failed, and this request did
-    /// nothing. Holds what made it stop. Drop the database and open it
-    /// again: opening replays the WAL, and every acknowledged commit is
-    /// there.
+    /// nothing. Holds the error the failing call got, which made it stop.
+    /// Drop the database and open it again: opening replays the WAL, and
+    /// every acknowledged commit is there.
     Stopped(Arc<Error>),
     /// A key is longer than [`MAX_KEY_LEN`].
     KeyTooLarge {
@@ -104,7 +109,7 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Error::Io(e) | Error::OutcomeUnknown(e) => Some(e),
+            Error::Io(e) | Error::OutcomeUnknown(e) => Some(&**e),
             Error::Stopped(cause) => Some(&**cause),
             _ => None,
         }
@@ -118,6 +123,6 @@ pub(crate) fn corrupt(reason: &str) -> Error {
 
 impl From<io::Error> for Error {
     fn from(e: io::Error) -> Self {
-        Error::Io(e)
+        Error::Io(Arc::new(e))
     }
 }

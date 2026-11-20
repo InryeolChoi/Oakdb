@@ -133,7 +133,9 @@ impl SimFs {
     /// nothing and is not counted. A failed sync makes nothing durable: the
     /// changes it was to save stay unsynced, for a crash to decide or a
     /// later sync to save. The operations after it work again (issue #24).
-    /// If the power is cut at the same operation, the cut wins.
+    /// It fails with EIO, as a disk does. If the power is cut at that
+    /// operation or before, the cut wins and [`SimFs::crash`] drops the
+    /// failure: it does not carry over to the next boot.
     pub fn fail_once_after(&self, ops: u64) {
         self.disk().fail_once_left = Some(ops);
     }
@@ -146,8 +148,9 @@ impl SimFs {
 
     /// Cuts the power now, decides with `seed` what of the unsynced work
     /// reached the disk, and starts again with the power on. Handles opened
-    /// before stop working and their locks are released. Returns what
-    /// happened to each unsynced change.
+    /// before stop working and their locks are released. A
+    /// [`SimFs::fail_after`] or [`SimFs::fail_once_after`] still due is
+    /// dropped. Returns what happened to each unsynced change.
     pub fn crash(&self, seed: u64) -> CrashReport {
         let mut disk = self.disk();
         let mut rng = Rng(seed);
@@ -177,6 +180,7 @@ impl SimFs {
         disk.boot += 1;
         disk.down = false;
         disk.ops_left = None;
+        disk.fail_once_left = None;
         report
     }
 
@@ -312,35 +316,27 @@ impl Disk {
     /// Fails if the power is cut or [`SimFs::fail_once_after`] is due, and
     /// counts one operation that changes the disk.
     fn change(&mut self) -> io::Result<()> {
-        if !self.down && self.ops_left != Some(0) {
-            match self.fail_once_left {
-                Some(0) => {
-                    self.fail_once_left = None;
-                    return Err(io::Error::other("the disk failed"));
-                }
-                // This operation succeeds: nothing below can fail it.
-                Some(ref mut left) => *left -= 1,
-                None => {}
-            }
-        }
         if self.down {
             return Err(power_cut());
         }
-        match self.ops_left {
-            Some(0) => {
-                self.down = true;
-                Err(power_cut())
-            }
-            Some(ref mut left) => {
-                *left -= 1;
-                self.ops += 1;
-                Ok(())
-            }
-            None => {
-                self.ops += 1;
-                Ok(())
-            }
+        // A power cut due at this operation comes before a failure due at
+        // it, which the crash then drops with the rest.
+        if self.ops_left == Some(0) {
+            self.down = true;
+            return Err(power_cut());
         }
+        if self.fail_once_left == Some(0) {
+            self.fail_once_left = None;
+            return Err(disk_failed());
+        }
+        if let Some(left) = &mut self.ops_left {
+            *left -= 1;
+        }
+        if let Some(left) = &mut self.fail_once_left {
+            *left -= 1;
+        }
+        self.ops += 1;
+        Ok(())
     }
 
     fn is_dir(&self, path: &Path) -> bool {
@@ -350,6 +346,12 @@ impl Disk {
 
 fn power_cut() -> io::Error {
     io::Error::other("the power is cut")
+}
+
+/// What [`SimFs::fail_once_after`] fails with: EIO, what a disk reports
+/// for a write or sync it could not do.
+fn disk_failed() -> io::Error {
+    io::Error::from_raw_os_error(libc::EIO)
 }
 
 /// An open file on a [`SimFs`].
