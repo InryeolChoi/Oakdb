@@ -45,7 +45,9 @@ pub(crate) const START: u32 = 0x0AC0_DB10;
 
 const MAGIC: &[u8; 8] = b"oakwal\0\0";
 /// Bytes of the header: magic, checkpoint number, crc.
-pub(crate) const HEADER_LEN: u64 = 20;
+const HEADER: usize = 20;
+/// [`HEADER`] as a file length.
+pub(crate) const HEADER_LEN: u64 = HEADER as u64;
 const CHECKPOINT_AT: usize = 8;
 const HEADER_BODY: usize = CHECKPOINT_AT + 8;
 
@@ -89,8 +91,8 @@ impl Tail {
 
 /// The header of a WAL that follows checkpoint `checkpoint`, and the crc
 /// its first record carries on from.
-pub(crate) fn encode_header(checkpoint: u64) -> ([u8; HEADER_LEN as usize], u32) {
-    let mut header = [0; HEADER_LEN as usize];
+pub(crate) fn encode_header(checkpoint: u64) -> ([u8; HEADER], u32) {
+    let mut header = [0; HEADER];
     header[..CHECKPOINT_AT].copy_from_slice(MAGIC);
     header[CHECKPOINT_AT..HEADER_BODY].copy_from_slice(&checkpoint.to_le_bytes());
     let crc = crc32c::crc32c_append(START, &header[..HEADER_BODY]);
@@ -152,13 +154,9 @@ impl<F: FsFile> Wal<F> {
             self.file.set_len(0)?;
             self.file.sync_data()?;
         }
-        let (header, crc) = encode_header(checkpoint);
-        self.file.write_all_at(&header, 0)?;
+        self.file.write_all_at(&encode_header(checkpoint).0, 0)?;
         self.file.sync_data()?;
-        self.tail = Tail {
-            end: HEADER_LEN,
-            crc,
-        };
+        self.tail = Tail::after_header(checkpoint);
         self.checkpoint = checkpoint;
         self.pages.clear();
         Ok(())
@@ -294,10 +292,14 @@ pub(crate) fn replay(bytes: &[u8]) -> Result<Replayed> {
         meta: None,
         tail: Tail { end: 0, crc: START },
     };
-    let Some(header) = bytes.get(..HEADER_LEN as usize) else {
+    let Some(header) = bytes.get(..HEADER) else {
         return Ok(done);
     };
-    let checkpoint = u64::from_le_bytes(header[CHECKPOINT_AT..HEADER_BODY].try_into().unwrap());
+    let checkpoint = u64::from_le_bytes(
+        header[CHECKPOINT_AT..HEADER_BODY]
+            .try_into()
+            .expect("the field is 8 bytes"),
+    );
     if header != encode_header(checkpoint).0 {
         if bytes.len() as u64 == HEADER_LEN {
             return Ok(done);
@@ -308,7 +310,7 @@ pub(crate) fn replay(bytes: &[u8]) -> Result<Replayed> {
     done.tail = Tail::after_header(checkpoint);
     // Pages of the commit being read, applied once its commit record is.
     let mut pending = Vec::new();
-    let (mut at, mut crc) = (HEADER_LEN as usize, done.tail.crc);
+    let (mut at, mut crc) = (HEADER, done.tail.crc);
     loop {
         let body = match bytes.get(at) {
             Some(&PAGE) => PAGE_BODY,
@@ -379,7 +381,7 @@ mod tests {
 
     #[test]
     fn a_wal_shorter_than_a_header_holds_nothing() {
-        for len in [0, 1, HEADER_LEN as usize - 1] {
+        for len in [0, 1, HEADER - 1] {
             let replayed = replay(&encode_header(3).0[..len]).unwrap();
             assert_eq!(replayed.checkpoint, None, "len {len}");
             assert_eq!(replayed.meta, None);
@@ -393,7 +395,7 @@ mod tests {
         // longer than a header holds no record, whatever its bytes.
         let mut header = encode_header(3).0;
         header[17] ^= 1;
-        for wal in [header, [0; HEADER_LEN as usize]] {
+        for wal in [header, [0; HEADER]] {
             assert_eq!(replay(&wal).unwrap().checkpoint, None);
         }
     }
@@ -409,7 +411,7 @@ mod tests {
     #[test]
     fn a_damaged_header_is_refused() {
         let (wal, ..) = two_commits();
-        for at in [0, 9, HEADER_LEN as usize - 1] {
+        for at in [0, 9, HEADER - 1] {
             let mut damaged = wal.clone();
             damaged[at] ^= 1;
             assert!(
@@ -425,7 +427,7 @@ mod tests {
     #[test]
     fn records_written_after_one_checkpoint_do_not_check_out_after_another() {
         let (mut wal, ..) = two_commits();
-        wal[..HEADER_LEN as usize].copy_from_slice(&encode_header(4).0);
+        wal[..HEADER].copy_from_slice(&encode_header(4).0);
 
         let replayed = replay(&wal).unwrap();
 
@@ -487,14 +489,14 @@ mod tests {
     #[test]
     fn a_commit_out_of_its_place_in_the_chain_is_refused() {
         let (wal, first, _) = two_commits();
-        let header = &wal[..HEADER_LEN as usize];
+        let header = &wal[..HEADER];
         // The second commit alone, as if the first had never been written.
         let mut alone = header.to_vec();
         alone.extend_from_slice(&wal[first..]);
         assert_eq!(replay(&alone).unwrap().meta, None);
         // The first commit written again after itself.
         let mut twice = wal[..first].to_vec();
-        twice.extend_from_slice(&wal[HEADER_LEN as usize..first]);
+        twice.extend_from_slice(&wal[HEADER..first]);
         assert_eq!(replay(&twice).unwrap().tail.end, first as u64);
     }
 

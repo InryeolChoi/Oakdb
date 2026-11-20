@@ -42,7 +42,10 @@ pub(crate) fn run(file: &impl FsFile, wal: &mut Wal<impl FsFile>, tree: &Tree) -
 
 fn write(file: &impl FsFile, wal: &mut Wal<impl FsFile>, tree: &Tree) -> Result<()> {
     let mut page = [0; PAGE_SIZE];
+    // Every page the WAL holds is in the tree: a commit writes only pages
+    // of its tree, and a tree never gives pages back (it frees them).
     for &page_no in wal.pages() {
+        debug_assert!(page_no < tree.meta().page_count, "page {page_no}");
         page.copy_from_slice(tree.page(page_no).as_bytes());
         checksum::seal(page_no, &mut page);
         file.write_all_at(&page, page_offset(page_no))?;

@@ -40,7 +40,9 @@ use crate::wal::{self, Replayed, Wal, CUT_FILE, HEADER_LEN, WAL_FILE};
 /// Name of the data file inside the database directory.
 pub const DATA_FILE: &str = "oakdb.data";
 
-/// A commit that leaves the WAL longer than this many bytes checkpoints.
+/// A commit that leaves the WAL longer than this many bytes checkpoints,
+/// which bounds how much opening replays. A fixed value for now; it may
+/// become a setting of the database.
 pub const CHECKPOINT_AFTER: u64 = 4 * 1024 * 1024;
 
 /// An open database.
@@ -92,27 +94,7 @@ impl<F: Fs> Db<F> {
             0 => Ok(None),
             _ => newest_slot(&file, size).map(Some),
         };
-        let (base, replay) = match (slot, replayed.checkpoint) {
-            (Ok(Some(slot)), Some(after)) if after > slot.checkpoint => {
-                // The slot that knows of checkpoint `after` is damaged, and
-                // the WAL of the one before is gone.
-                return Err(Error::Corrupt(format!(
-                    "WAL follows checkpoint {after}, but the newest meta slot holds checkpoint {}",
-                    slot.checkpoint
-                )));
-            }
-            (Ok(Some(slot)), after) => (Some(slot), after == Some(slot.checkpoint)),
-            (Ok(None), None | Some(0)) => (None, true),
-            (Ok(None), Some(after)) => {
-                return Err(Error::Corrupt(format!(
-                    "WAL follows checkpoint {after}, but the data file is empty"
-                )))
-            }
-            // The first checkpoint was cut short before a meta slot was
-            // written: the WAL holds every commit since creating.
-            (Err(_), Some(0)) if replayed.meta.is_some() => (None, true),
-            (Err(e), _) => return Err(e),
-        };
+        let (base, use_wal) = choose_base(slot, replayed.checkpoint, replayed.meta.is_some())?;
         let checkpoint = base.map_or(0, |slot| slot.checkpoint);
         if let Some(slot) = base {
             if size < page_offset(slot.meta.page_count) {
@@ -124,11 +106,9 @@ impl<F: Fs> Db<F> {
         let Replayed {
             pages, meta, tail, ..
         } = replayed;
-        // A WAL that follows an older checkpoint was moved to the data file
-        // by the newer one; it only has to be emptied.
-        let (pages, meta) = match replay {
-            true => (pages, meta.or(base.map(|slot| slot.meta))),
-            false => (BTreeMap::new(), base.map(|slot| slot.meta)),
+        let (pages, meta) = match use_wal {
+            UseWal::Replay => (pages, meta.or(base.map(|slot| slot.meta))),
+            UseWal::Restart => (BTreeMap::new(), base.map(|slot| slot.meta)),
         };
         let in_wal: BTreeSet<u64> = pages.keys().copied().collect();
         let data_len = if base.is_some() { size } else { 0 };
@@ -145,7 +125,7 @@ impl<F: Fs> Db<F> {
             None => None,
         };
         let mut wal = Wal::new(wal_file, tail, checkpoint, in_wal);
-        if replay && replayed.checkpoint.is_some() {
+        if use_wal == UseWal::Replay {
             // What follows the last whole commit was never acknowledged, or
             // follows a damaged record. Keep it in the cut file, then cut
             // it off, so the next commit goes right after the last whole
@@ -159,7 +139,6 @@ impl<F: Fs> Db<F> {
                 wal.cut_to_tail()?;
             }
         } else {
-            // No header yet, or a WAL the data file already holds.
             wal.start(checkpoint)?;
         }
         let tree = match tree {
@@ -333,6 +312,8 @@ impl<F: Fs> Txn<'_, F> {
                 next.put(key, value);
             }
         }
+        // Taken even for a commit that writes nothing, to see whether the
+        // WAL is due a checkpoint.
         let mut wal = self.db.wal();
         if next.has_dirty() || next.meta() != tree.meta() {
             append(&mut wal, &mut next)?;
@@ -470,6 +451,53 @@ fn append(wal: &mut Wal<impl FsFile>, tree: &mut Tree) -> Result<()> {
     wal.append(&pages, tree.meta())
 }
 
+/// What opening does with the WAL it found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UseWal {
+    /// Replay it over the data file: it follows the checkpoint opening
+    /// builds on.
+    Replay,
+    /// Start it again after that checkpoint: it has no header, or follows
+    /// an older checkpoint, whose commits the data file already holds.
+    Restart,
+}
+
+/// Which meta slot opening builds on, if any, and what it does with the
+/// WAL (design 0011, section 3), given the newest slot that checks out
+/// (`Ok(None)` for an empty data file), the checkpoint the WAL header
+/// names, and whether the WAL holds a whole commit.
+fn choose_base(
+    slot: Result<Option<Slot>>,
+    wal_checkpoint: Option<u64>,
+    wal_has_commit: bool,
+) -> Result<(Option<Slot>, UseWal)> {
+    match (slot, wal_checkpoint) {
+        (Ok(Some(slot)), Some(after)) if after > slot.checkpoint => {
+            // The slot that knows of checkpoint `after` is damaged, and
+            // the WAL of the one before is gone.
+            Err(Error::Corrupt(format!(
+                "WAL follows checkpoint {after}, but the newest meta slot holds checkpoint {}",
+                slot.checkpoint
+            )))
+        }
+        (Ok(Some(slot)), Some(after)) if after == slot.checkpoint => {
+            Ok((Some(slot), UseWal::Replay))
+        }
+        (Ok(Some(slot)), _) => Ok((Some(slot), UseWal::Restart)),
+        (Ok(None), Some(0)) => Ok((None, UseWal::Replay)),
+        (Ok(None), None) => Ok((None, UseWal::Restart)),
+        (Ok(None), Some(after)) => Err(Error::Corrupt(format!(
+            "WAL follows checkpoint {after}, but the data file is empty"
+        ))),
+        // The first checkpoint was cut short before a meta slot was
+        // written whole: the WAL holds every commit since creating. Only
+        // damage is passed over; a read that failed, or a data file of
+        // another page size, is not what such a cut leaves.
+        (Err(Error::Corrupt(_)), Some(0)) if wal_has_commit => Ok((None, UseWal::Replay)),
+        (Err(e), _) => Err(e),
+    }
+}
+
 /// The meta slot with the higher checkpoint of the two that check out, or
 /// the error of slot A if neither does.
 fn newest_slot(file: &impl FsFile, size: u64) -> Result<Slot> {
@@ -573,6 +601,77 @@ mod tests {
                 expected: 4096,
                 found: 8192
             }
+        ));
+    }
+
+    fn slot(checkpoint: u64) -> Slot {
+        Slot {
+            meta: Meta {
+                root_page: 2,
+                page_count: 3,
+                free_head: None,
+                free_count: 0,
+            },
+            checkpoint,
+        }
+    }
+
+    fn damaged() -> Result<Option<Slot>> {
+        Err(Error::Corrupt("page 0 has a wrong checksum".into()))
+    }
+
+    #[test]
+    fn opening_builds_on_the_slot_the_wal_follows() {
+        let base = |slot, wal, commit| choose_base(slot, wal, commit).unwrap();
+        // The WAL follows the newest slot: replay it.
+        assert_eq!(
+            base(Ok(Some(slot(2))), Some(2), true),
+            (Some(slot(2)), UseWal::Replay)
+        );
+        // An older WAL, or none: the slot holds it all.
+        assert_eq!(
+            base(Ok(Some(slot(2))), Some(1), true),
+            (Some(slot(2)), UseWal::Restart)
+        );
+        assert_eq!(
+            base(Ok(Some(slot(2))), None, false),
+            (Some(slot(2)), UseWal::Restart)
+        );
+        // No data file yet.
+        assert_eq!(base(Ok(None), Some(0), true), (None, UseWal::Replay));
+        assert_eq!(base(Ok(None), None, false), (None, UseWal::Restart));
+        // A first checkpoint cut before a slot was written whole.
+        assert_eq!(base(damaged(), Some(0), true), (None, UseWal::Replay));
+    }
+
+    #[test]
+    fn opening_refuses_a_wal_no_slot_it_can_use_explains() {
+        let refused =
+            |slot, wal, commit| matches!(choose_base(slot, wal, commit), Err(Error::Corrupt(_)));
+        // The newest slot is damaged once its WAL is gone.
+        assert!(refused(Ok(Some(slot(1))), Some(2), true));
+        // A WAL after a checkpoint, with no data file.
+        assert!(refused(Ok(None), Some(1), false));
+        // Damaged slots and no WAL that holds everything.
+        assert!(refused(damaged(), Some(0), false));
+        assert!(refused(damaged(), Some(1), true));
+        assert!(refused(damaged(), None, false));
+    }
+
+    #[test]
+    fn only_damaged_slots_are_passed_over_before_the_first_checkpoint() {
+        let other_size = Err(Error::PageSizeMismatch {
+            expected: 4096,
+            found: 8192,
+        });
+        assert!(matches!(
+            choose_base(other_size, Some(0), true),
+            Err(Error::PageSizeMismatch { .. })
+        ));
+        let failed_read = Err(Error::Io(std::io::Error::other("read failed")));
+        assert!(matches!(
+            choose_base(failed_read, Some(0), true),
+            Err(Error::Io(_))
         ));
     }
 
