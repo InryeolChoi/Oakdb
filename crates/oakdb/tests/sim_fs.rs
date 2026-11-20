@@ -337,7 +337,8 @@ fn a_power_cut_comes_first_if_both_are_due() {
     fs.fail_once_after(1);
     file.write_all_at(b"oak", 0).unwrap();
     assert!(file.sync_data().is_err());
-    // The power is cut: every call fails, not just one.
+    // The power is cut: every call fails, reads too, not just one call.
+    assert!(file.size().is_err());
     assert!(file.sync_data().is_err());
     assert!(fs.open(&path).is_err());
 }
