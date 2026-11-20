@@ -65,21 +65,26 @@ WAL_TESTS = ["--lib", "--test", "wal", "--test", "crash", "--test", "sim_fs"]
 
 # Engine bugs of checkpoints and the two meta slots (#23).
 CHECKPOINT_BUGS = [
-    ("C1 checkpoint: no sync before the meta slot", CKPT, "    file.sync_data()?;\n    let next", "    let next"),
+    ("C1 checkpoint: no sync before the meta slot", CKPT, "    file.sync_data()?;\n    let slot = Slot {", "    let slot = Slot {"),
     ("C2 checkpoint: no sync after the meta slot", CKPT, "    file.sync_data()?;\n    wal.start(next)", "    wal.start(next)"),
     ("C3 WAL start: no sync between emptying and the header", WAL, "            self.file.set_len(0)?;\n            self.file.sync_data()?;", "            self.file.set_len(0)?;"),
     ("C4 first checkpoint: one slot only", CKPT, "0..2\n", "0..1\n"),
     ("C5 checkpoint: writes over the newest slot", CKPT, "next % 2..next % 2 + 1", "(next + 1) % 2..(next + 1) % 2 + 1"),
     ("C6 open: always slot A", DB, "(Ok(a), Ok(b)) if b.checkpoint > a.checkpoint => Ok(b),", "(Ok(a), Ok(b)) if false && b.checkpoint > a.checkpoint => Ok(b),"),
-    ("C7 open: a WAL of an older checkpoint replayed", DB, "(Some(slot), after == Some(slot.checkpoint))", "(Some(slot), after.is_some())"),
+    ("C7 open: a WAL of an older checkpoint replayed", DB, "if after == slot.checkpoint => {", "if after <= slot.checkpoint => {"),
     ("C8 open: a WAL newer than every slot not refused", DB, "if after > slot.checkpoint => {", "if false && after > slot.checkpoint => {"),
-    ("C9 open: a first checkpoint cut short not recovered", DB, "(Err(_), Some(0)) if replayed.meta.is_some() =>", "(Err(_), Some(0)) if false =>"),
+    ("C9 open: a first checkpoint cut short not recovered", DB, "(Err(Error::Corrupt(_)), Some(0)) if wal_has_commit =>", "(Err(Error::Corrupt(_)), Some(0)) if false =>"),
     ("C10 replay: header not checked", WAL, "if header != encode_header(checkpoint).0 {", "if false {"),
-    ("C11 replay: chain does not start from the header", WAL, "let (mut at, mut crc) = (HEADER_LEN as usize, done.tail.crc);", "let (mut at, mut crc) = (HEADER_LEN as usize, START);"),
+    ("C11 replay: chain does not start from the header", WAL, "let (mut at, mut crc) = (HEADER, done.tail.crc);", "let (mut at, mut crc) = (HEADER, START);"),
     ("C12 checkpoint: a failure does not stop the engine", CKPT, "        wal.stop();\n", ""),
     ("C13 commit: never checkpoints", DB, "if wal.len() > CHECKPOINT_AFTER {", "if false {"),
-    ("C14 open: data file length not checked", DB, "if size < page_offset(slot.meta.page_count) {", "if false {"),
+    ("C14 open: data file length not checked", DB, "if u128::from(size) < pages_len(slot.meta.page_count) {", "if false {"),
     ("C15 checkpoint: runs with nothing to move", CKPT, "    if !wal.has_commits() {\n        return Ok(());\n    }\n", ""),
+    # After the review of PR #55.
+    ("C16 replay: a wrong header one header long refused (P1)", WAL, "if bytes.len() as u64 == HEADER_LEN {", "if false {"),
+    ("C17 open: any slot error passed over before the first checkpoint (P2)", DB, "(Err(Error::Corrupt(_)), Some(0)) if wal_has_commit =>", "(Err(_), Some(0)) if wal_has_commit =>"),
+    ("C18 open: data file length wraps around (S3)", DB, "u128::from(pages) * PAGE_SIZE as u128", "u128::from(pages.wrapping_mul(PAGE_SIZE as u64))"),
+    ("C19 checkpoint: number wraps around (S3)", CKPT, ".checked_add(1)", ".wrapping_add(1).checked_add(0)"),
 ]
 CHECKPOINT_TESTS = WAL_TESTS + [a for t in ["checkpoint", "checksum", "overflow"] for a in ("--test", t)]
 
