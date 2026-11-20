@@ -320,7 +320,12 @@ fn fail_once_after_fails_the_call_after_that_many_and_only_it() {
     file.read_exact_at(&mut [0; 3], 0).unwrap();
     file.sync_data().unwrap();
 
-    assert!(fs.open(&path).is_err(), "the third call fails");
+    let Err(err) = fs.open(&path) else {
+        panic!("the third call worked");
+    };
+    // The error a disk gives for a failed read or write: EIO, 5 on Linux
+    // and macOS alike.
+    assert_eq!(err.raw_os_error(), Some(5), "the third call fails with EIO");
 
     // It is not counted, and the calls after it work.
     assert_eq!(fs.ops(), ops + 3);
@@ -341,6 +346,23 @@ fn a_power_cut_comes_first_if_both_are_due() {
     assert!(file.size().is_err());
     assert!(file.sync_data().is_err());
     assert!(fs.open(&path).is_err());
+}
+
+#[test]
+fn a_failure_a_power_cut_got_ahead_of_does_not_carry_over_to_the_next_boot() {
+    // Review P4 of PR #57: the cut wins, and the failure is dropped with
+    // the rest of what was due, not saved for the next boot.
+    let (fs, path) = disk();
+    let file = fs.open(&path).unwrap();
+    fs.fail_after(0);
+    fs.fail_once_after(0);
+    assert!(file.write_all_at(b"oak", 0).is_err());
+
+    fs.crash(0);
+
+    let file = fs.open(&path).unwrap();
+    file.write_all_at(b"tree", 0).unwrap();
+    file.sync_data().unwrap();
 }
 
 #[test]

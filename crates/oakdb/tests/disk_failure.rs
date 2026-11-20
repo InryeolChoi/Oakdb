@@ -57,7 +57,7 @@ fn read_all(db: &Db<SimFs>) -> Model {
         .collect()
 }
 
-fn is_stopped<T: std::fmt::Debug>(result: Result<T, Error>) -> bool {
+fn is_stopped<T>(result: Result<T, Error>) -> bool {
     matches!(result, Err(Error::Stopped(_)))
 }
 
@@ -442,5 +442,67 @@ fn a_failure_at_any_disk_operation_of_opening_leaves_a_database_that_opens() {
                 recovers(&fs, crash, &model, &model, &what);
             }
         }
+    }
+}
+
+/// EIO, the error a disk gives for a failed write or sync, and the one the
+/// simulated disk fails with: 5 on Linux and macOS alike.
+const EIO: i32 = 5;
+
+#[test]
+fn every_request_after_a_failed_commit_reports_the_original_error() {
+    // Review S6 and P5 of PR #57: the cause keeps its kind and OS error
+    // code (ENOSPC, EIO), so a caller can tell a full disk from a broken
+    // one, and the source chain reaches it.
+    let fs = SimFs::new();
+    let db = open(&fs);
+    let model = fill(&db, 5);
+    let (txn, _) = writes(&db, &[1], b"new", &model);
+    fs.fail_once_after(1);
+
+    let failed = txn.commit().unwrap_err();
+    let stopped = db.begin().get(b"k").unwrap_err();
+
+    let Error::OutcomeUnknown(io) = &failed else {
+        panic!("expected OutcomeUnknown, got {failed:?}");
+    };
+    assert_eq!(io.raw_os_error(), Some(EIO));
+    let Error::Stopped(cause) = &stopped else {
+        panic!("expected Stopped, got {stopped:?}");
+    };
+    match &**cause {
+        Error::OutcomeUnknown(kept) => {
+            assert_eq!(kept.raw_os_error(), Some(EIO));
+            assert_eq!(kept.kind(), io.kind());
+        }
+        other => panic!("the cause is {other:?}"),
+    }
+    let root = std::error::Error::source(&stopped)
+        .and_then(std::error::Error::source)
+        .expect("Stopped → OutcomeUnknown → io::Error");
+    let root = root.downcast_ref::<std::io::Error>().expect("an io::Error");
+    assert_eq!(root.raw_os_error(), Some(EIO));
+}
+
+#[test]
+fn every_request_after_a_failed_checkpoint_reports_the_original_error() {
+    let fs = SimFs::new();
+    let db = open(&fs);
+    fill(&db, 5);
+    fs.fail_once_after(0);
+
+    let failed = db.checkpoint().unwrap_err();
+    let stopped = db.begin().get(b"k").unwrap_err();
+
+    let Error::Io(io) = &failed else {
+        panic!("expected Io, got {failed:?}");
+    };
+    assert_eq!(io.raw_os_error(), Some(EIO));
+    let Error::Stopped(cause) = &stopped else {
+        panic!("expected Stopped, got {stopped:?}");
+    };
+    match &**cause {
+        Error::Io(kept) => assert_eq!(kept.raw_os_error(), Some(EIO)),
+        other => panic!("the cause is {other:?}"),
     }
 }
