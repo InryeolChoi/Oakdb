@@ -190,10 +190,12 @@ impl<F: Fs> Db<F> {
     /// WAL is longer than [`CHECKPOINT_AFTER`]. Does nothing if the WAL
     /// holds no commit.
     ///
-    /// If it fails, it returns what failed and the engine stops: every
-    /// request after it fails with [`Error::Stopped`] until the database is
-    /// dropped and opened again. Every acknowledged commit is still there
-    /// then.
+    /// If it fails, it returns what failed, usually [`Error::Io`], and the
+    /// engine stops: every request after it fails with [`Error::Stopped`]
+    /// until the database is dropped and opened again. Every acknowledged
+    /// commit is still there then. It is not [`Error::OutcomeUnknown`]: a
+    /// checkpoint changes nothing the database holds, so no commit's
+    /// outcome is in doubt, wherever it stopped.
     pub fn checkpoint(&self) -> Result<()> {
         let tree = self.tree();
         // Checked holding the lock, so a commit that failed while this one
@@ -204,7 +206,8 @@ impl<F: Fs> Db<F> {
 
     /// Checkpoints and closes the database. Every committed transaction is
     /// already durable, so dropping it without closing loses nothing; the
-    /// next open replays the WAL instead.
+    /// next open replays the WAL instead. Fails as [`Db::checkpoint`] does,
+    /// and every commit acknowledged before is kept all the same.
     pub fn close(self) -> Result<()> {
         self.checkpoint()
     }
