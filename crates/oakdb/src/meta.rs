@@ -1,33 +1,36 @@
 //! The meta page: what a data file needs to say about itself.
 //!
-//! Pages 0 and 1 are the two meta slots that checkpoints will alternate
-//! between (ADR 0007). Until then both hold the same content and only slot 0
-//! is read.
+//! Pages 0 and 1 are the two meta slots that checkpoints alternate between
+//! (ADR 0007, design 0011). Each holds the meta fields as of a checkpoint
+//! and that checkpoint's number; opening uses the slot with the higher
+//! number of the two that check out.
 //!
 //! ```text
 //! offset  size  field
 //! 0..4    u32   checksum        CRC-32C, filled in when written (checksum.rs)
 //! 4..12   [u8]  magic           "oakdb\0\0\0"
-//! 12..16  u32   format_version  3
+//! 12..16  u32   format_version  4
 //! 16..20  u32   page_size       4096
 //! 20..28  u64   root_page
 //! 28..36  u64   page_count
 //! 36..44  u64   free_head       first page of the free list, 0 = empty
 //! 44..52  u64   free_count      pages on the free list
+//! 52..60  u64   checkpoint      the checkpoint this slot was written by
 //! ```
 //!
 //! Version 1 files had no free list and could hold pages in no use at all;
-//! version 2 files had no page checksums. Both are refused, by version,
-//! before any checksum is checked; no such file holds anyone's data.
+//! version 2 files had no page checksums; version 3 files had one meta slot
+//! in use and no checkpoint number. All are refused, by version, before any
+//! checksum is checked; no such file holds anyone's data.
 
 use crate::error::{Error, Result};
 use crate::page::PAGE_SIZE;
 
 const MAGIC: &[u8; 8] = b"oakdb\0\0\0";
-const FORMAT_VERSION: u32 = 3;
+const FORMAT_VERSION: u32 = 4;
 
 /// Bytes at the start of the meta page that hold its fields.
-pub(crate) const META_LEN: usize = 52;
+pub(crate) const META_LEN: usize = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Meta {
@@ -37,18 +40,40 @@ pub(crate) struct Meta {
     pub(crate) free_count: u64,
 }
 
-impl Meta {
-    /// Encodes a full meta page.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "checkpoints (#23) write the meta page")
-    )]
+/// What a meta slot holds: the meta fields as of a checkpoint, and its
+/// number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Slot {
+    pub(crate) meta: Meta,
+    pub(crate) checkpoint: u64,
+}
+
+impl Slot {
+    /// Encodes a full meta page, its checksum left for the caller.
     pub(crate) fn encode(&self) -> [u8; PAGE_SIZE] {
         encode_with_page_size(self, PAGE_SIZE as u32)
             .try_into()
             .expect("the meta page is PAGE_SIZE bytes")
     }
 
+    /// Reads the slot from a meta page whose header [`Meta::check_header`]
+    /// has already accepted.
+    pub(crate) fn read(bytes: &[u8]) -> Result<Slot> {
+        Ok(Slot {
+            meta: Meta::read_fields(bytes)?,
+            checkpoint: u64_at(bytes, 52),
+        })
+    }
+
+    /// Checks the header, then reads the slot.
+    #[cfg(test)]
+    pub(crate) fn decode(bytes: &[u8]) -> Result<Slot> {
+        Meta::check_header(bytes)?;
+        Slot::read(bytes)
+    }
+}
+
+impl Meta {
     /// Checks that the first [`META_LEN`] bytes of a file start an Oakdb
     /// data file of this page size and format version.
     ///
@@ -71,13 +96,6 @@ impl Meta {
             return Err(Error::Corrupt(format!("unknown format version {version}")));
         }
         Ok(())
-    }
-
-    /// Checks the header, then reads the meta fields.
-    #[cfg(test)]
-    pub(crate) fn decode(bytes: &[u8]) -> Result<Meta> {
-        Meta::check_header(bytes)?;
-        Meta::read_fields(bytes)
     }
 
     /// Reads the meta fields from the first [`META_LEN`] bytes of the meta
@@ -103,11 +121,8 @@ impl Meta {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "checkpoints (#23) write the meta page")
-)]
-fn encode_with_page_size(meta: &Meta, page_size: u32) -> Vec<u8> {
+fn encode_with_page_size(slot: &Slot, page_size: u32) -> Vec<u8> {
+    let meta = &slot.meta;
     let mut page = vec![0; PAGE_SIZE];
     page[4..12].copy_from_slice(MAGIC);
     page[12..16].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
@@ -116,6 +131,7 @@ fn encode_with_page_size(meta: &Meta, page_size: u32) -> Vec<u8> {
     page[28..36].copy_from_slice(&meta.page_count.to_le_bytes());
     page[36..44].copy_from_slice(&meta.free_head.unwrap_or(0).to_le_bytes());
     page[44..52].copy_from_slice(&meta.free_count.to_le_bytes());
+    page[52..60].copy_from_slice(&slot.checkpoint.to_le_bytes());
     page
 }
 
@@ -129,8 +145,8 @@ fn u64_at(bytes: &[u8], at: usize) -> u64 {
 
 /// A meta page that claims a different page size, for tests elsewhere.
 #[cfg(test)]
-pub(crate) fn encode_for_page_size(meta: &Meta, page_size: u32) -> Vec<u8> {
-    encode_with_page_size(meta, page_size)
+pub(crate) fn encode_for_page_size(slot: &Slot, page_size: u32) -> Vec<u8> {
+    encode_with_page_size(slot, page_size)
 }
 
 #[cfg(test)]
@@ -144,19 +160,35 @@ mod tests {
         free_count: 0,
     };
 
+    fn slot(meta: Meta) -> Slot {
+        Slot {
+            meta,
+            checkpoint: 7,
+        }
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Meta> {
+        Slot::decode(bytes).map(|slot| slot.meta)
+    }
+
     #[test]
-    fn meta_round_trips() {
-        assert_eq!(Meta::decode(&META.encode()).unwrap(), META);
+    fn a_slot_round_trips_with_its_checkpoint() {
+        assert_eq!(Slot::decode(&slot(META).encode()).unwrap(), slot(META));
+    }
+
+    #[test]
+    fn the_checkpoint_is_recorded_at_offset_52() {
+        assert_eq!(&slot(META).encode()[52..60], &7u64.to_le_bytes());
     }
 
     #[test]
     fn the_page_size_is_recorded_at_offset_16() {
-        assert_eq!(&META.encode()[16..20], &4096u32.to_le_bytes());
+        assert_eq!(&slot(META).encode()[16..20], &4096u32.to_le_bytes());
     }
 
     #[test]
     fn a_different_page_size_is_refused() {
-        let err = Meta::decode(&encode_with_page_size(&META, 8192)).unwrap_err();
+        let err = decode(&encode_with_page_size(&slot(META), 8192)).unwrap_err();
 
         assert!(matches!(
             err,
@@ -169,28 +201,30 @@ mod tests {
 
     #[test]
     fn a_missing_magic_is_refused() {
-        let mut bytes = META.encode();
+        let mut bytes = slot(META).encode();
         bytes[4] = b'x';
 
-        assert!(matches!(Meta::decode(&bytes), Err(Error::Corrupt(_))));
+        assert!(matches!(decode(&bytes), Err(Error::Corrupt(_))));
     }
 
     #[test]
     fn an_unknown_version_is_refused() {
-        let mut bytes = META.encode();
-        bytes[12] = 4;
+        let mut bytes = slot(META).encode();
+        bytes[12] = 5;
 
-        assert!(matches!(Meta::decode(&bytes), Err(Error::Corrupt(_))));
+        assert!(matches!(decode(&bytes), Err(Error::Corrupt(_))));
     }
 
     #[test]
-    fn version_1_and_2_files_are_refused() {
-        let mut bytes = META.encode();
+    fn version_1_2_and_3_files_are_refused() {
+        let mut bytes = slot(META).encode();
+        bytes[12] = 3;
+        assert!(matches!(decode(&bytes), Err(Error::Corrupt(_))));
         bytes[12] = 2;
-        assert!(matches!(Meta::decode(&bytes), Err(Error::Corrupt(_))));
+        assert!(matches!(decode(&bytes), Err(Error::Corrupt(_))));
         bytes[12] = 1;
 
-        assert!(matches!(Meta::decode(&bytes), Err(Error::Corrupt(_))));
+        assert!(matches!(decode(&bytes), Err(Error::Corrupt(_))));
     }
 
     #[test]
@@ -201,7 +235,7 @@ mod tests {
         };
 
         assert!(matches!(
-            Meta::decode(&meta.encode()),
+            decode(&slot(meta).encode()),
             Err(Error::Corrupt(_))
         ));
     }
@@ -215,7 +249,7 @@ mod tests {
             free_count: 3,
         };
 
-        assert_eq!(Meta::decode(&meta.encode()).unwrap(), meta);
+        assert_eq!(decode(&slot(meta).encode()).unwrap(), meta);
     }
 
     #[test]
@@ -249,7 +283,7 @@ mod tests {
             },
         ] {
             assert!(
-                matches!(Meta::decode(&meta.encode()), Err(Error::Corrupt(_))),
+                matches!(decode(&slot(meta).encode()), Err(Error::Corrupt(_))),
                 "{meta:?}"
             );
         }

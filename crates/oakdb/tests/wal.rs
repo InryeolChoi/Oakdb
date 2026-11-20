@@ -315,3 +315,30 @@ fn a_commit_that_changes_nothing_writes_nothing() {
 
     assert_eq!(wal_size(&fs), before);
 }
+
+#[test]
+fn a_cut_right_before_the_directory_sync_while_creating_loses_no_later_commit() {
+    // Creating ends with the directory sync that keeps the new files. If
+    // the power goes just before it, the files may or may not be there
+    // after the crash; either way a commit the next open acknowledges
+    // stays.
+    let create_ops = {
+        let fs = SimFs::new();
+        drop(Db::open_with(fs.clone(), dir()).unwrap());
+        fs.ops()
+    };
+    for seed in 0..SEEDS {
+        let fs = SimFs::new();
+        fs.fail_after(create_ops - 1);
+        assert!(Db::open_with(fs.clone(), dir()).is_err());
+        fs.crash(seed);
+
+        let db = Db::open_with(fs.clone(), dir()).unwrap();
+        put(&db, b"oak", b"tree");
+        drop(db);
+        fs.crash(seed + 1);
+
+        let db = Db::open_with(fs.clone(), dir()).unwrap();
+        assert_eq!(get(&db, b"oak"), Some(b"tree".to_vec()), "seed {seed}");
+    }
+}
