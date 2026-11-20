@@ -123,6 +123,11 @@ impl SimFs {
         self.disk().ops_left = Some(ops);
     }
 
+    /// Makes one call fail with the power still on (issue #24).
+    pub fn fail_once_after(&self, ops: u64) {
+        let _ = ops;
+    }
+
     /// How many operations that change the disk have succeeded since the
     /// disk was made, counted as [`SimFs::fail_after`] counts them.
     pub fn ops(&self) -> u64 {

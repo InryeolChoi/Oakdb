@@ -244,6 +244,104 @@ fn reads_do_not_count_towards_fail_after() {
     assert!(file.write_all_at(&[2; PAGE], 0).is_err());
 }
 
+// A disk that fails one call with the power still on (issue #24).
+
+#[test]
+fn a_failed_sync_makes_nothing_durable_and_the_disk_works_after() {
+    let (fs, path) = disk();
+    let file = fs.open(&path).unwrap();
+    file.write_all_at(&[1; PAGE], 0).unwrap();
+    file.sync_data().unwrap();
+    file.write_all_at(&[2; PAGE], 0).unwrap();
+    fs.fail_once_after(0);
+
+    assert!(file.sync_data().is_err());
+
+    // The power is on: reads see the write, and the next call works.
+    assert_eq!(contents(&fs, &path), [2; PAGE]);
+    file.write_all_at(&[3; 10], PAGE as u64).unwrap();
+    // The write the sync failed on is still unsynced, so a crash can lose
+    // it: some seed brings back the page as it was synced.
+    let lost = (0..SEEDS).any(|seed| {
+        let (fs, path) = disk();
+        let file = fs.open(&path).unwrap();
+        file.write_all_at(&[1; PAGE], 0).unwrap();
+        file.sync_data().unwrap();
+        file.write_all_at(&[2; PAGE], 0).unwrap();
+        fs.fail_once_after(0);
+        assert!(file.sync_data().is_err());
+        fs.crash(seed);
+        contents(&fs, &path) == [1; PAGE]
+    });
+    assert!(lost, "a write whose sync failed always survived the crash");
+}
+
+#[test]
+fn a_sync_after_a_failed_one_makes_the_writes_durable() {
+    let (fs, path) = disk();
+    let file = fs.open(&path).unwrap();
+    file.write_all_at(&[2; PAGE], 0).unwrap();
+    fs.fail_once_after(0);
+    assert!(file.sync_data().is_err());
+
+    file.sync_data().unwrap();
+
+    for seed in 0..SEEDS {
+        fs.crash(seed);
+        assert_eq!(contents(&fs, &path), [2; PAGE], "seed {seed}");
+    }
+}
+
+#[test]
+fn a_failed_write_or_length_change_changes_nothing() {
+    let (fs, path) = disk();
+    let file = fs.open(&path).unwrap();
+    file.write_all_at(&[1; PAGE], 0).unwrap();
+    file.sync_data().unwrap();
+
+    fs.fail_once_after(0);
+    assert!(file.write_all_at(&[2; PAGE], 0).is_err());
+    fs.fail_once_after(0);
+    assert!(file.set_len(1).is_err());
+
+    assert_eq!(contents(&fs, &path), [1; PAGE]);
+    let report = fs.crash(0);
+    assert!(report.writes.is_empty() && report.lengths.is_empty());
+}
+
+#[test]
+fn fail_once_after_fails_the_call_after_that_many_and_only_it() {
+    let (fs, path) = disk();
+    let ops = fs.ops();
+    let file = fs.open(&path).unwrap();
+    fs.fail_once_after(2);
+    file.write_all_at(b"oak", 0).unwrap();
+    // Reads do not count.
+    file.read_exact_at(&mut [0; 3], 0).unwrap();
+    file.sync_data().unwrap();
+
+    assert!(fs.open(&path).is_err(), "the third call fails");
+
+    // It is not counted, and the calls after it work.
+    assert_eq!(fs.ops(), ops + 3);
+    fs.sync_dir(&dir()).unwrap();
+    file.write_all_at(b"tree", 0).unwrap();
+    assert_eq!(fs.ops(), ops + 5);
+}
+
+#[test]
+fn a_power_cut_comes_first_if_both_are_due() {
+    let (fs, path) = disk();
+    let file = fs.open(&path).unwrap();
+    fs.fail_after(1);
+    fs.fail_once_after(1);
+    file.write_all_at(b"oak", 0).unwrap();
+    assert!(file.sync_data().is_err());
+    // The power is cut: every call fails, not just one.
+    assert!(file.sync_data().is_err());
+    assert!(fs.open(&path).is_err());
+}
+
 #[test]
 fn ops_counts_what_fail_after_counts() {
     let fs = SimFs::new();
