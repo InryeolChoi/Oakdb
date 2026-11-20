@@ -21,12 +21,18 @@
 //! out, replays the WAL over the data file if the WAL follows that slot's
 //! checkpoint, and cuts off whatever follows the last whole commit so the
 //! next one is appended right there.
+//!
+//! If a write or sync fails once the database is open, the engine stops
+//! (ADR 0007, design 0012): it does not retry, the commit that hit the
+//! failure gets [`Error::OutcomeUnknown`], and every request after it gets
+//! [`Error::Stopped`]. Opening the database again recovers it.
 
 use std::collections::{btree_map, BTreeMap, BTreeSet};
+use std::io;
 use std::iter::{FusedIterator, Peekable};
 use std::ops::{Bound, RangeBounds};
 use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use crate::checkpoint;
 use crate::checksum;
@@ -57,6 +63,10 @@ pub struct Db<F: Fs = StdFs> {
     /// happen one at a time, and swap in a new tree when done. A scan keeps
     /// the tree it started on, so commits never change it under the scan.
     tree: Mutex<Arc<Tree>>,
+    /// Why the engine stopped, once a write or sync failed. Set at most
+    /// once, while holding `tree`, and never cleared: this process does not
+    /// trust the files again (design 0012).
+    stopped: OnceLock<Arc<Error>>,
 }
 
 impl<F: Fs> std::fmt::Debug for Db<F> {
@@ -158,6 +168,7 @@ impl<F: Fs> Db<F> {
             file,
             wal: Mutex::new(wal),
             tree: Mutex::new(Arc::new(tree)),
+            stopped: OnceLock::new(),
         })
     }
 
@@ -180,12 +191,16 @@ impl<F: Fs> Db<F> {
     /// WAL is longer than [`CHECKPOINT_AFTER`]. Does nothing if the WAL
     /// holds no commit.
     ///
-    /// If it fails, the engine stops: every commit and checkpoint after it
-    /// fails too, until the database is opened again. Every commit
-    /// acknowledged before is still there then.
+    /// If it fails, it returns what failed and the engine stops: every
+    /// request after it fails with [`Error::Stopped`] until the database is
+    /// dropped and opened again. Every acknowledged commit is still there
+    /// then.
     pub fn checkpoint(&self) -> Result<()> {
         let tree = self.tree();
-        checkpoint::run(&self.file, &mut self.wal(), &tree)
+        // Checked holding the lock, so a commit that failed while this one
+        // waited for it is seen, and nothing is written after a failure.
+        self.check_running()?;
+        checkpoint::run(&self.file, &mut self.wal(), &tree).inspect_err(|e| self.stop(e))
     }
 
     /// Checkpoints and closes the database. Every committed transaction is
@@ -193,6 +208,20 @@ impl<F: Fs> Db<F> {
     /// next open replays the WAL instead.
     pub fn close(self) -> Result<()> {
         self.checkpoint()
+    }
+
+    /// Fails with [`Error::Stopped`] if the engine stopped.
+    fn check_running(&self) -> Result<()> {
+        match self.stopped.get() {
+            Some(cause) => Err(Error::Stopped(Arc::clone(cause))),
+            None => Ok(()),
+        }
+    }
+
+    /// Stops the engine because of `cause`. Called holding `tree`, so the
+    /// first failure is the one kept.
+    fn stop(&self, cause: &Error) {
+        let _ = self.stopped.set(Arc::new(copy_of(cause)));
     }
 
     fn wal(&self) -> MutexGuard<'_, Wal<F::File>> {
@@ -218,6 +247,7 @@ pub struct Txn<'db, F: Fs = StdFs> {
 impl<F: Fs> Txn<'_, F> {
     /// The value under `key`, including this transaction's own writes.
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        self.db.check_running()?;
         check_key(key)?;
         if let Some(write) = self.writes.get(key) {
             return Ok(write.clone());
@@ -245,12 +275,18 @@ impl<F: Fs> Txn<'_, F> {
     /// past its end is empty.
     ///
     /// The scan reads the tree committed when it starts; commits made while
-    /// it runs do not change what it yields.
+    /// it runs do not change what it yields. If the engine stopped, its
+    /// only item is [`Error::Stopped`].
     pub fn scan<K: AsRef<[u8]>>(&self, range: impl RangeBounds<K>) -> Scan<'_> {
-        let (start, end) = empty_if_backwards(
-            range.start_bound().map(AsRef::as_ref),
-            range.end_bound().map(AsRef::as_ref),
-        );
+        let stopped = self.db.check_running().err();
+        let (start, end) = match stopped {
+            // A range that holds no key.
+            Some(_) => (Bound::Included(&[][..]), Bound::Excluded(&[][..])),
+            None => empty_if_backwards(
+                range.start_bound().map(AsRef::as_ref),
+                range.end_bound().map(AsRef::as_ref),
+            ),
+        };
         let tree = Arc::clone(&self.db.tree());
         let mut scan = Scan {
             cursor: tree.seek(start),
@@ -258,6 +294,7 @@ impl<F: Fs> Txn<'_, F> {
             end: end.map(<[u8]>::to_vec),
             committed: None,
             writes: self.writes.range::<[u8], _>((start, end)).peekable(),
+            stopped,
         };
         scan.read_committed();
         scan
@@ -267,6 +304,7 @@ impl<F: Fs> Txn<'_, F> {
     /// longer than [`crate::MAX_ENTRY_LEN`] minus the key goes to overflow
     /// pages; values can be up to [`MAX_VALUE_LEN`] bytes.
     pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+        self.db.check_running()?;
         check_key(key)?;
         check_value_len(value.len())?;
         self.writes.insert(key.to_vec(), Some(value.to_vec()));
@@ -276,6 +314,7 @@ impl<F: Fs> Txn<'_, F> {
     /// Removes `key` and its value when the transaction commits. Deleting a
     /// key that does not exist is not an error.
     pub fn delete(&mut self, key: &[u8]) -> Result<()> {
+        self.db.check_running()?;
         check_key(key)?;
         self.writes.insert(key.to_vec(), None);
         Ok(())
@@ -288,18 +327,21 @@ impl<F: Fs> Txn<'_, F> {
     /// not fit, whatever order the keys sort in. Leaves the commit empties
     /// leave the tree.
     ///
-    /// If writing or syncing the WAL fails ([`Error::Io`]), the writes are
-    /// not visible now but may already be on disk and reappear after
-    /// reopening: the outcome is unknown. Stopping the engine after such a
-    /// failure comes with #24. A commit that leaves the WAL longer than
+    /// If writing or syncing the WAL fails, it returns
+    /// [`Error::OutcomeUnknown`]: the writes may or may not be on disk, and
+    /// opening the database again shows them completely or not at all. The
+    /// engine stops then: every request after it fails with
+    /// [`Error::Stopped`]. A commit that leaves the WAL longer than
     /// [`CHECKPOINT_AFTER`] checkpoints; if that fails, the commit is
-    /// durable and visible but `Err` is returned, and the engine stops (see
-    /// [`Db::checkpoint`]).
+    /// durable, so it returns `Ok`, and the engine stops.
     pub fn commit(self) -> Result<()> {
         if self.writes.is_empty() {
-            return Ok(());
+            return self.db.check_running();
         }
         let mut tree = self.db.tree();
+        // Checked holding the lock, so a commit that failed while this one
+        // waited for it is seen, and nothing is written after a failure.
+        self.db.check_running()?;
         let mut next = Tree::clone(&tree);
         // Take out every key this transaction writes before putting any
         // back, so space freed by a delete or a shrinking value is there for
@@ -316,11 +358,23 @@ impl<F: Fs> Txn<'_, F> {
         // WAL is due a checkpoint.
         let mut wal = self.db.wal();
         if next.has_dirty() || next.meta() != tree.meta() {
-            append(&mut wal, &mut next)?;
+            if let Err(e) = append(&mut wal, &mut next) {
+                // The tree is not swapped and the WAL tail stays where it
+                // was, but neither is used again: the engine stops.
+                self.db.stop(&e);
+                return Err(match e {
+                    Error::Io(e) => Error::OutcomeUnknown(e),
+                    other => other,
+                });
+            }
         }
         *tree = Arc::new(next);
         if wal.len() > CHECKPOINT_AFTER {
-            checkpoint::run(&self.db.file, &mut wal, &tree)?;
+            if let Err(e) = checkpoint::run(&self.db.file, &mut wal, &tree) {
+                // The commit is in the WAL and synced: it stays, whatever
+                // the checkpoint did. The next request reports the stop.
+                self.db.stop(&e);
+            }
         }
         Ok(())
     }
@@ -363,6 +417,9 @@ pub struct Scan<'txn> {
     /// with the next write.
     committed: Option<(Vec<u8>, Vec<u8>)>,
     writes: Peekable<btree_map::Range<'txn, Vec<u8>, Option<Vec<u8>>>>,
+    /// The engine stopped before the scan started: the first item reports
+    /// it, and the range is empty.
+    stopped: Option<Error>,
 }
 
 impl std::fmt::Debug for Scan<'_> {
@@ -388,11 +445,15 @@ impl Scan<'_> {
 impl FusedIterator for Scan<'_> {}
 
 impl Iterator for Scan<'_> {
-    /// Always `Ok` while every page is in memory. Reading pages from disk
-    /// on demand will make `Err` possible.
+    /// `Err` only as the first item, if the engine stopped: every page is
+    /// in memory. Reading pages from disk on demand will make other errors
+    /// possible.
     type Item = Result<(Vec<u8>, Vec<u8>)>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if let Some(e) = self.stopped.take() {
+            return Some(Err(e));
+        }
         loop {
             let write_first = match (&self.committed, self.writes.peek()) {
                 (None, None) => return None,
@@ -449,6 +510,19 @@ fn append(wal: &mut Wal<impl FsFile>, tree: &mut Tree) -> Result<()> {
         .map(|&page_no| (page_no, tree.page(page_no).as_bytes()))
         .collect();
     wal.append(&pages, tree.meta())
+}
+
+/// A copy of `e` to keep as the cause of a stop, which every request after
+/// it reports. An [`io::Error`] cannot be cloned, so it is copied by its
+/// kind and message.
+fn copy_of(e: &Error) -> Error {
+    match e {
+        Error::Io(e) | Error::OutcomeUnknown(e) => {
+            Error::Io(io::Error::new(e.kind(), e.to_string()))
+        }
+        Error::Corrupt(reason) => Error::Corrupt(reason.clone()),
+        other => Error::Io(io::Error::other(other.to_string())),
+    }
 }
 
 /// What opening does with the WAL it found.

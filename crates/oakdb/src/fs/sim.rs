@@ -10,7 +10,8 @@
 //!
 //! [`SimFs::fail_after`] cuts the power part way through the engine's work:
 //! after a given number of operations that change the disk, every call
-//! fails until the next crash.
+//! fails until the next crash. [`SimFs::fail_once_after`] makes one such
+//! call fail with the power still on, as a disk that reports an error does.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -42,6 +43,9 @@ struct Disk {
     ops_left: Option<u64>,
     /// Operations that changed the disk so far, across crashes.
     ops: u64,
+    /// Operations that change the disk left before one fails with the
+    /// power on.
+    fail_once_left: Option<u64>,
     /// Directories. They are always durable: [`Fs::create_dir_all`] syncs
     /// them, and nothing else makes one.
     dirs: BTreeSet<PathBuf>,
@@ -123,9 +127,15 @@ impl SimFs {
         self.disk().ops_left = Some(ops);
     }
 
-    /// Makes one call fail with the power still on (issue #24).
+    /// Makes one operation that changes the disk fail with the power still
+    /// on, after `ops` more of them succeed, counted as
+    /// [`SimFs::fail_after`] counts them. The failing operation changes
+    /// nothing and is not counted. A failed sync makes nothing durable: the
+    /// changes it was to save stay unsynced, for a crash to decide or a
+    /// later sync to save. The operations after it work again (issue #24).
+    /// If the power is cut at the same operation, the cut wins.
     pub fn fail_once_after(&self, ops: u64) {
-        let _ = ops;
+        self.disk().fail_once_left = Some(ops);
     }
 
     /// How many operations that change the disk have succeeded since the
@@ -299,9 +309,20 @@ fn is_root(path: &Path) -> bool {
 }
 
 impl Disk {
-    /// Fails if the power is cut, and counts one operation that changes
-    /// the disk.
+    /// Fails if the power is cut or [`SimFs::fail_once_after`] is due, and
+    /// counts one operation that changes the disk.
     fn change(&mut self) -> io::Result<()> {
+        if !self.down && self.ops_left != Some(0) {
+            match self.fail_once_left {
+                Some(0) => {
+                    self.fail_once_left = None;
+                    return Err(io::Error::other("the disk failed"));
+                }
+                // This operation succeeds: nothing below can fail it.
+                Some(ref mut left) => *left -= 1,
+                None => {}
+            }
+        }
         if self.down {
             return Err(power_cut());
         }

@@ -376,6 +376,9 @@ fn a_commit_whose_checkpoint_fails_is_kept_and_stops_the_engine() {
     }
 }
 
+/// Makes a database on an empty disk and returns what it holds.
+type Setup = fn(&SimFs) -> Model;
+
 /// A database whose WAL ends in bytes that are not a whole commit, which
 /// opening keeps in the cut file and cuts off.
 fn with_garbage_after_the_tail(fs: &SimFs) -> Model {
@@ -410,7 +413,7 @@ fn with_a_stale_wal(fs: &SimFs) -> Model {
 
 #[test]
 fn a_failure_at_any_disk_operation_of_opening_leaves_a_database_that_opens() {
-    let setups: [(&str, fn(&SimFs) -> Model); 3] = [
+    let setups: [(&str, Setup); 3] = [
         ("creating", |_| Model::new()),
         ("cutting off the tail", with_garbage_after_the_tail),
         ("starting a stale WAL again", with_a_stale_wal),
