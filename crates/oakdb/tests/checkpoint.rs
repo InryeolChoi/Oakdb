@@ -568,3 +568,75 @@ fn only_damage_lets_a_cut_first_checkpoint_pass_over_the_data_file() {
         "{err:?}"
     );
 }
+
+// Numbers read from disk that arithmetic must not overflow on (review S3).
+
+/// Rewrites meta slot `slot` with `change` applied to its bytes, and its
+/// checksum filled in again, as a slot written with those values would be.
+fn rewrite_slot(fs: &SimFs, slot: u64, change: impl Fn(&mut [u8])) {
+    let file = fs.open(&dir().join(DATA_FILE)).unwrap();
+    let mut page = vec![0; PAGE as usize];
+    file.read_exact_at(&mut page, slot * PAGE).unwrap();
+    change(&mut page);
+    let crc = crc32c::crc32c_append(crc32c::crc32c(&page[4..]), &slot.to_le_bytes());
+    page[..4].copy_from_slice(&crc.to_le_bytes());
+    file.write_all_at(&page, slot * PAGE).unwrap();
+    file.sync_data().unwrap();
+}
+
+/// The header of a WAL that follows `checkpoint`.
+fn wal_header(checkpoint: u64) -> Vec<u8> {
+    let mut header = b"oakwal\0\0".to_vec();
+    header.extend_from_slice(&checkpoint.to_le_bytes());
+    let crc = crc32c::crc32c_append(0x0AC0_DB10, &header);
+    header.extend_from_slice(&crc.to_le_bytes());
+    header
+}
+
+#[test]
+fn a_meta_slot_with_more_pages_than_any_file_holds_is_refused() {
+    // page_count × 4096 does not fit in a u64: the check that the data file
+    // is long enough must still refuse it, not panic or wrap around.
+    for page_count in [u64::MAX, u64::MAX / 4096 + 1, (1 << 52) + 3] {
+        let fs = SimFs::new();
+        let db = Db::open_with(fs.clone(), dir()).unwrap();
+        fill(&db, 10);
+        db.close().unwrap();
+        for slot in [0, 1] {
+            rewrite_slot(&fs, slot, |page| {
+                page[28..36].copy_from_slice(&page_count.to_le_bytes())
+            });
+        }
+
+        match Db::open_with(fs.clone(), dir()) {
+            Err(Error::Corrupt(reason)) => assert!(reason.contains("shorter"), "{reason}"),
+            other => panic!("page count {page_count}: expected Corrupt, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_checkpoint_number_that_cannot_grow_stops_the_checkpoint_not_the_data() {
+    // The next checkpoint number must not wrap around to 0: a slot of
+    // checkpoint 0 would lose to the other one, and opening would drop the
+    // WAL as older than it, with every commit in it.
+    let fs = SimFs::new();
+    let db = Db::open_with(fs.clone(), dir()).unwrap();
+    let mut model = fill(&db, 10);
+    db.close().unwrap();
+    for slot in [0, 1] {
+        rewrite_slot(&fs, slot, |page| {
+            page[52..60].copy_from_slice(&u64::MAX.to_le_bytes())
+        });
+    }
+    overwrite(&fs, WAL_FILE, &wal_header(u64::MAX));
+    let db = Db::open_with(fs.clone(), dir()).unwrap();
+    put(&db, &77u32.to_be_bytes(), b"acknowledged");
+    model.insert(77, b"acknowledged".to_vec());
+
+    assert!(db.checkpoint().is_err());
+    drop(db);
+
+    let db = Db::open_with(fs.clone(), dir()).unwrap();
+    assert_holds(&db, &model, "after reopening");
+}
