@@ -2,7 +2,7 @@
 //! of use go on a free list that later writes take from before the file
 //! grows (#18).
 
-use oakdb::{Db, DATA_FILE, MAX_ENTRY_LEN, MAX_KEY_LEN};
+use oakdb::{Db, DATA_FILE, MAX_ENTRY_LEN, MAX_KEY_LEN, WAL_FILE};
 
 /// Value bytes one overflow page holds: a 4 KB page minus its header.
 const PER_PAGE: usize = 4096 - 40;
@@ -139,17 +139,31 @@ fn freed_pages_are_still_free_after_reopening() {
 /// value's old page images stay in the WAL, so this waits for #23, which
 /// empties the WAL.
 #[test]
-#[ignore = "the data file is written by checkpoints (#23)"]
 fn a_freed_page_keeps_nothing_of_the_value_it_held() {
-    let root = tempfile::tempdir().unwrap();
-    let db = Db::open(root.path()).unwrap();
-    let secret: Vec<u8> = b"oak-secret-".repeat(1000);
-    put(&db, b"k", &secret);
+    // With a checkpoint between the put and the delete too, so the value
+    // reaches the data file before it is deleted.
+    for checkpoint_between in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let db = Db::open(root.path()).unwrap();
+        let secret: Vec<u8> = b"oak-secret-".repeat(1000);
+        put(&db, b"k", &secret);
+        if checkpoint_between {
+            db.checkpoint().unwrap();
+        }
 
-    delete(&db, b"k");
+        delete(&db, b"k");
+        // The WAL keeps every image it was given until a checkpoint
+        // empties it; closing checkpoints.
+        db.close().unwrap();
 
-    let file = std::fs::read(root.path().join(DATA_FILE)).unwrap();
-    assert!(!file.windows(11).any(|w| w == b"oak-secret-"));
+        for name in [DATA_FILE, WAL_FILE] {
+            let file = std::fs::read(root.path().join(name)).unwrap();
+            assert!(
+                !file.windows(11).any(|w| w == b"oak-secret-"),
+                "{name}, checkpoint between: {checkpoint_between}"
+            );
+        }
+    }
 }
 
 #[test]

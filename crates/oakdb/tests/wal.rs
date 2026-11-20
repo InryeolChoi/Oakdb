@@ -197,9 +197,12 @@ fn a_power_cut_while_creating_leaves_a_database_that_opens() {
 /// Where opening keeps what it cuts off the WAL.
 const CUT_FILE: &str = "oakdb.wal.cut";
 
-/// The bytes a new database's first commit takes: one page record for its
-/// empty leaf and a commit record.
-const CREATE_LEN: u64 = 4109 + 37;
+/// The bytes a new WAL starts with: magic, checkpoint number, crc (#23).
+const HEADER_LEN: u64 = 20;
+
+/// The bytes a new database's WAL takes: its header, then the first
+/// commit, one page record for its empty leaf and a commit record.
+const CREATE_LEN: u64 = HEADER_LEN + 4109 + 37;
 
 fn contents(fs: &SimFs, path: &Path) -> Vec<u8> {
     let file = fs.open(path).unwrap();
@@ -256,7 +259,7 @@ fn a_wal_longer_than_a_new_database_with_no_whole_commit_is_refused() {
     put(&db, b"b", b"2");
     drop(db);
     // The first record damaged: no commit checks out any more.
-    scribble(&fs, 20, &[0xFF]);
+    scribble(&fs, HEADER_LEN, &[0xFF]);
     let before = contents(&fs, &dir().join(WAL_FILE));
 
     let err = Db::open_with(fs.clone(), dir()).unwrap_err();
@@ -284,8 +287,11 @@ fn a_data_file_that_is_refused_leaves_the_wal_as_it_was() {
     let fs = SimFs::new();
     let db = Db::open_with(fs.clone(), dir()).unwrap();
     put(&db, b"a", b"1");
+    db.checkpoint().unwrap();
+    put(&db, b"b", b"2");
     drop(db);
     scribble(&fs, wal_size(&fs), &[0xAB; 100]);
+    // Both meta slots: the WAL follows a checkpoint no slot holds.
     let data = fs.open(&dir().join(DATA_FILE)).unwrap();
     data.write_all_at(&[0xCD; 8192], 0).unwrap();
     data.sync_data().unwrap();
