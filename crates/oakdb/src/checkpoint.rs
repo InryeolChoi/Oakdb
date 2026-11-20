@@ -17,7 +17,7 @@
 
 use crate::checksum;
 use crate::db::page_offset;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::fs::FsFile;
 use crate::meta::Slot;
 use crate::page::PAGE_SIZE;
@@ -41,6 +41,13 @@ pub(crate) fn run(file: &impl FsFile, wal: &mut Wal<impl FsFile>, tree: &Tree) -
 }
 
 fn write(file: &impl FsFile, wal: &mut Wal<impl FsFile>, tree: &Tree) -> Result<()> {
+    // Before anything is written. A number that cannot grow must not wrap
+    // around to 0: a slot of 0 loses to the other slot, and opening would
+    // drop this WAL as older, with every commit in it.
+    let next = wal
+        .checkpoint()
+        .checked_add(1)
+        .ok_or_else(|| Error::Corrupt("checkpoint number cannot grow".into()))?;
     let mut page = [0; PAGE_SIZE];
     // Every page the WAL holds is in the tree: a commit writes only pages
     // of its tree, and a tree never gives pages back (it frees them).
@@ -51,7 +58,6 @@ fn write(file: &impl FsFile, wal: &mut Wal<impl FsFile>, tree: &Tree) -> Result<
         file.write_all_at(&page, page_offset(page_no))?;
     }
     file.sync_data()?;
-    let next = wal.checkpoint() + 1;
     let slot = Slot {
         meta: tree.meta(),
         checkpoint: next,

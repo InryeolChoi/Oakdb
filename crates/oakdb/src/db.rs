@@ -97,7 +97,7 @@ impl<F: Fs> Db<F> {
         let (base, use_wal) = choose_base(slot, replayed.checkpoint, replayed.meta.is_some())?;
         let checkpoint = base.map_or(0, |slot| slot.checkpoint);
         if let Some(slot) = base {
-            if size < page_offset(slot.meta.page_count) {
+            if u128::from(size) < pages_len(slot.meta.page_count) {
                 return Err(Error::Corrupt(
                     "data file is shorter than its meta page says".into(),
                 ));
@@ -520,7 +520,7 @@ fn read_slot(file: &impl FsFile, size: u64, page_no: u64) -> Result<Slot> {
     // Magic, page size and version first: they say how long a page is
     // and whether it has a checksum at all.
     Meta::check_header(&header)?;
-    if size < page_offset(page_no + 1) {
+    if u128::from(size) < pages_len(page_no + 1) {
         return Err(Error::Corrupt("data file is too short".into()));
     }
     Slot::read(&read_page(file, page_no)?)
@@ -540,7 +540,7 @@ fn load(
                 checksum::verify(page_no, &*image)?;
                 image
             }
-            None if page_offset(page_no + 1) <= data_len => read_page(file, page_no)?,
+            None if pages_len(page_no + 1) <= u128::from(data_len) => read_page(file, page_no)?,
             None => {
                 return Err(Error::Corrupt(format!(
                     "page {page_no} is in neither the WAL nor the data file"
@@ -568,8 +568,20 @@ fn read_page(file: &impl FsFile, page_no: u64) -> Result<Box<[u8]>> {
     Ok(buf)
 }
 
+/// Where page `page_no` starts in the data file. Only for pages known to
+/// be in the database (a meta slot, or a page of a tree that was checked):
+/// a page number read from disk goes through [`pages_len`] first.
 pub(crate) fn page_offset(page_no: u64) -> u64 {
-    page_no * PAGE_SIZE as u64
+    page_no
+        .checked_mul(PAGE_SIZE as u64)
+        .expect("a page of the database is inside a file")
+}
+
+/// How many bytes `pages` pages take. In `u128`, where any page count read
+/// from disk fits, so a damaged one is refused by comparing lengths
+/// instead of wrapping around or panicking (review S3).
+fn pages_len(pages: u64) -> u128 {
+    u128::from(pages) * PAGE_SIZE as u128
 }
 
 #[cfg(test)]
