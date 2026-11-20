@@ -31,13 +31,14 @@ struct Shortest {
 }
 
 /// The verdict, and for a failed open, when the power went: while
-/// creating the database or during a commit.
+/// creating the database, during a commit, or in the checkpoint after
+/// one (only a checkpoint runs between commits).
 fn label(run: &Run) -> &'static str {
-    let creating = run.cut_commit.is_none() && run.acked_commits == 0;
     match run.verdict {
         Verdict::Intact { .. } => "intact",
-        Verdict::OpenFailed(_) if creating => "open failed (cut while creating)",
-        Verdict::OpenFailed(_) => "open failed (cut in a commit)",
+        Verdict::OpenFailed(_) if run.cut_commit.is_some() => "open failed (cut in a commit)",
+        Verdict::OpenFailed(_) if run.acked_commits == 0 => "open failed (cut while creating)",
+        Verdict::OpenFailed(_) => "open failed (cut in a checkpoint)",
         Verdict::ReadFailed(_) => "read failed",
         Verdict::Panicked(_) => "panicked on reopening",
         Verdict::LostAcknowledged(_) => "lost an acknowledged commit",
@@ -57,6 +58,7 @@ fn landing(landing: &Landing) -> String {
             format!("torn, sectors {sectors}")
         }
         Landing::LengthOnly { zeros_from } => format!("length only, zeros from byte {zeros_from}"),
+        other => format!("{other:?}"),
     }
 }
 

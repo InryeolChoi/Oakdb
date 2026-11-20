@@ -446,25 +446,39 @@ fn a_power_cut_anywhere_in_a_checkpoint_keeps_every_commit() {
 /// a length and zeros comes one crash in twelve or so, so many seeds.
 const START_SEEDS: u64 = 64;
 
+/// The operations that end a checkpoint by starting the WAL again
+/// (`Wal::start`): empty it, sync, write the header, sync. The tests below
+/// check that cutting there does leave a header of zeros, so they notice
+/// if a change to the checkpoint moves these operations.
+const WAL_START_OPS: u64 = 4;
+
+/// How many operations a checkpoint of what `setup` commits takes.
+fn checkpoint_ops(setup: impl Fn(&Db<SimFs>)) -> u64 {
+    let fs = SimFs::new();
+    let db = Db::open_with(fs.clone(), dir()).unwrap();
+    setup(&db);
+    let start = fs.ops();
+    db.checkpoint().unwrap();
+    fs.ops() - start
+}
+
+/// Whether the WAL is one header long and all zeros.
+fn wal_is_a_header_of_zeros(fs: &SimFs) -> bool {
+    contents(fs, WAL_FILE) == [0; WAL_HEADER as usize]
+}
+
 #[test]
 fn a_power_cut_while_the_wal_starts_again_keeps_every_commit() {
     // Issue #56. A checkpoint ends by emptying the WAL, syncing, writing
     // the header and syncing. The header is written past the end of the
     // emptied file, so a crash can land its length alone: 20 bytes of
-    // zeros (review P1 of PR #55). Without the sync after emptying
-    // (mutant C3), the emptying can be lost while those zeros land over
-    // the first bytes of the old WAL, which then looks damaged.
+    // zeros (review P1 of PR #55), which opening must take for no header.
     for before in [0, 2] {
-        let ops = {
-            let fs = SimFs::new();
-            let db = Db::open_with(fs.clone(), dir()).unwrap();
-            history(&db, before);
-            let start = fs.ops();
-            db.checkpoint().unwrap();
-            fs.ops() - start
-        };
-        // Starting the WAL again is the last four operations.
-        for cut in ops - 4..=ops {
+        let ops = checkpoint_ops(|db| {
+            history(db, before);
+        });
+        let mut zeros = 0;
+        for cut in ops - WAL_START_OPS..=ops {
             for seed in 0..START_SEEDS {
                 let fs = SimFs::new();
                 let db = Db::open_with(fs.clone(), dir()).unwrap();
@@ -475,11 +489,13 @@ fn a_power_cut_while_the_wal_starts_again_keeps_every_commit() {
 
                 fs.crash(seed);
 
+                zeros += u32::from(wal_is_a_header_of_zeros(&fs));
                 let what = format!("{before} checkpoints before, cut {cut}, seed {seed}");
                 let db = Db::open_with(fs.clone(), dir()).unwrap_or_else(|e| panic!("{what}: {e}"));
                 assert_holds(&db, &model, &what);
             }
         }
+        assert!(zeros > 0, "{before} checkpoints before: no header of zeros");
     }
 }
 
@@ -487,29 +503,22 @@ fn a_power_cut_while_the_wal_starts_again_keeps_every_commit() {
 fn a_cut_while_writing_the_wal_header_can_leave_its_length_and_zeros() {
     // The case review P1 found by reading the code, now made by a crash:
     // the WAL is one header long and all zeros, and the database opens.
-    let ops = {
-        let fs = SimFs::new();
-        let db = Db::open_with(fs.clone(), dir()).unwrap();
-        fill(&db, 30);
-        let start = fs.ops();
-        db.checkpoint().unwrap();
-        fs.ops() - start
-    };
+    let ops = checkpoint_ops(|db| {
+        fill(db, 30);
+    });
     let mut zeros = 0;
     for seed in 0..START_SEEDS {
         let fs = SimFs::new();
         let db = Db::open_with(fs.clone(), dir()).unwrap();
         let model = fill(&db, 30);
-        // The power goes at the sync after the header is written.
+        // The power goes at the sync after the header, the last operation.
         fs.fail_after(ops - 1);
         assert!(db.checkpoint().is_err());
         drop(db);
 
         fs.crash(seed);
 
-        if contents(&fs, WAL_FILE) == [0; WAL_HEADER as usize] {
-            zeros += 1;
-        }
+        zeros += u32::from(wal_is_a_header_of_zeros(&fs));
         let db = Db::open_with(fs.clone(), dir()).unwrap_or_else(|e| panic!("seed {seed}: {e}"));
         assert_holds(&db, &model, &format!("seed {seed}"));
     }

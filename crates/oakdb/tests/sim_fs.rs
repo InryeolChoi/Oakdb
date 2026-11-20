@@ -307,6 +307,7 @@ fn a_crash_reports_what_became_of_each_unsynced_change() {
             Landing::Kept => assert!(landed.iter().all(|&l| l), "seed {seed}"),
             Landing::Torn { sectors } => assert_eq!(sectors, &landed, "seed {seed}"),
             Landing::LengthOnly { .. } => panic!("seed {seed}: the write was inside the file"),
+            other => panic!("seed {seed}: {other:?}"),
         }
         let [LengthFate {
             path: resized,
@@ -335,6 +336,7 @@ fn kind(landing: &Landing) -> &'static str {
         Landing::Kept => "kept",
         Landing::Torn { .. } => "torn",
         Landing::LengthOnly { .. } => "length only",
+        _ => "unknown",
     }
 }
 
@@ -366,6 +368,7 @@ fn a_write_past_the_end_can_land_as_its_length_alone_with_zeros() {
                 assert_eq!(*zeros_from, 0, "seed {seed}");
                 assert_eq!(after, [0; PAGE], "seed {seed}");
             }
+            other => panic!("seed {seed}: {other:?}"),
         }
         seen.insert(kind(landing));
     }
@@ -425,12 +428,13 @@ fn a_write_beyond_the_end_reads_as_zeros_from_its_offset() {
 }
 
 #[test]
-fn the_end_that_counts_is_the_one_when_the_write_was_made() {
-    // A page of ones, emptied without a sync, then a short write at 0:
-    // past the end when made. If the emptying is lost and the write lands
-    // its length alone, its bytes read as zeros over the old ones. This is
-    // how a WAL header can land on top of an old WAL (mutant C3).
-    let mut zeros_over_old = 0;
+fn zeros_never_cover_bytes_the_disk_still_holds() {
+    // A page of ones, emptied without a sync, then a short write at 0. A
+    // file system journals the emptying before the growth, so the write's
+    // length alone lands only on an emptied file: then it is 20 zeros. If
+    // the emptying is lost, the write is inside the file on the disk, and
+    // the old bytes are never zeroed.
+    let mut zeros = 0;
     for seed in 0..SEEDS {
         let (fs, path) = disk();
         let file = fs.open(&path).unwrap();
@@ -442,27 +446,28 @@ fn the_end_that_counts_is_the_one_when_the_write_was_made() {
 
         let report = fs.crash(seed);
         let after = contents(&fs, &path);
-        let emptied = report.lengths[0].landed;
-        match report.writes[0].landing {
-            Landing::LengthOnly { zeros_from } if !emptied => {
-                zeros_over_old += 1;
-                assert_eq!(zeros_from, 0, "seed {seed}");
-                assert_eq!(after.len(), PAGE, "seed {seed}");
-                assert_eq!(after[..20], [0; 20], "seed {seed}");
-                assert_eq!(after[20..], [1; PAGE - 20], "seed {seed}");
+        let length_only = matches!(report.writes[0].landing, Landing::LengthOnly { .. });
+        if report.lengths[0].landed {
+            if length_only {
+                zeros += 1;
+                assert_eq!(after, [0; 20], "seed {seed}");
             }
-            Landing::LengthOnly { .. } => assert_eq!(after, [0; 20], "seed {seed}"),
-            _ => {}
+        } else {
+            assert!(!length_only, "seed {seed}: zeros over the old page");
+            assert_eq!(after.len(), PAGE, "seed {seed}");
+            assert_eq!(after[20..], [1; PAGE - 20], "seed {seed}");
+            assert!(!after[..20].contains(&0), "seed {seed}");
         }
     }
-    assert!(zeros_over_old > 0);
+    assert!(zeros > 0);
 }
 
 #[test]
-fn a_write_into_space_set_len_grew_is_inside_the_file() {
-    // Growing a file with set_len already leaves zeros, and lands or not.
-    // A write into the grown part was inside the file when made, so it
-    // never lands as its length alone.
+fn a_write_into_grown_space_is_inside_the_file_once_the_growth_landed() {
+    // Growing a file with set_len leaves zeros, and lands or not. A write
+    // into the grown part lands its length alone only if the growth was
+    // lost, when it is past the end on the disk after all.
+    let mut length_only_without_growth = 0;
     for seed in 0..SEEDS {
         let (fs, path) = disk();
         let file = fs.open(&path).unwrap();
@@ -471,12 +476,15 @@ fn a_write_into_space_set_len_grew_is_inside_the_file() {
         drop(file);
 
         let report = fs.crash(seed);
-        assert_ne!(
-            kind(&report.writes[0].landing),
-            "length only",
-            "seed {seed}"
-        );
+        let length_only = matches!(report.writes[0].landing, Landing::LengthOnly { .. });
+        if report.lengths[0].landed {
+            assert!(!length_only, "seed {seed}");
+        } else if length_only {
+            length_only_without_growth += 1;
+            assert_eq!(contents(&fs, &path), [0; PAGE], "seed {seed}");
+        }
     }
+    assert!(length_only_without_growth > 0);
 }
 
 // The engine on the simulated disk.
