@@ -12,9 +12,13 @@
 //! Every page goes to the file with its checksum filled in, and every page
 //! read back is checked against it (`checksum.rs`).
 //!
-//! A commit writes the pages it changed straight into the data file and
-//! syncs them. If it added pages, it then writes the meta page and syncs
-//! again. The WAL (ADR 0007) will replace that later.
+//! A commit appends an image of every page it changed and a commit record
+//! with the new meta fields to the WAL (`wal.rs`, ADR 0007) and syncs it
+//! once before it answers. Creating a database is its first commit. The
+//! data file is only written by checkpoints (#23), so until then it stays
+//! empty and the WAL holds the whole database: opening reads the data file
+//! if it has anything, replays the WAL over it, and cuts off whatever
+//! follows the last whole commit so the next one is appended right there.
 
 use std::collections::{btree_map, BTreeMap};
 use std::iter::{FusedIterator, Peekable};
@@ -28,13 +32,20 @@ use crate::fs::{Fs, FsFile, StdFs};
 use crate::meta::{Meta, META_LEN};
 use crate::page::{Page, Value, PAGE_SIZE};
 use crate::tree::{Cursor, Tree};
+use crate::wal::{self, Replayed, Tail, Wal, CUT_FILE, WAL_FILE};
 
 /// Name of the data file inside the database directory.
 pub const DATA_FILE: &str = "oakdb.data";
 
 /// An open database.
 pub struct Db<F: Fs = StdFs> {
+    /// The data file, held open for its lock. Checkpoints (#23) write it.
+    #[expect(dead_code, reason = "held for its lock until checkpoints (#23)")]
     file: F::File,
+    /// Where commits go. Only taken while holding `tree` for now; a lock of
+    /// its own so the commit thread (ADR 0006, #27) can later write the
+    /// WAL while readers take the tree.
+    wal: Mutex<Wal<F::File>>,
     /// The committed tree. Commits hold the lock while they write, so they
     /// happen one at a time, and swap in a new tree when done. A scan keeps
     /// the tree it started on, so commits never change it under the scan.
@@ -66,49 +77,62 @@ impl<F: Fs> Db<F> {
             std::io::ErrorKind::WouldBlock => Error::AlreadyOpen,
             _ => Error::Io(e),
         })?;
-        if file.size()? == 0 {
-            Db::create(&fs, dir, file)
-        } else {
-            Db::load(file)
+        let wal_file = fs.open(&dir.join(WAL_FILE))?;
+        let bytes = read_all(&wal_file)?;
+        let Replayed { pages, meta, tail } = wal::replay(&bytes);
+        // Everything is checked before anything is changed, so a database
+        // that is refused is left as it was.
+        let meta = match (meta, file.size()? == 0) {
+            (meta, true) => meta,
+            (Some(meta), false) => {
+                check_data_header(&file)?;
+                Some(meta)
+            }
+            (None, false) => Some(read_base_meta(&file)?),
+        };
+        let tree = match meta {
+            Some(meta) => Some(load(&file, meta, pages)?),
+            // Nothing was ever committed. A cut while creating leaves at
+            // most the first commit's bytes; more than that is a WAL whose
+            // commits were damaged, not a new database.
+            None if bytes.len() as u64 > wal::commit_len(1) => {
+                return Err(Error::Corrupt(
+                    "WAL holds no whole commit but is longer than a new database".into(),
+                ))
+            }
+            None => None,
+        };
+        // What follows the last whole commit was never acknowledged, or
+        // follows a damaged record. Keep it in the cut file, then cut it
+        // off, so the next commit goes right after the last whole one and
+        // replay does not stop short of it.
+        let cut = &bytes[tail.end as usize..];
+        if !cut.is_empty() {
+            let kept = fs.open(&dir.join(CUT_FILE))?;
+            kept.write_all_at(cut, kept.size()?)?;
+            kept.sync_data()?;
+            fs.sync_dir(dir)?;
+            wal_file.set_len(tail.end)?;
+            wal_file.sync_data()?;
         }
-    }
-
-    fn create(fs: &F, dir: &Path, file: F::File) -> Result<Self> {
-        let mut tree = Tree::new();
-        for page_no in tree.take_dirty() {
-            write_page(&file, page_no, tree.page(page_no).as_bytes())?;
+        let mut wal = Wal::new(wal_file, tail);
+        let tree = match tree {
+            Some(tree) => tree,
+            // A new database, whose creation is the first commit.
+            None => {
+                let mut tree = Tree::new();
+                append(&mut wal, &mut tree)?;
+                tree
+            }
+        };
+        // A WAL file made by this open is only there to stay once its
+        // directory is synced.
+        if tail == Tail::EMPTY {
+            fs.sync_dir(dir)?;
         }
-        write_meta(&file, tree.meta())?;
-        file.sync_data()?;
-        fs.sync_dir(dir)?;
         Ok(Db {
             file,
-            tree: Mutex::new(Arc::new(tree)),
-        })
-    }
-
-    fn load(file: F::File) -> Result<Self> {
-        let size = file.size()?;
-        if size < META_LEN as u64 {
-            return Err(Error::Corrupt("data file is too short".into()));
-        }
-        let mut header = [0; META_LEN];
-        file.read_exact_at(&mut header, 0)?;
-        // Magic, page size and version first: they say how long a page is
-        // and whether it has a checksum at all.
-        Meta::check_header(&header)?;
-        if size < PAGE_SIZE as u64 {
-            return Err(Error::Corrupt("data file is too short".into()));
-        }
-        let meta = Meta::read_fields(&read_page(&file, 0)?)?;
-        if size < meta.page_count.saturating_mul(PAGE_SIZE as u64) {
-            return Err(Error::Corrupt(
-                "data file is shorter than its meta page says".into(),
-            ));
-        }
-        let tree = Tree::load(meta, |page_no| Page::from_bytes(read_page(&file, page_no)?))?;
-        Ok(Db {
-            file,
+            wal: Mutex::new(wal),
             tree: Mutex::new(Arc::new(tree)),
         })
     }
@@ -119,6 +143,12 @@ impl<F: Fs> Db<F> {
             db: self,
             writes: BTreeMap::new(),
         }
+    }
+
+    /// How many pages the database uses, free ones included, counting the
+    /// two meta pages: what its data file holds once checkpointed.
+    pub fn page_count(&self) -> u64 {
+        self.tree().meta().page_count
     }
 
     /// Closes the database. Every committed transaction is already durable,
@@ -235,17 +265,9 @@ impl<F: Fs> Txn<'_, F> {
                 next.put(key, value);
             }
         }
-        let file = &self.db.file;
-        for page_no in next.take_dirty() {
-            write_page(file, page_no, next.page(page_no).as_bytes())?;
-        }
-        file.sync_data()?;
-        // The meta page goes last, so it only points at pages already on
-        // disk. A crash before it still loses the keys a split moved off
-        // an overwritten leaf, until the WAL comes.
-        if next.meta() != tree.meta() {
-            write_meta(file, next.meta())?;
-            file.sync_data()?;
+        if next.has_dirty() || next.meta() != tree.meta() {
+            let mut wal = self.db.wal.lock().unwrap_or_else(PoisonError::into_inner);
+            append(&mut wal, &mut next)?;
         }
         *tree = Arc::new(next);
         Ok(())
@@ -366,16 +388,81 @@ fn check_key(key: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Writes `meta` to both meta slots.
-fn write_meta(file: &impl FsFile, meta: Meta) -> Result<()> {
-    write_page(file, 0, &meta.encode())?;
-    write_page(file, 1, &meta.encode())
+/// Commits to `wal` the pages of `tree` changed since the last commit,
+/// with their checksums, and its meta fields, and syncs.
+fn append(wal: &mut Wal<impl FsFile>, tree: &mut Tree) -> Result<()> {
+    let dirty = tree.take_dirty();
+    let pages: Vec<(u64, &[u8; PAGE_SIZE])> = dirty
+        .iter()
+        .map(|&page_no| (page_no, tree.page(page_no).as_bytes()))
+        .collect();
+    wal.append(&pages, tree.meta())
 }
 
-/// Writes `page` at page `page_no`, with its checksum.
-fn write_page(file: &impl FsFile, page_no: u64, page: &[u8; PAGE_SIZE]) -> Result<()> {
-    file.write_all_at(&checksum::sealed(page_no, page), page_offset(page_no))?;
+/// Refuses a data file that is not an Oakdb data file of this page size and
+/// format, before anything else is read from it.
+fn check_data_header(file: &impl FsFile) -> Result<()> {
+    let size = file.size()?;
+    if size < META_LEN as u64 {
+        return Err(Error::Corrupt("data file is too short".into()));
+    }
+    let mut header = [0; META_LEN];
+    file.read_exact_at(&mut header, 0)?;
+    // Magic, page size and version first: they say how long a page is
+    // and whether it has a checksum at all.
+    Meta::check_header(&header)?;
+    if size < PAGE_SIZE as u64 {
+        return Err(Error::Corrupt("data file is too short".into()));
+    }
     Ok(())
+}
+
+/// The meta fields of a data file that is not empty, refusing a file that
+/// is not an Oakdb data file or is shorter than its meta page says.
+fn read_base_meta(file: &impl FsFile) -> Result<Meta> {
+    check_data_header(file)?;
+    let size = file.size()?;
+    let meta = Meta::read_fields(&read_page(file, 0)?)?;
+    if size < meta.page_count.saturating_mul(PAGE_SIZE as u64) {
+        return Err(Error::Corrupt(
+            "data file is shorter than its meta page says".into(),
+        ));
+    }
+    Ok(meta)
+}
+
+/// The tree `meta` describes, each page from the WAL if it holds one and
+/// from the data file if not.
+fn load(
+    file: &impl FsFile,
+    meta: Meta,
+    mut pages: BTreeMap<u64, Box<[u8; PAGE_SIZE]>>,
+) -> Result<Tree> {
+    let size = file.size()?;
+    Tree::load(meta, |page_no| {
+        let bytes: Box<[u8]> = match pages.remove(&page_no) {
+            Some(image) => {
+                checksum::verify(page_no, &*image)?;
+                image
+            }
+            None if page_offset(page_no + 1) <= size => read_page(file, page_no)?,
+            None => {
+                return Err(Error::Corrupt(format!(
+                    "page {page_no} is in neither the WAL nor the data file"
+                )))
+            }
+        };
+        Page::from_bytes(bytes)
+    })
+}
+
+/// The whole of `file`.
+fn read_all(file: &impl FsFile) -> Result<Vec<u8>> {
+    let len = usize::try_from(file.size()?)
+        .map_err(|_| Error::Corrupt("WAL is too long to read into memory".into()))?;
+    let mut bytes = vec![0; len];
+    file.read_exact_at(&mut bytes, 0)?;
+    Ok(bytes)
 }
 
 /// Reads page `page_no`, refusing it if its checksum does not match.
@@ -429,6 +516,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "the data file is written by checkpoints (#23)"]
     fn a_new_database_records_the_page_size_in_both_meta_slots() {
         let dir = tempfile::tempdir().unwrap();
         Db::open(dir.path()).unwrap().close().unwrap();

@@ -9,6 +9,7 @@
 //! read from the file keep what was read, and every write fills it in anew.
 
 use crate::error::{Error, Result};
+#[cfg(test)]
 use crate::page::PAGE_SIZE;
 
 /// Bytes at the start of every page that hold its checksum.
@@ -22,11 +23,17 @@ fn checksum(page_no: u64, page: &[u8]) -> u32 {
 
 /// A copy of `page` with its checksum for `page_no` filled in, ready to be
 /// written there.
+#[cfg(test)]
 pub(crate) fn sealed(page_no: u64, page: &[u8; PAGE_SIZE]) -> [u8; PAGE_SIZE] {
     let mut out = *page;
-    let sum = checksum(page_no, &out);
-    out[..CHECKSUM_LEN].copy_from_slice(&sum.to_le_bytes());
+    seal(page_no, &mut out);
     out
+}
+
+/// Fills in the checksum of `page`, to be written at page `page_no`.
+pub(crate) fn seal(page_no: u64, page: &mut [u8]) {
+    let sum = checksum(page_no, page);
+    page[..CHECKSUM_LEN].copy_from_slice(&sum.to_le_bytes());
 }
 
 /// Refuses `page`, read from `page_no`, if its checksum does not match.

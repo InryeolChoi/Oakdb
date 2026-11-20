@@ -1,14 +1,7 @@
 //! Trees of any height: internal pages split as the tree grows, and leaves
 //! that empty out leave the tree as it shrinks.
 
-use std::path::Path;
-
-use oakdb::{Db, DATA_FILE, MAX_ENTRY_LEN, MAX_KEY_LEN};
-
-/// How many 4 KB pages the data file has: two meta pages, then the tree.
-fn pages_in_file(dir: &Path) -> u64 {
-    std::fs::metadata(dir.join(DATA_FILE)).unwrap().len() / 4096
-}
+use oakdb::{Db, MAX_ENTRY_LEN, MAX_KEY_LEN};
 
 /// The biggest entry there is: a 512-byte key and a 494-byte value. Four of
 /// them fill a leaf, and an internal page has room for only 7 separators of
@@ -152,13 +145,13 @@ fn a_tree_that_shrank_reuses_its_pages_when_it_grows_again() {
     let root = tempfile::tempdir().unwrap();
     let db = Db::open(root.path()).unwrap();
     put_big(&db, 0..300);
-    let grown = pages_in_file(root.path());
+    let grown = db.page_count();
 
     delete_big(&db, 0..300);
-    assert_eq!(pages_in_file(root.path()), grown, "the file never shrinks");
+    assert_eq!(db.page_count(), grown, "the database never shrinks");
     put_big(&db, 0..300);
 
-    assert_eq!(pages_in_file(root.path()), grown);
+    assert_eq!(db.page_count(), grown);
     check_big(&db, 300, |_| true);
     db.close().unwrap();
     check_big(&Db::open(root.path()).unwrap(), 300, |_| true);
