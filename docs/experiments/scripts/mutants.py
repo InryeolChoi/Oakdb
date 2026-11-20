@@ -3,7 +3,7 @@
 
 Run from the repository root:
 
-    python3 docs/experiments/scripts/mutants.py sim      # 14 bugs in SimFs
+    python3 docs/experiments/scripts/mutants.py sim      # 20 bugs in SimFs
     python3 docs/experiments/scripts/mutants.py engine   # experiment 0007
     python3 docs/experiments/scripts/mutants.py wal      # experiment 0009
     python3 docs/experiments/scripts/mutants.py checkpoint  # experiment 0010
@@ -25,7 +25,7 @@ CKPT = "crates/oakdb/src/checkpoint.rs"
 SIM_BUGS = [
     ("unsynced writes always kept", "Landing::Lost => {}", "Landing::Lost => write_at(data, offset, &bytes),"),
     ("unsynced writes always lost", "Landing::Kept => write_at(data, offset, &bytes),", "Landing::Kept => {}"),
-    ("never torn", "match rng.below(3) {", "match rng.below(2) {"),
+    ("never torn", "match draw % 3 {", "match draw % 2 {"),
     ("torn ignores sector bounds", "let stop = ((start / SECTOR + 1) * SECTOR).min(end);", "let stop = (start + 100).min(end);"),
     ("sync_dir does nothing", "file.entry_synced = true;\n            }", "let _ = file;\n            }"),
     ("files never vanish", "if !file.entry_synced && rng.coin() {", "if false && !file.entry_synced && rng.coin() {"),
@@ -37,6 +37,13 @@ SIM_BUGS = [
     ("power stays cut after a crash", "disk.down = false;", "disk.down = disk.down;"),
     ("ops miscounted", "None => {\n                self.ops += 1;", "None => {\n                self.ops += 2;"),
     ("report lies about torn sectors", "sectors.push(landed);", "sectors.push(!landed);"),
+    # Writes that land their length alone (#56).
+    ("never length only", "Some(zeros_from) if draw >> 63 == 1 =>", "Some(zeros_from) if false =>"),
+    ("length only writes the bytes", "data[zeros].fill(0);", "let _ = zeros; write_at(data, offset, &bytes);"),
+    ("length only does not grow the file", "if data.len() < zeros.end {\n                        data.resize(zeros.end, 0);\n                    }", "let zeros = zeros.start.min(data.len())..zeros.end.min(data.len());"),
+    ("end measured on the disk at the crash", "(end > old_len as u64).then(|| offset.max(old_len as u64))", "(end > data.len() as u64).then(|| offset.max(data.len() as u64))"),
+    ("zeros from the offset, not the old end", ".then(|| offset.max(old_len as u64))", ".then_some(offset)"),
+    ("writes inside the file land length only", "(end > old_len as u64).then(|| offset.max(old_len as u64))", "Some(offset)"),
 ]
 
 ENGINE_BUGS = [
