@@ -378,6 +378,17 @@ mod tests {
     }
 
     #[test]
+    fn a_wrong_header_with_nothing_after_it_counts_as_none() {
+        // Emptying is synced before the header is written, so a WAL no
+        // longer than a header holds no record, whatever its bytes.
+        let mut header = encode_header(3).0;
+        header[17] ^= 1;
+        for wal in [header, [0; HEADER_LEN as usize]] {
+            assert_eq!(replay(&wal).unwrap().checkpoint, None);
+        }
+    }
+
+    #[test]
     fn a_header_alone_names_its_checkpoint_and_holds_nothing() {
         let replayed = replay(&encode_header(3).0).unwrap();
         assert_eq!(replayed.checkpoint, Some(3));

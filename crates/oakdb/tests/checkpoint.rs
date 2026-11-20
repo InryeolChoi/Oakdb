@@ -299,6 +299,43 @@ fn a_torn_wal_header_after_emptying_opens() {
 }
 
 #[test]
+fn a_wal_of_one_header_length_whose_header_is_wrong_opens() {
+    // Review P1: writing the header can be cut so that the file's new
+    // length lands but its bytes do not, leaving 20 bytes of zeros. The
+    // WAL was emptied and synced before, so nothing follows the header and
+    // nothing is lost by writing it again.
+    for damage in [[0u8; WAL_HEADER as usize], [0xAB; WAL_HEADER as usize]] {
+        let fs = SimFs::new();
+        let db = Db::open_with(fs.clone(), dir()).unwrap();
+        let model = fill(&db, 30);
+        db.close().unwrap();
+        let header = contents(&fs, WAL_FILE);
+
+        overwrite(&fs, WAL_FILE, &damage);
+
+        let db =
+            Db::open_with(fs.clone(), dir()).unwrap_or_else(|e| panic!("{:x?}: {e}", &damage[..2]));
+        assert_holds(&db, &model, "after reopening");
+        assert_eq!(
+            contents(&fs, WAL_FILE),
+            header,
+            "the header is written again"
+        );
+    }
+}
+
+#[test]
+fn a_new_database_whose_wal_header_is_cut_that_way_opens() {
+    let fs = SimFs::new();
+    drop(Db::open_with(fs.clone(), dir()).unwrap());
+    overwrite(&fs, WAL_FILE, &[0; WAL_HEADER as usize]);
+
+    let db = Db::open_with(fs.clone(), dir()).unwrap();
+
+    assert_eq!(db.page_count(), 3);
+}
+
+#[test]
 fn a_damaged_wal_header_with_records_after_it_is_refused() {
     let fs = SimFs::new();
     let db = Db::open_with(fs.clone(), dir()).unwrap();
