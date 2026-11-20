@@ -101,8 +101,9 @@ pub(crate) fn encode_header(checkpoint: u64) -> ([u8; HEADER_LEN as usize], u32)
 /// What replaying a WAL found.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Replayed {
-    /// The checkpoint the header names, or `None` if the WAL is shorter
-    /// than a header: new, or cut short while it was started.
+    /// The checkpoint the header names, or `None` if the WAL holds no
+    /// header that checks out and nothing after it: new, or cut short
+    /// while it was started.
     pub(crate) checkpoint: Option<u64>,
     /// The latest committed image of each page the WAL holds, with its
     /// page checksum filled in.
@@ -144,7 +145,8 @@ impl<F: FsFile> Wal<F> {
 
     /// Empties the WAL and starts it again after `checkpoint`. The length
     /// change is synced before the header is written, so a header torn by
-    /// a power cut is never followed by older records.
+    /// a power cut is never followed by older records, and a WAL no longer
+    /// than a header never holds one ([`replay`] relies on it).
     pub(crate) fn start(&mut self, checkpoint: u64) -> Result<()> {
         if self.file.size()? > 0 {
             self.file.set_len(0)?;
@@ -277,9 +279,14 @@ fn seal(out: &mut Vec<u8>, start: usize, prev: u32) -> u32 {
 }
 
 /// Replays the WAL `bytes`: every commit up to the first record that does
-/// not check out. Refuses a WAL whose header does not check out but that
-/// is longer than a header: a power cut leaves no such WAL, since the WAL
-/// is emptied and synced before a header is written.
+/// not check out.
+///
+/// A WAL no longer than a header holds no record: it is emptied and synced
+/// before a header is written. So if its header does not check out, which
+/// a cut while writing the header can leave (the new length lands, the
+/// bytes do not), it counts as having none. A longer WAL whose header does
+/// not check out is refused: the records after it may be acknowledged
+/// commits.
 pub(crate) fn replay(bytes: &[u8]) -> Result<Replayed> {
     let mut done = Replayed {
         checkpoint: None,
@@ -292,6 +299,9 @@ pub(crate) fn replay(bytes: &[u8]) -> Result<Replayed> {
     };
     let checkpoint = u64::from_le_bytes(header[CHECKPOINT_AT..HEADER_BODY].try_into().unwrap());
     if header != encode_header(checkpoint).0 {
+        if bytes.len() as u64 == HEADER_LEN {
+            return Ok(done);
+        }
         return Err(Error::Corrupt("WAL header is damaged".into()));
     }
     done.checkpoint = Some(checkpoint);
