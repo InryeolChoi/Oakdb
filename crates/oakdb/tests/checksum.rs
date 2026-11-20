@@ -2,9 +2,9 @@
 //! (#19), so a page that changed, was half written, or was written in the
 //! wrong place is reported as corrupt instead of being read.
 //!
-//! These tests damage pages of the data file, which only checkpoints (#23)
-//! write; commits go to the WAL (#22), whose records have checksums of their
-//! own (`tests/wal.rs`). They wait for #23.
+//! These tests damage pages of the data file, which checkpoints (#23)
+//! write: closing the database checkpoints it. Commits go to the WAL (#22),
+//! whose records have checksums of their own (`tests/wal.rs`).
 
 use std::path::Path;
 
@@ -60,7 +60,6 @@ fn assert_refused(dir: &Path, words: &str) {
 }
 
 #[test]
-#[ignore = "the data file is written by checkpoints (#23)"]
 fn every_page_on_disk_carries_the_checksum_of_its_bytes_and_its_number() {
     let root = tempfile::tempdir().unwrap();
     every_kind_of_page(root.path());
@@ -79,7 +78,6 @@ fn every_page_on_disk_carries_the_checksum_of_its_bytes_and_its_number() {
 }
 
 #[test]
-#[ignore = "the data file is written by checkpoints (#23)"]
 fn a_new_database_already_has_its_checksums() {
     let root = tempfile::tempdir().unwrap();
     Db::open(root.path()).unwrap().close().unwrap();
@@ -96,7 +94,6 @@ fn a_new_database_already_has_its_checksums() {
 }
 
 #[test]
-#[ignore = "the data file is written by checkpoints (#23)"]
 fn a_changed_byte_in_a_value_is_reported_with_its_page() {
     // Experiment 0001 changed one byte of a value and nothing noticed.
     let root = tempfile::tempdir().unwrap();
@@ -116,7 +113,6 @@ fn a_changed_byte_in_a_value_is_reported_with_its_page() {
 }
 
 #[test]
-#[ignore = "the data file is written by checkpoints (#23)"]
 fn a_page_copied_to_another_place_is_reported() {
     // A whole, valid page written where another page belongs: only the page
     // number in its checksum gives it away.
@@ -133,7 +129,6 @@ fn a_page_copied_to_another_place_is_reported() {
 }
 
 #[test]
-#[ignore = "the data file is written by checkpoints (#23)"]
 fn a_half_written_page_is_reported() {
     let root = tempfile::tempdir().unwrap();
     every_kind_of_page(root.path());
@@ -148,17 +143,15 @@ fn a_half_written_page_is_reported() {
 }
 
 #[test]
-#[ignore = "the data file is written by checkpoints (#23)"]
 fn a_changed_byte_in_any_kind_of_page_is_reported() {
     let root = tempfile::tempdir().unwrap();
     every_kind_of_page(root.path());
     let clean = data_file(root.path());
 
-    // Flip one bit in every page in turn, meta slot A included: in the
-    // header field right after the checksum, in the middle, and at the
-    // end. Meta slot B (page 1) is not read until checkpoints alternate
-    // between the slots (#23), so damage there shows only then.
-    for page_no in (0..clean.len() / PAGE).filter(|&p| p != 1) {
+    // Flip one bit in every page but the meta slots in turn: in the header
+    // field right after the checksum, in the middle, and at the end. A
+    // damaged meta slot leaves the other (the test below).
+    for page_no in 2..clean.len() / PAGE {
         for offset in [4, PAGE / 2, PAGE - 1] {
             let mut file = clean.clone();
             file[page_no * PAGE + offset] ^= 0x10;
@@ -175,7 +168,6 @@ fn a_changed_byte_in_any_kind_of_page_is_reported() {
 }
 
 #[test]
-#[ignore = "the data file is written by checkpoints (#23)"]
 fn a_changed_checksum_is_reported() {
     let root = tempfile::tempdir().unwrap();
     every_kind_of_page(root.path());
@@ -188,7 +180,6 @@ fn a_changed_checksum_is_reported() {
 }
 
 #[test]
-#[ignore = "the data file is written by checkpoints (#23)"]
 fn a_file_of_an_older_format_is_refused_by_its_version() {
     let root = tempfile::tempdir().unwrap();
     Db::open(root.path()).unwrap().close().unwrap();
@@ -202,4 +193,30 @@ fn a_file_of_an_older_format_is_refused_by_its_version() {
     write_data_file(root.path(), &file);
 
     assert_refused(root.path(), "version 2");
+}
+
+#[test]
+fn a_changed_byte_in_either_meta_slot_is_passed_over_for_the_other() {
+    // After the first checkpoint both slots hold it, so either one will do
+    // (design 0011). Damage that changes the format fields is passed over
+    // the same way as damage the checksum catches.
+    let root = tempfile::tempdir().unwrap();
+    every_kind_of_page(root.path());
+    let clean = data_file(root.path());
+
+    for page_no in [0, 1] {
+        for offset in [0, 4, 12, 16, 20, PAGE / 2, PAGE - 1] {
+            let mut file = clean.clone();
+            file[page_no * PAGE + offset] ^= 0x10;
+            write_data_file(root.path(), &file);
+
+            let db = Db::open(root.path())
+                .unwrap_or_else(|e| panic!("page {page_no}, byte {offset}: {e}"));
+            let txn = db.begin();
+            assert_eq!(txn.get(b"long").unwrap(), Some(vec![7; 20_000]));
+            assert_eq!(txn.get(b"gone").unwrap(), None);
+            drop(txn);
+            drop(db);
+        }
+    }
 }

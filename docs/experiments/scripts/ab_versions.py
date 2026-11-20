@@ -3,7 +3,10 @@
 
 Run from the repository root:
 
-    python3 docs/experiments/scripts/ab_versions.py <rev A> <rev B> [rounds] [commits]
+    python3 docs/experiments/scripts/ab_versions.py <rev A> <rev B> [rounds] [commits] [modes]
+
+`modes` is a comma-separated list of `commit_time` modes, by default
+`overwrite,grow`; `reopen` times opening after the commits instead.
 
 Builds `ab_versions/commit_time.rs` as an example against each revision (in
 a temporary git worktree), then runs the two binaries in ABBA order, each
@@ -81,6 +84,7 @@ def main():
     rev_a, rev_b = sys.argv[1], sys.argv[2]
     rounds = int(sys.argv[3]) if len(sys.argv) > 3 else 20
     commits = int(sys.argv[4]) if len(sys.argv) > 4 else 200
+    modes = sys.argv[5].split(",") if len(sys.argv) > 5 else ["overwrite", "grow"]
     root = tempfile.mkdtemp(prefix="ab_versions-")
     trees = []
     try:
@@ -88,8 +92,8 @@ def main():
         trees.append(tree_a)
         tree_b, b_bin = build(rev_b, root)
         trees.append(tree_b)
-        print(f"A = {rev_a}, B = {rev_b}, {rounds} rounds of {commits} commits, per-round mean")
-        for mode in ["overwrite", "grow"]:
+        print(f"A = {rev_a}, B = {rev_b}, {rounds} rounds of {commits} commits, per-round mean (reopen: time to open)")
+        for mode in modes:
             compare("A/B", a_bin, b_bin, mode, rounds, commits)
             compare("A/A (control)", a_bin, a_bin, mode, rounds, commits)
     finally:

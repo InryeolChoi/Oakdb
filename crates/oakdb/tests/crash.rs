@@ -93,6 +93,14 @@ fn workloads_split_leaves_and_use_overflow_pages() {
 }
 
 #[test]
+fn workloads_checkpoint_along_the_way() {
+    let with = (0..50)
+        .filter(|&s| !Workload::generate(s).checkpoints.is_empty())
+        .count();
+    assert!(with > 25, "{with} of 50 workloads checkpoint");
+}
+
+#[test]
 fn without_a_power_cut_every_commit_is_there() {
     for seed in 0..20 {
         let workload = Workload::generate(seed);

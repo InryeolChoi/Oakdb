@@ -34,20 +34,24 @@ pub enum Op {
     Delete(u32),
 }
 
-/// Transactions to commit one after another.
+/// Transactions to commit one after another, with a checkpoint after
+/// some of them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Workload {
     pub commits: Vec<Vec<Op>>,
+    /// Indexes of the commits a checkpoint follows (#23).
+    pub checkpoints: BTreeSet<usize>,
 }
 
 impl Workload {
     /// A random workload: up to 30 commits of up to 8 puts and deletes
     /// (1 in 5 a delete). Of the puts, 1 in 6 is a long value of 1500 to
     /// 13 499 bytes, more than a leaf can hold, so it goes to overflow
-    /// pages; the rest are under 400 bytes.
+    /// pages; the rest are under 400 bytes. A checkpoint follows 1 commit
+    /// in 4.
     pub fn generate(seed: u64) -> Workload {
         let mut rng = Rng(seed);
-        let commits = (0..1 + rng.below(30))
+        let commits: Vec<Vec<Op>> = (0..1 + rng.below(30))
             .map(|_| {
                 (0..1 + rng.below(8))
                     .map(|_| {
@@ -67,20 +71,29 @@ impl Workload {
                     .collect()
             })
             .collect();
-        Workload { commits }
+        // Drawn after the commits, so the commits a seed makes are the
+        // same as before checkpoints came.
+        let checkpoints = (0..commits.len()).filter(|_| rng.below(4) == 0).collect();
+        Workload {
+            commits,
+            checkpoints,
+        }
     }
 
-    /// How many operations that change the disk opening a new database and
-    /// committing every transaction takes.
+    /// How many operations that change the disk opening a new database,
+    /// committing every transaction and running the checkpoints takes.
     pub fn total_ops(&self) -> u64 {
         let fs = SimFs::new();
         let db = Db::open_with(fs.clone(), DIR).unwrap();
-        for ops in &self.commits {
+        for (i, ops) in self.commits.iter().enumerate() {
             let mut txn = db.begin();
             for op in ops {
                 op.apply_to(&mut txn);
             }
             txn.commit().unwrap();
+            if self.checkpoints.contains(&i) {
+                db.checkpoint().unwrap();
+            }
         }
         fs.ops()
     }
@@ -277,6 +290,14 @@ pub fn run(workload: &Workload, cut_after: u64, crash_seed: u64) -> Run {
                     Err(e) => {
                         caused_by_the_cut(&format!("commit {i}"), e);
                         cut = Some((i, next));
+                        break;
+                    }
+                }
+                // A checkpoint changes nothing the database holds, so a
+                // cut in one leaves no commit cut short.
+                if workload.checkpoints.contains(&i) {
+                    if let Err(e) = db.checkpoint() {
+                        caused_by_the_cut(&format!("checkpoint after commit {i}"), e);
                         break;
                     }
                 }
