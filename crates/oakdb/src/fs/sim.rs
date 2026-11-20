@@ -193,6 +193,12 @@ pub enum Landing {
     Torn {
         sectors: Vec<bool>,
     },
+    /// The file's new length landed but the bytes did not: the bytes from
+    /// `zeros_from` to the end of the write read as zeros. Not made yet
+    /// (#56).
+    LengthOnly {
+        zeros_from: u64,
+    },
 }
 
 impl Landing {
@@ -234,6 +240,7 @@ fn apply_after_crash(
             match landing {
                 Landing::Lost => {}
                 Landing::Kept => write_at(data, offset, &bytes),
+                Landing::LengthOnly { .. } => unreachable!("never rolled yet"),
                 Landing::Torn { ref mut sectors } => {
                     // Sectors are counted from the start of the file. A
                     // torn write past the end leaves the file as long as

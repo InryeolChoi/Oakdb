@@ -215,3 +215,25 @@ fn a_free_list_head_on_a_page_in_use_is_refused_without_panicking() {
         run.verdict
     );
 }
+
+// Seeds that break if either half of the fix for review P1 of PR #55 is
+// taken out, found once the simulated disk could land a write's length
+// without its bytes (issue #56, docs/experiments/0012).
+
+/// The power went at the sync after a checkpoint wrote the WAL header,
+/// and the header landed as its length alone: 20 bytes of zeros. Refused
+/// as a damaged header before the fix (mutant C16).
+#[test]
+fn a_wal_header_that_landed_as_zeros_opens() {
+    stays_intact(109);
+}
+
+/// Without the sync between emptying the WAL and writing its header
+/// (mutant C3), this seed cuts at the header's sync: the emptying is lost
+/// and the header lands as zeros over the old WAL's first bytes, which
+/// then looks like a damaged header with records after it. With the sync
+/// the seed cuts elsewhere and passes; it is here to catch C3.
+#[test]
+fn emptying_the_wal_is_synced_before_its_header_is_written() {
+    stays_intact(349);
+}
