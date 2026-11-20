@@ -528,3 +528,43 @@ fn a_failed_checkpoint_stops_the_engine() {
     put(&db, b"after", b"1");
     assert_eq!(get(&db, b"after"), Some(b"1".to_vec()));
 }
+
+#[test]
+fn a_data_file_shorter_than_its_meta_slot_says_is_refused() {
+    // Mutant C14: nothing cut the data file short before.
+    let fs = SimFs::new();
+    let db = Db::open_with(fs.clone(), dir()).unwrap();
+    fill(&db, 100);
+    db.close().unwrap();
+    let data = fs.open(&dir().join(DATA_FILE)).unwrap();
+    data.set_len(size(&fs, DATA_FILE) - PAGE).unwrap();
+    data.sync_data().unwrap();
+
+    match Db::open_with(fs.clone(), dir()) {
+        Err(Error::Corrupt(reason)) => assert!(reason.contains("shorter"), "{reason}"),
+        other => panic!("expected Corrupt, got {other:?}"),
+    }
+}
+
+#[test]
+fn only_damage_lets_a_cut_first_checkpoint_pass_over_the_data_file() {
+    // Review P2: before the first checkpoint, a data file whose meta slots
+    // are damaged is passed over, since the WAL holds every commit. A data
+    // file of another page size is not damage: it is refused.
+    let fs = SimFs::new();
+    let db = Db::open_with(fs.clone(), dir()).unwrap();
+    put(&db, b"a", b"1");
+    drop(db);
+    let mut page = vec![0; 2 * PAGE as usize];
+    page[4..12].copy_from_slice(b"oakdb\0\0\0");
+    page[12..16].copy_from_slice(&4u32.to_le_bytes());
+    page[16..20].copy_from_slice(&8192u32.to_le_bytes());
+    overwrite(&fs, DATA_FILE, &page);
+
+    let err = Db::open_with(fs.clone(), dir()).unwrap_err();
+
+    assert!(
+        matches!(err, Error::PageSizeMismatch { found: 8192, .. }),
+        "{err:?}"
+    );
+}
