@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use oakdb::fs::sim::SimFs;
+use oakdb::fs::sim::{FailedSync, SimFs};
 use oakdb::fs::{Fs, FsFile};
 use oakdb::{Db, Error, WAL_FILE};
 
@@ -120,6 +120,18 @@ fn recovers(fs: &SimFs, crash: Option<u64>, acked: &Model, landed: &Model, what:
     landed_now
 }
 
+/// Both ways a failed sync can treat the changes it was to save: they
+/// keep waiting, or reads see them but the disk never gets them, as on
+/// Linux (issue #59).
+const FAILED_SYNCS: [FailedSync; 2] = [FailedSync::KeepsWaiting, FailedSync::Forgets];
+
+/// An empty disk whose failed syncs do as `failed_sync` says.
+fn disk(failed_sync: FailedSync) -> SimFs {
+    let fs = SimFs::new();
+    fs.set_failed_sync(failed_sync);
+    fs
+}
+
 /// No crash, and crash seeds 0..4.
 fn reopenings() -> impl Iterator<Item = Option<u64>> {
     std::iter::once(None).chain((0..4).map(Some))
@@ -219,15 +231,23 @@ fn a_stopped_database_holds_its_lock_until_it_is_dropped() {
 
 #[test]
 fn reopening_after_a_failed_sync_recovers_every_acknowledged_commit() {
-    let fs = SimFs::new();
-    let db = open(&fs);
-    let model = fill(&db, 50);
-    let (txn, landed) = writes(&db, &[1, 2, 3, 2000], b"new", &model);
-    fs.fail_once_after(1);
-    txn.commit().unwrap_err();
-    drop(db);
+    for failed_sync in FAILED_SYNCS {
+        let fs = disk(failed_sync);
+        let db = open(&fs);
+        let model = fill(&db, 50);
+        let (txn, landed) = writes(&db, &[1, 2, 3, 2000], b"new", &model);
+        fs.fail_once_after(1);
+        txn.commit().unwrap_err();
+        drop(db);
 
-    recovers(&fs, None, &model, &landed, "no crash");
+        recovers(
+            &fs,
+            None,
+            &model,
+            &landed,
+            &format!("{failed_sync:?}, no crash"),
+        );
+    }
 }
 
 #[test]
@@ -244,9 +264,12 @@ fn a_failure_at_any_disk_operation_of_a_commit_keeps_every_acknowledged_commit()
     assert_eq!(ops, 2, "a commit writes and syncs the WAL once");
     let mut landings = [0, 0];
     for fail in 0..ops {
-        for crash in reopenings() {
-            let what = format!("failing operation {fail}, crash {crash:?}");
-            let fs = SimFs::new();
+        for (failed_sync, crash) in FAILED_SYNCS
+            .into_iter()
+            .flat_map(|f| reopenings().map(move |c| (f, c)))
+        {
+            let what = format!("failing operation {fail}, crash {crash:?}, {failed_sync:?}");
+            let fs = disk(failed_sync);
             let db = open(&fs);
             let model = fill(&db, 60);
             let (txn, landed) = writes(&db, &[1, 30, 59, 3000], &[9; 5000], &model);
@@ -295,11 +318,14 @@ fn a_failure_at_any_disk_operation_of_a_checkpoint_keeps_every_commit() {
         };
         assert!(ops > 4, "a checkpoint takes {ops} operations");
         for fail in 0..ops {
-            for crash in reopenings() {
+            for (failed_sync, crash) in FAILED_SYNCS
+                .into_iter()
+                .flat_map(|f| reopenings().map(move |c| (f, c)))
+            {
                 let what = format!(
-                    "{before} checkpoints before, failing operation {fail}, crash {crash:?}"
+                    "{before} checkpoints before, failing operation {fail}, crash {crash:?}, {failed_sync:?}"
                 );
-                let fs = SimFs::new();
+                let fs = disk(failed_sync);
                 let db = open(&fs);
                 let model = history(&db, before);
                 fs.fail_once_after(fail);
@@ -345,9 +371,13 @@ fn a_commit_whose_checkpoint_fails_is_kept_and_stops_the_engine() {
         .chain(ops - 5..ops)
         .collect();
     for fail in fails {
-        for crash in reopenings() {
-            let what = format!("failing operation {fail} of {ops}, crash {crash:?}");
-            let fs = SimFs::new();
+        for (failed_sync, crash) in FAILED_SYNCS
+            .into_iter()
+            .flat_map(|f| reopenings().map(move |c| (f, c)))
+        {
+            let what =
+                format!("failing operation {fail} of {ops}, crash {crash:?}, {failed_sync:?}");
+            let fs = disk(failed_sync);
             let (db, model) = setup(&fs);
             let (txn, landed) = writes(&db, &[3], &long(3), &model);
             fs.fail_once_after(fail);
@@ -424,9 +454,13 @@ fn a_failure_at_any_disk_operation_of_opening_leaves_a_database_that_opens() {
         };
         assert!(ops >= 4, "{name}: opening takes {ops} operations");
         for fail in 0..ops {
-            for crash in reopenings() {
-                let what = format!("{name}, failing operation {fail}, crash {crash:?}");
-                let fs = SimFs::new();
+            for (failed_sync, crash) in FAILED_SYNCS
+                .into_iter()
+                .flat_map(|f| reopenings().map(move |c| (f, c)))
+            {
+                let what =
+                    format!("{name}, failing operation {fail}, crash {crash:?}, {failed_sync:?}");
+                let fs = disk(failed_sync);
                 let model = setup(&fs);
                 fs.fail_once_after(fail);
 

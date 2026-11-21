@@ -14,6 +14,9 @@
 //! after a given number of operations that change the disk, every call
 //! fails until the next crash. [`SimFs::fail_once_after`] makes one such
 //! call fail with the power still on, as a disk that reports an error does.
+//! What a failed sync does to the changes it was to save is
+//! [`SimFs::set_failed_sync`]'s to say: they keep waiting, or, as Linux
+//! does, reads still see them but the disk never gets them (issue #59).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -54,6 +57,36 @@ struct Disk {
     files: BTreeMap<PathBuf, File>,
     /// Gives each handle its own number, for locks.
     next_handle: u64,
+    /// What a failed sync does to the changes it was to save.
+    failed_sync: FailedSync,
+}
+
+/// What a sync that fails with the power on does to the changes it was to
+/// save (issue #59, design 0014).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FailedSync {
+    /// They stay unsynced, for a crash to decide or a later sync to save.
+    #[default]
+    KeepsWaiting,
+    /// They are forgotten, as Linux marks the pages it failed to write
+    /// clean: reads still see them, but no later sync saves them, and a
+    /// crash drops them. Only a later write of the same bytes saves them.
+    Forgets,
+}
+
+/// Why an operation that changes the disk failed.
+enum Fault {
+    PowerCut,
+    DiskFailed,
+}
+
+impl From<Fault> for io::Error {
+    fn from(fault: Fault) -> io::Error {
+        match fault {
+            Fault::PowerCut => power_cut(),
+            Fault::DiskFailed => disk_failed(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -110,6 +143,9 @@ pub struct LengthFate {
 enum Access {
     Read,
     Change,
+    /// A change that is a sync: if it fails, [`FailedSync`] says what
+    /// becomes of the changes it was to save.
+    Sync,
 }
 
 impl SimFs {
@@ -135,11 +171,20 @@ impl SimFs {
     /// nothing and is not counted. A failed sync makes nothing durable: the
     /// changes it was to save stay unsynced, for a crash to decide or a
     /// later sync to save. The operations after it work again (issue #24).
-    /// It fails with EIO, as a disk does. If the power is cut at that
+    /// It fails with EIO, as a disk does. [`SimFs::set_failed_sync`] can
+    /// make a failed sync forget the changes instead. If the power is cut at that
     /// operation or before, the cut wins and [`SimFs::crash`] drops the
     /// failure: it does not carry over to the next boot.
     pub fn fail_once_after(&self, ops: u64) {
         self.disk().fail_once_left = Some(ops);
+    }
+
+    /// Sets what a sync failed by [`SimFs::fail_once_after`] does to the
+    /// changes it was to save. It holds across crashes, as it is the
+    /// operating system's way. A failed directory sync leaves the entries
+    /// unsynced either way.
+    pub fn set_failed_sync(&self, failed_sync: FailedSync) {
+        self.disk().failed_sync = failed_sync;
     }
 
     /// How many operations that change the disk have succeeded since the
@@ -349,19 +394,19 @@ fn is_root(path: &Path) -> bool {
 impl Disk {
     /// Fails if the power is cut or [`SimFs::fail_once_after`] is due, and
     /// counts one operation that changes the disk.
-    fn change(&mut self) -> io::Result<()> {
+    fn change(&mut self) -> Result<(), Fault> {
         if self.down {
-            return Err(power_cut());
+            return Err(Fault::PowerCut);
         }
         // A power cut due at this operation comes before a failure due at
         // it, which the crash then drops with the rest.
         if self.ops_left == Some(0) {
             self.down = true;
-            return Err(power_cut());
+            return Err(Fault::PowerCut);
         }
         if self.fail_once_left == Some(0) {
             self.fail_once_left = None;
-            return Err(disk_failed());
+            return Err(Fault::DiskFailed);
         }
         if let Some(left) = &mut self.ops_left {
             *left -= 1;
@@ -475,10 +520,19 @@ impl SimFile {
         if disk.boot != self.boot {
             return Err(io::Error::other("the file was opened before a crash"));
         }
-        if access == Access::Change {
-            disk.change()?;
-        } else if disk.down {
-            return Err(power_cut());
+        if access == Access::Read {
+            if disk.down {
+                return Err(power_cut());
+            }
+        } else if let Err(fault) = disk.change() {
+            if let (Access::Sync, Fault::DiskFailed, FailedSync::Forgets) =
+                (access, &fault, disk.failed_sync)
+            {
+                // The file exists: nothing removes one within a boot.
+                let file = disk.files.get_mut(&self.path).expect("open file exists");
+                file.waiting.clear();
+            }
+            return Err(fault.into());
         }
         // The file exists: nothing removes one within a boot.
         let file = disk.files.get_mut(&self.path).expect("open file exists");
@@ -538,9 +592,15 @@ impl FsFile for SimFile {
     }
 
     fn sync_data(&self) -> io::Result<()> {
-        self.with(Access::Change, |file, _| {
-            file.synced.clone_from(&file.now);
-            file.waiting.clear();
+        // The waiting changes land on what the disk holds, not what reads
+        // see: the two differ once a failed sync forgot changes.
+        self.with(Access::Sync, |file, _| {
+            for change in std::mem::take(&mut file.waiting) {
+                match change {
+                    Change::Write { offset, bytes } => write_at(&mut file.synced, offset, &bytes),
+                    Change::SetLen(len) => file.synced.resize(len, 0),
+                }
+            }
         })
     }
 }

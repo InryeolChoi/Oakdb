@@ -10,7 +10,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use oakdb::fs::sim::{Landing, LengthFate, SimFs, WriteFate, SECTOR};
+use oakdb::fs::sim::{FailedSync, Landing, LengthFate, SimFs, WriteFate, SECTOR};
 use oakdb::fs::{Fs, FsFile};
 use oakdb::{Db, DATA_FILE};
 
@@ -292,6 +292,84 @@ fn a_sync_after_a_failed_one_makes_the_writes_durable() {
         fs.crash(seed);
         assert_eq!(contents(&fs, &path), [2; PAGE], "seed {seed}");
     }
+}
+
+/// A disk whose page 0 was synced as 1s and then written as 2s, with the
+/// sync of the 2s failed on a disk that forgets (issue #59).
+fn forgotten(fs: &SimFs, path: &Path) {
+    fs.set_failed_sync(FailedSync::Forgets);
+    let file = fs.open(path).unwrap();
+    file.write_all_at(&[1; PAGE], 0).unwrap();
+    file.sync_data().unwrap();
+    file.write_all_at(&[2; PAGE], 0).unwrap();
+    fs.fail_once_after(0);
+    assert!(file.sync_data().is_err());
+}
+
+#[test]
+fn a_failed_sync_that_forgets_leaves_reads_seeing_what_the_disk_lost() {
+    for seed in 0..SEEDS {
+        let (fs, path) = disk();
+        forgotten(&fs, &path);
+        // Reads see the forgotten write, as the page cache does.
+        assert_eq!(contents(&fs, &path), [2; PAGE]);
+        let file = fs.open(&path).unwrap();
+        // A later sync does not save it, and a later write of other
+        // bytes does not either.
+        file.write_all_at(&[3; 10], PAGE as u64).unwrap();
+        file.sync_data().unwrap();
+
+        let report = fs.crash(seed);
+
+        assert!(report.writes.is_empty(), "seed {seed}: nothing waits");
+        let mut want = vec![1; PAGE];
+        want.extend([3; 10]);
+        assert_eq!(contents(&fs, &path), want, "seed {seed}");
+    }
+}
+
+#[test]
+fn writing_the_forgotten_bytes_again_saves_them() {
+    for seed in 0..SEEDS {
+        let (fs, path) = disk();
+        forgotten(&fs, &path);
+        let file = fs.open(&path).unwrap();
+        let mut seen = [0; PAGE];
+        file.read_exact_at(&mut seen, 0).unwrap();
+
+        file.write_all_at(&seen, 0).unwrap();
+        file.sync_data().unwrap();
+
+        fs.crash(seed);
+        assert_eq!(contents(&fs, &path), [2; PAGE], "seed {seed}");
+    }
+}
+
+#[test]
+fn a_disk_that_forgets_still_keeps_a_failed_write_out() {
+    let (fs, path) = disk();
+    fs.set_failed_sync(FailedSync::Forgets);
+    let file = fs.open(&path).unwrap();
+    file.write_all_at(&[1; PAGE], 0).unwrap();
+    file.sync_data().unwrap();
+    fs.fail_once_after(0);
+
+    // Only a failed sync forgets; a failed write changes nothing.
+    assert!(file.write_all_at(&[2; PAGE], 0).is_err());
+
+    assert_eq!(contents(&fs, &path), [1; PAGE]);
+    fs.crash(0);
+    assert_eq!(contents(&fs, &path), [1; PAGE]);
+}
+
+#[test]
+fn forgetting_holds_across_crashes() {
+    let (fs, path) = disk();
+    forgotten(&fs, &path);
+    fs.crash(0);
+    forgotten(&fs, &path);
+    fs.crash(1);
+    assert_eq!(contents(&fs, &path), [1; PAGE]);
 }
 
 #[test]
