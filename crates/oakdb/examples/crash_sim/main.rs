@@ -12,8 +12,8 @@ mod harness;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use harness::{run, Case, Run, Verdict, Workload};
-use oakdb::fs::sim::Landing;
+use harness::{run_on, Case, Run, Verdict, Workload};
+use oakdb::fs::sim::{Landing, TornSector};
 
 const PAGE: u64 = 4096;
 
@@ -155,6 +155,11 @@ fn describe(run: &Run) {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let num = |i: usize| -> u64 { args[i].parse().expect("a number") };
+    // A trailing `garbled` runs on a disk that garbles torn sectors.
+    let torn_sector = match args.last().map(String::as_str) {
+        Some("garbled") => TornSector::Garbled,
+        _ => TornSector::KeepsOld,
+    };
     match args.first().map(String::as_str) {
         Some("one") => {
             let case = Case::from_seed(num(1));
@@ -176,7 +181,7 @@ fn main() {
             quiet_engine_panics();
             for seed in from..from + count {
                 let case = Case::from_seed(seed);
-                let run = case.run();
+                let run = run_on(&case.workload, case.cut_after, case.crash_seed, torn_sector);
                 length_only += u64::from(has_length_only(&run));
                 if let Verdict::OpenFailed(e) | Verdict::ReadFailed(e) | Verdict::Panicked(e) = &run.verdict {
                     // "page 9 has ..." and "page 30 has ..." count together.
@@ -192,7 +197,7 @@ fn main() {
                     });
                 }
             }
-            println!("seeds {from}..{}", from + count);
+            println!("seeds {from}..{}, {torn_sector:?}", from + count);
             for (kind, Count { seeds, shortest }) in tally {
                 let Shortest { seed, cut_after } = shortest.expect("a kind is only counted with a seed");
                 println!("  {kind:<34} {seeds:>6}   shortest: seed {seed} (cut after {cut_after})");
@@ -213,14 +218,14 @@ fn main() {
             for cut in 0..total {
                 let mut broken = false;
                 for crash_seed in 0..crash_seeds {
-                    let run = run(&workload, cut, crash_seed);
+                    let run = run_on(&workload, cut, crash_seed, torn_sector);
                     broken |= !run.verdict.is_intact();
                     *tally.entry(label(&run)).or_default() += 1;
                 }
                 broken_points += u64::from(broken);
             }
             println!(
-                "workload {}: {} commits, {total} cut points x {crash_seeds} crash seeds",
+                "workload {}: {} commits, {total} cut points x {crash_seeds} crash seeds, {torn_sector:?}",
                 num(1),
                 workload.commits.len()
             );
@@ -229,6 +234,6 @@ fn main() {
                 println!("  {kind:<34} {n:>6}");
             }
         }
-        _ => eprintln!("usage: crash_sim one <seed> | sweep <from> <count> | every <workload seed> <crash seeds>"),
+        _ => eprintln!("usage: crash_sim one <seed> | sweep <from> <count> [garbled] | every <workload seed> <crash seeds> [garbled]"),
     }
 }

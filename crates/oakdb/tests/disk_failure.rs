@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use oakdb::fs::sim::SimFs;
+use oakdb::fs::sim::{FailedSync, SimFs, TornSector};
 use oakdb::fs::{Fs, FsFile};
 use oakdb::{Db, Error, WAL_FILE};
 
@@ -120,9 +120,28 @@ fn recovers(fs: &SimFs, crash: Option<u64>, acked: &Model, landed: &Model, what:
     landed_now
 }
 
+/// Both ways a failed sync can treat the changes it was to save: they
+/// keep waiting, or reads see them but the disk never gets them, as on
+/// Linux (issue #59).
+const FAILED_SYNCS: [FailedSync; 2] = [FailedSync::KeepsWaiting, FailedSync::Forgets];
+
+/// An empty disk whose failed syncs do as `failed_sync` says.
+fn disk_whose_failed_syncs(failed_sync: FailedSync) -> SimFs {
+    let fs = SimFs::new();
+    fs.set_failed_sync(failed_sync);
+    fs
+}
+
 /// No crash, and crash seeds 0..4.
 fn reopenings() -> impl Iterator<Item = Option<u64>> {
     std::iter::once(None).chain((0..4).map(Some))
+}
+
+/// Every way a failed sync can treat its changes, with every reopening.
+fn sweeps() -> impl Iterator<Item = (FailedSync, Option<u64>)> {
+    FAILED_SYNCS
+        .into_iter()
+        .flat_map(|failed_sync| reopenings().map(move |crash| (failed_sync, crash)))
 }
 
 #[test]
@@ -219,15 +238,23 @@ fn a_stopped_database_holds_its_lock_until_it_is_dropped() {
 
 #[test]
 fn reopening_after_a_failed_sync_recovers_every_acknowledged_commit() {
-    let fs = SimFs::new();
-    let db = open(&fs);
-    let model = fill(&db, 50);
-    let (txn, landed) = writes(&db, &[1, 2, 3, 2000], b"new", &model);
-    fs.fail_once_after(1);
-    txn.commit().unwrap_err();
-    drop(db);
+    for failed_sync in FAILED_SYNCS {
+        let fs = disk_whose_failed_syncs(failed_sync);
+        let db = open(&fs);
+        let model = fill(&db, 50);
+        let (txn, landed) = writes(&db, &[1, 2, 3, 2000], b"new", &model);
+        fs.fail_once_after(1);
+        txn.commit().unwrap_err();
+        drop(db);
 
-    recovers(&fs, None, &model, &landed, "no crash");
+        recovers(
+            &fs,
+            None,
+            &model,
+            &landed,
+            &format!("{failed_sync:?}, no crash"),
+        );
+    }
 }
 
 #[test]
@@ -244,9 +271,9 @@ fn a_failure_at_any_disk_operation_of_a_commit_keeps_every_acknowledged_commit()
     assert_eq!(ops, 2, "a commit writes and syncs the WAL once");
     let mut landings = [0, 0];
     for fail in 0..ops {
-        for crash in reopenings() {
-            let what = format!("failing operation {fail}, crash {crash:?}");
-            let fs = SimFs::new();
+        for (failed_sync, crash) in sweeps() {
+            let what = format!("failing operation {fail}, crash {crash:?}, {failed_sync:?}");
+            let fs = disk_whose_failed_syncs(failed_sync);
             let db = open(&fs);
             let model = fill(&db, 60);
             let (txn, landed) = writes(&db, &[1, 30, 59, 3000], &[9; 5000], &model);
@@ -295,11 +322,11 @@ fn a_failure_at_any_disk_operation_of_a_checkpoint_keeps_every_commit() {
         };
         assert!(ops > 4, "a checkpoint takes {ops} operations");
         for fail in 0..ops {
-            for crash in reopenings() {
+            for (failed_sync, crash) in sweeps() {
                 let what = format!(
-                    "{before} checkpoints before, failing operation {fail}, crash {crash:?}"
+                    "{before} checkpoints before, failing operation {fail}, crash {crash:?}, {failed_sync:?}"
                 );
-                let fs = SimFs::new();
+                let fs = disk_whose_failed_syncs(failed_sync);
                 let db = open(&fs);
                 let model = history(&db, before);
                 fs.fail_once_after(fail);
@@ -345,9 +372,10 @@ fn a_commit_whose_checkpoint_fails_is_kept_and_stops_the_engine() {
         .chain(ops - 5..ops)
         .collect();
     for fail in fails {
-        for crash in reopenings() {
-            let what = format!("failing operation {fail} of {ops}, crash {crash:?}");
-            let fs = SimFs::new();
+        for (failed_sync, crash) in sweeps() {
+            let what =
+                format!("failing operation {fail} of {ops}, crash {crash:?}, {failed_sync:?}");
+            let fs = disk_whose_failed_syncs(failed_sync);
             let (db, model) = setup(&fs);
             let (txn, landed) = writes(&db, &[3], &long(3), &model);
             fs.fail_once_after(fail);
@@ -424,9 +452,10 @@ fn a_failure_at_any_disk_operation_of_opening_leaves_a_database_that_opens() {
         };
         assert!(ops >= 4, "{name}: opening takes {ops} operations");
         for fail in 0..ops {
-            for crash in reopenings() {
-                let what = format!("{name}, failing operation {fail}, crash {crash:?}");
-                let fs = SimFs::new();
+            for (failed_sync, crash) in sweeps() {
+                let what =
+                    format!("{name}, failing operation {fail}, crash {crash:?}, {failed_sync:?}");
+                let fs = disk_whose_failed_syncs(failed_sync);
                 let model = setup(&fs);
                 fs.fail_once_after(fail);
 
@@ -500,5 +529,149 @@ fn every_request_after_a_failed_checkpoint_reports_the_original_error() {
     match &**cause {
         Error::Io(kept) => assert_eq!(kept.raw_os_error(), Some(EIO)),
         other => panic!("the cause is {other:?}"),
+    }
+}
+
+/// A database whose last commit failed at its WAL sync on a disk that
+/// forgets, dropped without a crash, so the page cache still holds the
+/// commit the disk never got. The commit changes pages no commit since the
+/// last checkpoint changed, so the WAL on the disk holds no image of them.
+/// Returns what it held before that commit and what it holds with it.
+fn with_a_forgotten_commit(fs: &SimFs) -> (Model, Model) {
+    fs.set_failed_sync(FailedSync::Forgets);
+    let db = open(fs);
+    let mut model = history(&db, 2);
+    db.checkpoint().unwrap();
+    put(&db, 119, &[7; 30], &mut model);
+    let (txn, landed) = writes(&db, &[1, 2, 3, 3000], &[9; 5000], &model);
+    fs.fail_once_after(1);
+    txn.commit().unwrap_err();
+    (model, landed)
+}
+
+/// A database whose checkpoint failed at operation `fail` on a disk that
+/// forgets, dropped without a crash. Returns what it holds, twice: no
+/// commit's outcome is unknown.
+fn with_a_forgotten_checkpoint(fs: &SimFs, fail: u64) -> (Model, Model) {
+    fs.set_failed_sync(FailedSync::Forgets);
+    let db = open(fs);
+    let model = history(&db, 2);
+    fs.fail_once_after(fail);
+    db.checkpoint().unwrap_err();
+    (model.clone(), model)
+}
+
+/// Both ways a sector a torn write missed can come out of a crash: as it
+/// was, or garbled (design 0014).
+const TORN_SECTORS: [TornSector; 2] = [TornSector::KeepsOld, TornSector::Garbled];
+
+/// Cuts the power at every operation of opening the database `setup`
+/// leaves, then opens it after the crash, and checks that every
+/// acknowledged commit is there: those before `setup`'s failure, and one
+/// made after opening if opening finished. On a disk that keeps the old
+/// bytes of a torn sector and on one that garbles them: opening must not
+/// write over the only copy of what it relies on.
+fn power_cuts_while_reopening(name: &str, setup: &dyn Fn(&SimFs) -> (Model, Model)) {
+    let ops = {
+        let fs = SimFs::new();
+        setup(&fs);
+        let start = fs.ops();
+        open(&fs);
+        fs.ops() - start
+    };
+    assert!(ops >= 4, "{name}: opening takes {ops} operations");
+    for torn_sector in TORN_SECTORS {
+        for cut in 0..=ops {
+            for seed in 0..8 {
+                let what = format!(
+                    "{name}, {torn_sector:?}, power cut at operation {cut} of opening, seed {seed}"
+                );
+                let fs = SimFs::new();
+                fs.set_torn_sector(torn_sector);
+                let (model, landed) = setup(&fs);
+                fs.fail_after(cut);
+
+                // What the database may hold after the crash.
+                let mut allowed = vec![model, landed.clone()];
+                if let Ok(db) = Db::open_with(fs.clone(), dir()) {
+                    // Opening finished: what it read is on the disk, and a
+                    // commit now is acknowledged or its outcome is unknown.
+                    assert_eq!(read_all(&db), landed, "{what}");
+                    let mut later = landed.clone();
+                    later.insert(4242, b"later".to_vec());
+                    let mut txn = db.begin();
+                    txn.put(&4242u32.to_be_bytes(), b"later").unwrap();
+                    allowed = match txn.commit() {
+                        Ok(()) => vec![later],
+                        Err(_) => vec![landed, later],
+                    };
+                }
+                fs.crash(seed);
+                let db = Db::open_with(fs.clone(), dir()).unwrap_or_else(|e| panic!("{what}: {e}"));
+                assert!(
+                    allowed.contains(&read_all(&db)),
+                    "{what}: lost an acknowledged commit or half of one"
+                );
+            }
+        }
+    }
+}
+
+/// A database with commits in its WAL since its last checkpoint, cut off
+/// by a crash, so everything is on the disk. Returns what it holds, twice.
+fn after_a_crash(fs: &SimFs) -> (Model, Model) {
+    let db = open(fs);
+    let model = history(&db, 2);
+    drop(db);
+    fs.crash(0);
+    (model.clone(), model)
+}
+
+#[test]
+fn a_power_cut_while_reopening_after_a_crash_keeps_every_commit() {
+    // Design 0014: opening writes nothing over the only copy of a commit
+    // or a meta slot, so a disk that garbles what it was overwriting when
+    // the power went loses nothing.
+    power_cuts_while_reopening("after a crash", &after_a_crash);
+}
+
+/// A database that was checkpointed and closed. Returns what it holds,
+/// twice.
+fn after_closing(fs: &SimFs) -> (Model, Model) {
+    let db = open(fs);
+    let model = history(&db, 2);
+    db.close().unwrap();
+    fs.crash(0);
+    (model.clone(), model)
+}
+
+#[test]
+fn a_power_cut_while_reopening_after_closing_keeps_every_commit() {
+    power_cuts_while_reopening("after closing", &after_closing);
+}
+
+#[test]
+fn a_power_cut_while_reopening_after_a_forgotten_commit_keeps_every_acknowledged_commit() {
+    // Issue #59: opening writes again what it read before it appends
+    // anything. A cut part way through leaves the disk as the failed
+    // commit left it, or with what was read made durable.
+    power_cuts_while_reopening("a forgotten commit", &with_a_forgotten_commit);
+}
+
+#[test]
+fn a_power_cut_while_reopening_after_a_forgotten_checkpoint_keeps_every_commit() {
+    let ops = {
+        let fs = SimFs::new();
+        let db = open(&fs);
+        history(&db, 2);
+        let start = fs.ops();
+        db.checkpoint().unwrap();
+        fs.ops() - start
+    };
+    for fail in 0..ops {
+        power_cuts_while_reopening(
+            &format!("checkpoint failing at operation {fail}"),
+            &|fs: &SimFs| with_a_forgotten_checkpoint(fs, fail),
+        );
     }
 }

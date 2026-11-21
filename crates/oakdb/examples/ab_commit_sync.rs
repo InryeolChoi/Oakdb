@@ -90,6 +90,10 @@ impl Fs for ModeFs {
     fn sync_dir(&self, dir: &Path) -> io::Result<()> {
         sync(&File::open(dir)?, self.0)
     }
+
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        std::fs::rename(from, to)
+    }
 }
 
 impl FsFile for ModeFile {

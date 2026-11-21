@@ -223,6 +223,7 @@ enum Call {
     CreateDirAll(PathBuf),
     Open(PathBuf),
     SyncDir(PathBuf),
+    Rename(PathBuf, PathBuf),
 }
 
 /// Passes every call to the real file system and records it.
@@ -246,6 +247,13 @@ impl Fs for RecordingFs {
         self.0.borrow_mut().push(Call::SyncDir(dir.into()));
         StdFs.sync_dir(dir)
     }
+
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.0
+            .borrow_mut()
+            .push(Call::Rename(from.into(), to.into()));
+        StdFs.rename(from, to)
+    }
 }
 
 #[test]
@@ -266,7 +274,13 @@ fn file_access_goes_through_the_given_file_system() {
             Call::CreateDirAll(dir.clone()),
             Call::Open(dir.join(DATA_FILE)),
             Call::Open(dir.join(WAL_FILE)),
-            // A new file is only durable once its directory is synced.
+            // Opening writes the WAL it read to a new file and renames it
+            // over the old one, so nothing is written over the only copy
+            // of a commit (design 0014).
+            Call::Open(dir.join("oakdb.wal.new")),
+            Call::Rename(dir.join("oakdb.wal.new"), dir.join(WAL_FILE)),
+            // A new file or name is only durable once its directory is
+            // synced.
             Call::SyncDir(dir.clone()),
         ]
     );

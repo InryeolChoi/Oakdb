@@ -25,10 +25,11 @@
 //! only once a commit record follows them.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use crate::checksum;
 use crate::error::{Error, Result};
-use crate::fs::FsFile;
+use crate::fs::{Fs, FsFile};
 use crate::meta::Meta;
 use crate::page::PAGE_SIZE;
 
@@ -38,6 +39,10 @@ pub const WAL_FILE: &str = "oakdb.wal";
 /// Where opening keeps what it cuts off the WAL, added to the end, so a
 /// commit lost to a damaged record can still be looked at by hand.
 pub(crate) const CUT_FILE: &str = "oakdb.wal.cut";
+
+/// Where opening writes the WAL it read before renaming it over
+/// [`WAL_FILE`] (design 0014).
+pub(crate) const NEW_FILE: &str = "oakdb.wal.new";
 
 /// The crc the chain starts from. Not 0, so a WAL of zeros never checks
 /// out.
@@ -157,13 +162,6 @@ impl<F: FsFile> Wal<F> {
         Ok(())
     }
 
-    /// Cuts off whatever follows the last whole commit, and syncs.
-    pub(crate) fn cut_to_tail(&self) -> Result<()> {
-        self.file.set_len(self.tail.end)?;
-        self.file.sync_data()?;
-        Ok(())
-    }
-
     /// Appends a commit of `pages` and `meta` and syncs it. If that fails,
     /// the tail stays where it was, and the caller stops the engine: it
     /// writes nothing to the WAL again, and opening the database again
@@ -268,6 +266,26 @@ fn seal(out: &mut Vec<u8>, start: usize, prev: u32) -> u32 {
 /// bytes do not), it counts as having none. A longer WAL whose header does
 /// not check out is refused: the records after it may be acknowledged
 /// commits.
+/// Makes `bytes` the WAL of the database in `dir`, durably, and returns
+/// the file that holds it. They go to a new file, synced, which is then
+/// renamed over the WAL and the directory synced: the old WAL is never
+/// written over, so a power cut leaves it or the new one whole, whatever
+/// the disk does to a sector it was writing (design 0014). And as the
+/// bytes are written again, the next sync saves them even if they were
+/// read from a page cache that holds what a failed sync never got to the
+/// disk (issue #59).
+pub(crate) fn write_new<F: Fs>(fs: &F, dir: &Path, bytes: &[u8]) -> Result<F::File> {
+    let new = dir.join(NEW_FILE);
+    // A file left by an opening cut short holds nothing anyone needs.
+    let file = fs.open(&new)?;
+    file.write_all_at(bytes, 0)?;
+    file.set_len(bytes.len() as u64)?;
+    file.sync_data()?;
+    fs.rename(&new, &dir.join(WAL_FILE))?;
+    fs.sync_dir(dir)?;
+    Ok(file)
+}
+
 pub(crate) fn replay(bytes: &[u8]) -> Result<Replayed> {
     let mut done = Replayed {
         checkpoint: None,

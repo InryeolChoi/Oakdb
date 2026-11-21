@@ -6,7 +6,8 @@
 //! again: each waiting change is kept, lost, or (for a write) torn so that
 //! only some of its 512-byte sectors land. A write past the end of the
 //! file on the disk may also land its new length alone, the grown part
-//! reading as zeros. A file created since its directory was last synced may vanish.
+//! reading as zeros. A file created since its directory was last synced may vanish,
+//! and renames since then land in order up to some point.
 //! A seed makes every choice, so the same seed and the same operations
 //! always give the same disk.
 //!
@@ -14,6 +15,12 @@
 //! after a given number of operations that change the disk, every call
 //! fails until the next crash. [`SimFs::fail_once_after`] makes one such
 //! call fail with the power still on, as a disk that reports an error does.
+//! What a failed sync does to the changes it was to save is
+//! [`SimFs::set_failed_sync`]'s to say: they keep waiting, or, as Linux
+//! does, reads still see them but the disk never gets them (issue #59).
+//! [`SimFs::set_torn_sector`] says what a sector a torn write did not land
+//! holds: the old bytes, or garbage where it was overwriting bytes the disk
+//! held (design 0014).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -54,10 +61,73 @@ struct Disk {
     files: BTreeMap<PathBuf, File>,
     /// Gives each handle its own number, for locks.
     next_handle: u64,
+    /// What a failed sync does to the changes it was to save.
+    failed_sync: FailedSync,
+    /// What a sector a torn write did not land holds.
+    torn_sector: TornSector,
+    /// Renames since their directory was last synced, oldest first.
+    renames: Vec<Rename>,
+    /// Gives each file its own number, so handles follow it when renamed.
+    next_inode: u64,
+}
+
+/// What a sector that a torn write did not land holds after the crash
+/// (design 0014).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TornSector {
+    /// The bytes the disk held before: a disk writes a sector whole or
+    /// not at all.
+    #[default]
+    KeepsOld,
+    /// Garbage where the write was overwriting bytes the disk held, as a
+    /// disk that loses power part way through a sector may leave. Only the
+    /// bytes the write covers: the rest of the sector stays as it was
+    /// (what SQLite calls powersafe overwrite), and past the end of the
+    /// file on the disk nothing lands, as before.
+    Garbled,
+}
+
+/// A rename not yet made durable by syncing its directory.
+struct Rename {
+    from: PathBuf,
+    to: PathBuf,
+    /// The file `to` named before, if any: what it names again if the
+    /// rename does not land.
+    replaced: Option<File>,
+}
+
+/// What a sync that fails with the power on does to the changes it was to
+/// save (issue #59, design 0014).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FailedSync {
+    /// They stay unsynced, for a crash to decide or a later sync to save.
+    #[default]
+    KeepsWaiting,
+    /// They are forgotten, as Linux marks the pages it failed to write
+    /// clean: reads still see them, but no later sync saves them, and a
+    /// crash drops them. Only a later write of the same bytes saves them.
+    Forgets,
+}
+
+/// Why an operation that changes the disk failed.
+enum Fault {
+    PowerCut,
+    DiskFailed,
+}
+
+impl From<Fault> for io::Error {
+    fn from(fault: Fault) -> io::Error {
+        match fault {
+            Fault::PowerCut => power_cut(),
+            Fault::DiskFailed => disk_failed(),
+        }
+    }
 }
 
 #[derive(Default)]
 struct File {
+    /// Which file this is, whatever its path.
+    inode: u64,
     /// What reads see.
     now: Vec<u8>,
     /// What a crash starts from: the contents at the last sync.
@@ -86,6 +156,17 @@ pub struct CrashReport {
     pub writes: Vec<WriteFate>,
     /// Every unsynced length change, in the same order.
     pub lengths: Vec<LengthFate>,
+    /// Every unsynced rename, oldest first. They land in order: once one
+    /// does not, none after it does.
+    pub renames: Vec<RenameFate>,
+}
+
+/// One unsynced rename and whether it landed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenameFate {
+    pub from: PathBuf,
+    pub to: PathBuf,
+    pub landed: bool,
 }
 
 /// One unsynced write and what became of it.
@@ -110,6 +191,9 @@ pub struct LengthFate {
 enum Access {
     Read,
     Change,
+    /// A change that is a sync: if it fails, [`FailedSync`] says what
+    /// becomes of the changes it was to save.
+    Sync,
 }
 
 impl SimFs {
@@ -135,11 +219,26 @@ impl SimFs {
     /// nothing and is not counted. A failed sync makes nothing durable: the
     /// changes it was to save stay unsynced, for a crash to decide or a
     /// later sync to save. The operations after it work again (issue #24).
-    /// It fails with EIO, as a disk does. If the power is cut at that
-    /// operation or before, the cut wins and [`SimFs::crash`] drops the
-    /// failure: it does not carry over to the next boot.
+    /// It fails with EIO, as a disk does. [`SimFs::set_failed_sync`] can
+    /// make a failed sync forget the changes instead. If the power is cut
+    /// at that operation or before, the cut wins and [`SimFs::crash`]
+    /// drops the failure: it does not carry over to the next boot.
     pub fn fail_once_after(&self, ops: u64) {
         self.disk().fail_once_left = Some(ops);
+    }
+
+    /// Sets what a sync failed by [`SimFs::fail_once_after`] does to the
+    /// changes it was to save. It holds across crashes, as it is the
+    /// operating system's way. A failed directory sync leaves the entries
+    /// unsynced either way.
+    pub fn set_failed_sync(&self, failed_sync: FailedSync) {
+        self.disk().failed_sync = failed_sync;
+    }
+
+    /// Sets what a sector that a torn write did not land holds after a
+    /// crash. It holds across crashes, as it is the disk's way.
+    pub fn set_torn_sector(&self, torn_sector: TornSector) {
+        self.disk().torn_sector = torn_sector;
     }
 
     /// How many operations that change the disk have succeeded since the
@@ -159,6 +258,8 @@ impl SimFs {
         // Files in path order, so the choices do not depend on the order of
         // anything but the operations.
         let mut report = CrashReport::default();
+        undo_renames(&mut disk, &mut rng, &mut report);
+        let torn_sector = disk.torn_sector;
         let files = std::mem::take(&mut disk.files);
         for (path, file) in files {
             if !file.entry_synced && rng.coin() {
@@ -167,11 +268,12 @@ impl SimFs {
             }
             let mut data = file.synced;
             for change in file.waiting {
-                apply_after_crash(&path, &mut data, change, &mut rng, &mut report);
+                apply_after_crash(&path, &mut data, change, torn_sector, &mut rng, &mut report);
             }
             disk.files.insert(
                 path,
                 File {
+                    inode: file.inode,
                     now: data.clone(),
                     synced: data,
                     entry_synced: true,
@@ -194,6 +296,46 @@ impl SimFs {
 
     fn disk(&self) -> MutexGuard<'_, Disk> {
         lock(&self.disk)
+    }
+}
+
+/// Decides how many of the unsynced renames landed, oldest first, as a
+/// journaling file system commits directory changes in order, and puts
+/// back the files of those that did not. Draws nothing if there are none,
+/// so a seed gives the disk it gave before renames were added.
+fn undo_renames(disk: &mut Disk, rng: &mut Rng, report: &mut CrashReport) {
+    let renames = std::mem::take(&mut disk.renames);
+    if renames.is_empty() {
+        return;
+    }
+    let landed = (rng.next() % (renames.len() as u64 + 1)) as usize;
+    for (i, rename) in renames.iter().enumerate() {
+        report.renames.push(RenameFate {
+            from: rename.from.clone(),
+            to: rename.to.clone(),
+            landed: i < landed,
+        });
+    }
+    for (i, rename) in renames.into_iter().enumerate().rev() {
+        let file = disk
+            .files
+            .remove(&rename.to)
+            .expect("a renamed file stays until undone");
+        if i < landed {
+            // Its new name is on the disk, and with it the file.
+            disk.files.insert(
+                rename.to,
+                File {
+                    entry_synced: true,
+                    ..file
+                },
+            );
+            continue;
+        }
+        disk.files.insert(rename.from, file);
+        if let Some(replaced) = rename.replaced {
+            disk.files.insert(rename.to, replaced);
+        }
     }
 }
 
@@ -259,6 +401,7 @@ fn apply_after_crash(
     path: &Path,
     data: &mut Vec<u8>,
     change: Change,
+    torn_sector: TornSector,
     rng: &mut Rng,
     report: &mut CrashReport,
 ) {
@@ -300,6 +443,8 @@ fn apply_after_crash(
                         if landed {
                             let piece = (start - offset) as usize..(stop - offset) as usize;
                             write_at(data, start, &bytes[piece]);
+                        } else if torn_sector == TornSector::Garbled {
+                            garble(data, start..stop);
                         }
                         sectors.push(landed);
                         start = stop;
@@ -313,6 +458,16 @@ fn apply_after_crash(
                 landing,
             });
         }
+    }
+}
+
+/// Garbles the bytes of `at` the disk holds: each is flipped, so it is
+/// neither what was there nor the same bytes written again. Takes no
+/// draws, so a seed lands the same sectors either way.
+fn garble(data: &mut [u8], at: Range<u64>) {
+    let end = at.end.min(data.len() as u64);
+    for byte in data.iter_mut().take(end as usize).skip(at.start as usize) {
+        *byte = !*byte;
     }
 }
 
@@ -349,19 +504,19 @@ fn is_root(path: &Path) -> bool {
 impl Disk {
     /// Fails if the power is cut or [`SimFs::fail_once_after`] is due, and
     /// counts one operation that changes the disk.
-    fn change(&mut self) -> io::Result<()> {
+    fn change(&mut self) -> Result<(), Fault> {
         if self.down {
-            return Err(power_cut());
+            return Err(Fault::PowerCut);
         }
         // A power cut due at this operation comes before a failure due at
         // it, which the crash then drops with the rest.
         if self.ops_left == Some(0) {
             self.down = true;
-            return Err(power_cut());
+            return Err(Fault::PowerCut);
         }
         if self.fail_once_left == Some(0) {
             self.fail_once_left = None;
-            return Err(disk_failed());
+            return Err(Fault::DiskFailed);
         }
         if let Some(left) = &mut self.ops_left {
             *left -= 1;
@@ -375,6 +530,22 @@ impl Disk {
 
     fn is_dir(&self, path: &Path) -> bool {
         is_root(path) || self.dirs.contains(path)
+    }
+
+    /// What a sync of the file numbered `inode` that failed with `fault`
+    /// does to the changes it was to save: [`FailedSync`] says. A power
+    /// cut leaves them for the crash to decide.
+    fn after_failed_sync(&mut self, inode: u64, fault: &Fault) {
+        if matches!(fault, Fault::DiskFailed) && self.failed_sync == FailedSync::Forgets {
+            if let Some(file) = self.file_mut(inode) {
+                file.waiting.clear();
+            }
+        }
+    }
+
+    /// The file numbered `inode`, under whatever name it has now.
+    fn file_mut(&mut self, inode: u64) -> Option<&mut File> {
+        self.files.values_mut().find(|file| file.inode == inode)
     }
 }
 
@@ -391,7 +562,8 @@ fn disk_failed() -> io::Error {
 /// An open file on a [`SimFs`].
 pub struct SimFile {
     disk: Arc<Mutex<Disk>>,
-    path: PathBuf,
+    /// The file, followed through renames.
+    inode: u64,
     /// The boot this handle was opened in.
     boot: u64,
     handle: u64,
@@ -439,11 +611,22 @@ impl Fs for SimFs {
                 ));
             }
         }
-        disk.files.entry(path.to_path_buf()).or_default();
+        if !disk.files.contains_key(path) {
+            disk.next_inode += 1;
+            let inode = disk.next_inode;
+            disk.files.insert(
+                path.to_path_buf(),
+                File {
+                    inode,
+                    ..File::default()
+                },
+            );
+        }
+        let inode = disk.files[path].inode;
         disk.next_handle += 1;
         Ok(SimFile {
             disk: Arc::clone(&self.disk),
-            path: path.to_path_buf(),
+            inode,
             boot: disk.boot,
             handle: disk.next_handle,
         })
@@ -463,6 +646,44 @@ impl Fs for SimFs {
                 file.entry_synced = true;
             }
         }
+        // Renames land in order, so those in `dir` are only durable once
+        // every rename before them is: syncing makes all up to the last
+        // one in `dir` durable.
+        if let Some(last) = disk
+            .renames
+            .iter()
+            .rposition(|r| parent(&r.to) == Some(dir))
+        {
+            disk.renames.drain(..=last);
+        }
+        Ok(())
+    }
+
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        let mut disk = self.disk();
+        if parent(from) != parent(to) {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "the simulated disk renames only within a directory",
+            ));
+        }
+        if !disk.files.contains_key(from) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no file {}", from.display()),
+            ));
+        }
+        disk.change()?;
+        if from == to {
+            return Ok(());
+        }
+        let file = disk.files.remove(from).expect("checked above");
+        let replaced = disk.files.insert(to.to_path_buf(), file);
+        disk.renames.push(Rename {
+            from: from.to_path_buf(),
+            to: to.to_path_buf(),
+            replaced,
+        });
         Ok(())
     }
 }
@@ -475,13 +696,21 @@ impl SimFile {
         if disk.boot != self.boot {
             return Err(io::Error::other("the file was opened before a crash"));
         }
-        if access == Access::Change {
-            disk.change()?;
-        } else if disk.down {
-            return Err(power_cut());
+        if access == Access::Read {
+            if disk.down {
+                return Err(power_cut());
+            }
+        } else if let Err(fault) = disk.change() {
+            if access == Access::Sync {
+                disk.after_failed_sync(self.inode, &fault);
+            }
+            return Err(fault.into());
         }
-        // The file exists: nothing removes one within a boot.
-        let file = disk.files.get_mut(&self.path).expect("open file exists");
+        let file = disk.file_mut(self.inode).ok_or_else(|| {
+            io::Error::other(
+                "the file was replaced by a rename; the simulated disk does not keep it",
+            )
+        })?;
         Ok(f(file, self.handle))
     }
 }
@@ -538,9 +767,15 @@ impl FsFile for SimFile {
     }
 
     fn sync_data(&self) -> io::Result<()> {
-        self.with(Access::Change, |file, _| {
-            file.synced.clone_from(&file.now);
-            file.waiting.clear();
+        // The waiting changes land on what the disk holds, not what reads
+        // see: the two differ once a failed sync forgot changes.
+        self.with(Access::Sync, |file, _| {
+            for change in std::mem::take(&mut file.waiting) {
+                match change {
+                    Change::Write { offset, bytes } => write_at(&mut file.synced, offset, &bytes),
+                    Change::SetLen(len) => file.synced.resize(len, 0),
+                }
+            }
         })
     }
 }
@@ -552,8 +787,9 @@ impl Drop for SimFile {
         if disk.boot != self.boot {
             return;
         }
-        if let Some(file) = disk.files.get_mut(&self.path) {
-            if file.locked_by == Some(self.handle) {
+        let handle = self.handle;
+        if let Some(file) = disk.file_mut(self.inode) {
+            if file.locked_by == Some(handle) {
                 file.locked_by = None;
             }
         }
