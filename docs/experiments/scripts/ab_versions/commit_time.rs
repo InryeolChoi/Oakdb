@@ -7,6 +7,8 @@
 //! `commit_time <dir> reopen <n>`    n commits as in `grow`, then the
 //!                                   database is dropped without closing,
 //!                                   as a crash leaves it, and opened again
+//! `commit_time <dir> closed <n>`    as `reopen`, but closed first, so
+//!                                   opening finds an empty WAL
 //!
 //! Prints the mean and the median commit time in microseconds, or for
 //! `reopen` the time opening took, twice.
@@ -19,13 +21,17 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let (dir, mode, n) = (&args[1], args[2].as_str(), args[3].parse::<u32>().unwrap());
     let db = Db::open(dir).unwrap();
-    if mode == "reopen" {
+    if mode == "reopen" || mode == "closed" {
         for i in 0..n {
             let mut txn = db.begin();
             txn.put(&i.to_be_bytes(), &[i as u8; 1000]).unwrap();
             txn.commit().unwrap();
         }
-        drop(db);
+        if mode == "closed" {
+            db.close().unwrap();
+        } else {
+            drop(db);
+        }
         let start = Instant::now();
         let db = Db::open(dir).unwrap();
         let us = start.elapsed().as_secs_f64() * 1e6;
@@ -39,7 +45,7 @@ fn main() {
         match mode {
             "grow" => txn.put(&i.to_be_bytes(), &[i as u8; 1000]).unwrap(),
             "overwrite" => txn.put(b"k", &i.to_be_bytes()).unwrap(),
-            _ => panic!("mode is grow, overwrite or reopen"),
+            _ => panic!("mode is grow, overwrite, reopen or closed"),
         }
         let start = Instant::now();
         txn.commit().unwrap();
