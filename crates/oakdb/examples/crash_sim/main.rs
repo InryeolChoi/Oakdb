@@ -10,6 +10,7 @@
 mod harness;
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use harness::{run, Case, Run, Verdict, Workload};
 use oakdb::fs::sim::Landing;
@@ -30,13 +31,14 @@ struct Shortest {
 }
 
 /// The verdict, and for a failed open, when the power went: while
-/// creating the database or during a commit.
+/// creating the database, during a commit, or in the checkpoint after
+/// one (only a checkpoint runs between commits).
 fn label(run: &Run) -> &'static str {
-    let creating = run.cut_commit.is_none() && run.acked_commits == 0;
     match run.verdict {
         Verdict::Intact { .. } => "intact",
-        Verdict::OpenFailed(_) if creating => "open failed (cut while creating)",
-        Verdict::OpenFailed(_) => "open failed (cut in a commit)",
+        Verdict::OpenFailed(_) if run.cut_commit.is_some() => "open failed (cut in a commit)",
+        Verdict::OpenFailed(_) if run.acked_commits == 0 => "open failed (cut while creating)",
+        Verdict::OpenFailed(_) => "open failed (cut in a checkpoint)",
         Verdict::ReadFailed(_) => "read failed",
         Verdict::Panicked(_) => "panicked on reopening",
         Verdict::LostAcknowledged(_) => "lost an acknowledged commit",
@@ -55,7 +57,25 @@ fn landing(landing: &Landing) -> String {
             let sectors: String = sectors.iter().map(|&s| if s { '#' } else { '.' }).collect();
             format!("torn, sectors {sectors}")
         }
+        Landing::LengthOnly { zeros_from } => format!("length only, zeros from byte {zeros_from}"),
+        other => format!("{other:?}"),
     }
+}
+
+/// The last part of `path`, enough to tell the data file from the WAL.
+fn file_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
+/// Whether a crash landed some write's length without its bytes.
+fn has_length_only(run: &Run) -> bool {
+    run.report
+        .writes
+        .iter()
+        .any(|w| matches!(w.landing, Landing::LengthOnly { .. }))
 }
 
 /// A panic the engine raises on reopening is counted, not printed every
@@ -76,7 +96,12 @@ fn describe(run: &Run) {
     println!("acknowledged commits: {}", run.acked_commits);
     match run.cut_commit {
         Some(i) => println!("power cut during commit {i}"),
-        None => println!("power cut while opening, or not at all"),
+        None if run.acked_commits == 0 => println!("power cut while opening, or not at all"),
+        // Only a checkpoint runs between commits.
+        None => println!(
+            "power cut in the checkpoint after commit {}, or not at all",
+            run.acked_commits - 1
+        ),
     }
     for path in &run.report.vanished {
         println!("vanished: {}", path.display());
@@ -91,7 +116,11 @@ fn describe(run: &Run) {
         } else {
             format!("pages {first}..{}", first + pages)
         };
-        println!("  {at}: {what}");
+        println!("  {} {at}: {what}", file_name(&w.path));
+    }
+    for l in &run.report.lengths {
+        let what = if l.landed { "landed" } else { "lost" };
+        println!("  {} set to {} bytes: {what}", file_name(&l.path), l.len);
     }
     println!("verdict: {:?}", run.verdict);
     let keys = match &run.verdict {
@@ -143,10 +172,12 @@ fn main() {
             let (from, count) = (num(1), num(2));
             let mut tally: BTreeMap<&str, Count> = BTreeMap::new();
             let mut errors: BTreeMap<String, u64> = BTreeMap::new();
+            let mut length_only = 0;
             quiet_engine_panics();
             for seed in from..from + count {
                 let case = Case::from_seed(seed);
                 let run = case.run();
+                length_only += u64::from(has_length_only(&run));
                 if let Verdict::OpenFailed(e) | Verdict::ReadFailed(e) | Verdict::Panicked(e) = &run.verdict {
                     // "page 9 has ..." and "page 30 has ..." count together.
                     let general: String = e.chars().filter(|c| !c.is_ascii_digit()).collect();
@@ -170,6 +201,7 @@ fn main() {
             for (error, n) in errors {
                 println!("  {n:>6}  {error}");
             }
+            println!("seeds where a write landed its length alone: {length_only}");
         }
         Some("every") => {
             let workload = Workload::generate(num(1));
