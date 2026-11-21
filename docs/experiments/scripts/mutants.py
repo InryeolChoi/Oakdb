@@ -88,7 +88,7 @@ CHECKPOINT_BUGS = [
     # C3 is expected to survive since PR #58: on a disk that journals the
     # emptying before the growth, losing this sync loses nothing (design
     # 0013, section 9). The sync stays as a cheap defence.
-    ("C3 WAL start: no sync between emptying and the header (expected to survive)", WAL, "        self.file.set_len(0)?;\n        self.file.sync_data()?;", "        self.file.set_len(0)?;"),
+    ("C3 WAL start: no sync between emptying and the header (expected to survive)", WAL, "            self.file.set_len(0)?;\n            self.file.sync_data()?;", "            self.file.set_len(0)?;"),
     ("C4 first checkpoint: one slot only", CKPT, "0..2\n", "0..1\n"),
     ("C5 checkpoint: writes over the newest slot", CKPT, "slot.checkpoint % 2..slot.checkpoint % 2 + 1", "(slot.checkpoint + 1) % 2..(slot.checkpoint + 1) % 2 + 1"),
     ("C6 open: always slot A", DB, "(Ok(a), Ok(b)) if b.checkpoint > a.checkpoint => Ok(b),", "(Ok(a), Ok(b)) if false && b.checkpoint > a.checkpoint => Ok(b),"),
@@ -138,32 +138,39 @@ FAILURE_BUGS = [
 FAILURE_TESTS = CHECKPOINT_TESTS
 
 # Engine bugs of trusting the page cache when opening (#59), and SimFs
-# bugs of a failed sync that forgets.
+# bugs of a failed sync that forgets, a torn sector that is garbled, and
+# renames (design 0014).
+SLOT_AGAIN = "            if wal_checkpoint.is_some_and(|after| after < slot.checkpoint) {\n                checkpoint::write_slot(&file, slot)?;\n            }\n"
 CACHE_BUGS = [
-    ("K1 open: the meta slot not written again", DB, "        if let Some(slot) = base {\n            checkpoint::write_slot(&file, slot)?;\n        }\n", ""),
-    ("K2 open: the WAL only cut, not written again", WAL, "        self.file.write_all_at(read, 0)?;\n", "        let _ = read;\n"),
-    ("K3 open: the WAL written again but not synced", WAL, "        self.file.set_len(self.tail.end)?;\n        self.file.sync_data()?;", "        self.file.set_len(self.tail.end)?;"),
-    # K4 is expected to survive, as C3 is: a header written over a WAL the
-    # disk did not empty is followed by records chained from another
-    # header, which replay drops (design 0014, section 3).
-    ("K4 WAL start: not emptied when reads say it is empty (expected to survive)", WAL, "        self.file.set_len(0)?;\n        self.file.sync_data()?;\n", "        if self.file.size()? > 0 {\n            self.file.set_len(0)?;\n            self.file.sync_data()?;\n        }\n"),
-    ("K5 open: the meta slot written again after the WAL starts", DB, [
-        ("        if let Some(slot) = base {\n            checkpoint::write_slot(&file, slot)?;\n        }\n", ""),
-        ("        let tree = match tree {\n            Some(tree) => tree,", "        if let Some(slot) = base {\n            checkpoint::write_slot(&file, slot)?;\n        }\n        let tree = match tree {\n            Some(tree) => tree,"),
+    ("K1 open: the meta slot never written again", DB, SLOT_AGAIN, ""),
+    ("K2 open: the meta slot written again even when the WAL follows it", DB, "wal_checkpoint.is_some_and(|after| after < slot.checkpoint)", "wal_checkpoint.is_some_and(|after| after <= slot.checkpoint)"),
+    ("K3 open: the WAL written again over itself, not to a new file", WAL, [
+        ("    let file = fs.open(&new)?;", "    let file = fs.open(&dir.join(WAL_FILE))?;"),
+        ("    fs.rename(&new, &dir.join(WAL_FILE))?;\n", ""),
     ]),
-    # The design first proposed for #59: checkpoint while opening, over a
-    # WAL whose bytes on the disk may stop short of what was read.
-    ("K6 open: checkpoint instead of writing the WAL again (design 0014, B+)", DB,
-     "            wal.rewrite(&bytes[..tail.end as usize])?;",
-     "            match &tree {\n                Some(tree) if wal.has_commits() => checkpoint::run(&file, &mut wal, tree)?,\n                _ => wal.rewrite(&bytes[..tail.end as usize])?,\n            }"),
-    ("K7 SimFs: a sync saves what reads see", SIM, [
+    ("K4 open: the new WAL not synced before the rename", WAL, "    file.sync_data()?;\n    fs.rename(", "    fs.rename("),
+    ("K5 open: the directory not synced after the rename", WAL, "    fs.sync_dir(dir)?;\n    Ok(file)", "    Ok(file)"),
+    ("K6 open: the meta slot written again after the new WAL", DB, [
+        ("        if let Some(slot) = base {\n" + SLOT_AGAIN + "        }\n", ""),
+        ("        let mut wal = Wal::new(wal_file, tail, checkpoint, in_wal);\n", "        if let Some(slot) = base {\n" + SLOT_AGAIN + "        }\n        let mut wal = Wal::new(wal_file, tail, checkpoint, in_wal);\n"),
+    ]),
+    ("K7 open: a new WAL file left longer than what was written", WAL, "    file.set_len(bytes.len() as u64)?;\n", ""),
+    ("K8 SimFs: a sync saves what reads see", SIM, [
         ("            for change in std::mem::take(&mut file.waiting) {", "            file.synced.clone_from(&file.now);\n            for change in std::mem::take(&mut file.waiting).into_iter().take(0) {"),
     ]),
-    ("K8 SimFs: a failed sync never forgets", SIM, "                file.waiting.clear();\n            }\n            return Err(fault.into());", "                let _ = file;\n            }\n            return Err(fault.into());"),
-    ("K9 SimFs: a failed write forgets too", SIM, "(Access::Sync, Fault::DiskFailed, FailedSync::Forgets)", "(_, Fault::DiskFailed, FailedSync::Forgets)"),
-    ("K10 SimFs: a crash resets forgetting", SIM, "        disk.fail_once_left = None;\n", "        disk.fail_once_left = None;\n        disk.failed_sync = FailedSync::KeepsWaiting;\n"),
+    ("K9 SimFs: a failed sync never forgets", SIM, "                    file.waiting.clear();", "                    let _ = file;"),
+    ("K10 SimFs: a failed write forgets too", SIM, "(Access::Sync, Fault::DiskFailed, FailedSync::Forgets)", "(_, Fault::DiskFailed, FailedSync::Forgets)"),
+    ("K11 SimFs: a crash resets forgetting", SIM, "        disk.fail_once_left = None;\n", "        disk.fail_once_left = None;\n        disk.failed_sync = FailedSync::KeepsWaiting;\n"),
+    ("G1 SimFs: a disk that garbles keeps the old bytes", SIM, "                            garble(data, start..stop);", "                            let _ = (start, stop);"),
+    ("G2 SimFs: garbling covers the whole sector, not just the bytes written", SIM, "                            garble(data, start..stop);", "                            garble(data, start / SECTOR * SECTOR..(start / SECTOR + 1) * SECTOR);"),
+    ("G3 SimFs: garbling also hits sectors that landed", SIM, "                        if landed {\n                            let piece", "                        if landed && torn_sector == TornSector::KeepsOld {\n                            let piece"),
+    ("R1 SimFs: the newest renames land, not the oldest", SIM, "            landed: i < landed,", "            landed: i >= renames.len() - landed,"),
+    ("R2 SimFs: a directory sync leaves renames unsynced", SIM, "            disk.renames.drain(..=last);", "            let _ = last;"),
+    ("R3 SimFs: a rename that does not land loses the file it replaced", SIM, "        if let Some(replaced) = rename.replaced {\n            disk.files.insert(rename.to, replaced);\n        }\n", ""),
+    ("R4 SimFs: no rename ever lands before a sync", SIM, "    let landed = (rng.next() % (renames.len() as u64 + 1)) as usize;", "    let landed = (rng.next() % 1) as usize;"),
+    ("R5 SimFs: a failed rename still renames", SIM, "        disk.change()?;\n        if from == to {", "        let _ = disk.change();\n        if from == to {"),
 ]
-CACHE_TESTS = CHECKPOINT_TESTS
+CACHE_TESTS = CHECKPOINT_TESTS + ["--test", "fs_contract", "--test", "single_page"]
 
 REAL_DISK = [a for t in ["single_page", "delete_and_overwrite", "split", "multi_level", "scan", "overflow", "checksum"] for a in ("--test", t)]
 

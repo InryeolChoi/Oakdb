@@ -25,10 +25,11 @@
 //! only once a commit record follows them.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use crate::checksum;
 use crate::error::{Error, Result};
-use crate::fs::FsFile;
+use crate::fs::{Fs, FsFile};
 use crate::meta::Meta;
 use crate::page::PAGE_SIZE;
 
@@ -38,6 +39,10 @@ pub const WAL_FILE: &str = "oakdb.wal";
 /// Where opening keeps what it cuts off the WAL, added to the end, so a
 /// commit lost to a damaged record can still be looked at by hand.
 pub(crate) const CUT_FILE: &str = "oakdb.wal.cut";
+
+/// Where opening writes the WAL it read before renaming it over
+/// [`WAL_FILE`] (design 0014).
+pub(crate) const NEW_FILE: &str = "oakdb.wal.new";
 
 /// The crc the chain starts from. Not 0, so a WAL of zeros never checks
 /// out.
@@ -143,30 +148,17 @@ impl<F: FsFile> Wal<F> {
     /// Empties the WAL and starts it again after `checkpoint`. The length
     /// change is synced before the header is written, so a header torn by
     /// a power cut is never followed by older records, and a WAL no longer
-    /// than a header never holds one ([`replay`] relies on it). The length
-    /// is set even if reads say the WAL is empty: after a failed sync the
-    /// disk may still hold an older one (issue #59).
+    /// than a header never holds one ([`replay`] relies on it).
     pub(crate) fn start(&mut self, checkpoint: u64) -> Result<()> {
-        self.file.set_len(0)?;
-        self.file.sync_data()?;
+        if self.file.size()? > 0 {
+            self.file.set_len(0)?;
+            self.file.sync_data()?;
+        }
         self.file.write_all_at(&encode_header(checkpoint).0, 0)?;
         self.file.sync_data()?;
         self.tail = Tail::after_header(checkpoint);
         self.checkpoint = checkpoint;
         self.pages.clear();
-        Ok(())
-    }
-
-    /// Writes `read`, the WAL as opening read it up to the end of its
-    /// last whole commit, over the WAL again, cuts off whatever follows,
-    /// and syncs. Reads may have come from the page cache, holding bytes
-    /// a failed sync never got to the disk; writing them again is what
-    /// makes the next sync save them (issue #59, design 0014).
-    pub(crate) fn rewrite(&self, read: &[u8]) -> Result<()> {
-        debug_assert_eq!(read.len() as u64, self.tail.end);
-        self.file.write_all_at(read, 0)?;
-        self.file.set_len(self.tail.end)?;
-        self.file.sync_data()?;
         Ok(())
     }
 
@@ -274,6 +266,26 @@ fn seal(out: &mut Vec<u8>, start: usize, prev: u32) -> u32 {
 /// bytes do not), it counts as having none. A longer WAL whose header does
 /// not check out is refused: the records after it may be acknowledged
 /// commits.
+/// Makes `bytes` the WAL of the database in `dir`, durably, and returns
+/// the file that holds it. They go to a new file, synced, which is then
+/// renamed over the WAL and the directory synced: the old WAL is never
+/// written over, so a power cut leaves it or the new one whole, whatever
+/// the disk does to a sector it was writing (design 0014). And as the
+/// bytes are written again, the next sync saves them even if they were
+/// read from a page cache that holds what a failed sync never got to the
+/// disk (issue #59).
+pub(crate) fn write_new<F: Fs>(fs: &F, dir: &Path, bytes: &[u8]) -> Result<F::File> {
+    let new = dir.join(NEW_FILE);
+    // A file left by an opening cut short holds nothing anyone needs.
+    let file = fs.open(&new)?;
+    file.write_all_at(bytes, 0)?;
+    file.set_len(bytes.len() as u64)?;
+    file.sync_data()?;
+    fs.rename(&new, &dir.join(WAL_FILE))?;
+    fs.sync_dir(dir)?;
+    Ok(file)
+}
+
 pub(crate) fn replay(bytes: &[u8]) -> Result<Replayed> {
     let mut done = Replayed {
         checkpoint: None,

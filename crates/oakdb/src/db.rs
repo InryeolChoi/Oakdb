@@ -40,7 +40,7 @@ use crate::fs::{Fs, FsFile, StdFs};
 use crate::meta::{Meta, Slot, META_LEN};
 use crate::page::{Page, Value, PAGE_SIZE};
 use crate::tree::{Cursor, Tree};
-use crate::wal::{self, Replayed, Wal, CUT_FILE, HEADER_LEN, WAL_FILE};
+use crate::wal::{self, Replayed, Tail, Wal, CUT_FILE, HEADER_LEN, WAL_FILE};
 
 /// Name of the data file inside the database directory.
 pub const DATA_FILE: &str = "oakdb.data";
@@ -93,8 +93,7 @@ impl<F: Fs> Db<F> {
             std::io::ErrorKind::WouldBlock => Error::AlreadyOpen,
             _ => Error::from(e),
         })?;
-        let wal_file = fs.open(&dir.join(WAL_FILE))?;
-        let bytes = read_all(&wal_file)?;
+        let bytes = read_all(&fs.open(&dir.join(WAL_FILE))?)?;
         let replayed = wal::replay(&bytes)?;
         // Everything is checked before anything is changed, so a database
         // that is refused is left as it was.
@@ -113,7 +112,10 @@ impl<F: Fs> Db<F> {
             }
         }
         let Replayed {
-            pages, meta, tail, ..
+            checkpoint: wal_checkpoint,
+            pages,
+            meta,
+            tail,
         } = replayed;
         let (pages, meta) = match use_wal {
             UseWal::Replay => (pages, meta.or(base.map(|slot| slot.meta))),
@@ -133,32 +135,49 @@ impl<F: Fs> Db<F> {
             }
             None => None,
         };
-        let mut wal = Wal::new(wal_file, tail, checkpoint, in_wal);
         // Everything above was read, perhaps from the page cache. In the
         // same boot as a sync that failed, that can hold bytes the disk
         // never got, and no later sync saves them unless they are written
-        // again. So what opening relies on is written again and synced
-        // before anything is appended to it (issue #59, design 0014): the
-        // meta slot first, then the WAL that follows it.
+        // again. So what opening builds on is made durable before anything
+        // is appended to it, without writing over the only copy of
+        // anything a power cut could leave it needing (issue #59, design
+        // 0014).
+        //
+        // The meta slot first, and only if the WAL follows an older
+        // checkpoint: a checkpoint's slot may then be in the page cache
+        // alone, as its sync failed, and the new WAL header below must not
+        // reach the disk before it. It is written where it was read; if a
+        // power cut garbles it there, the other slot and the WAL still on
+        // the disk, which follows it, open as before. A WAL that follows
+        // this very checkpoint was started only once its slot was synced.
         if let Some(slot) = base {
-            checkpoint::write_slot(&file, slot)?;
-        }
-        if use_wal == UseWal::Replay {
-            // What follows the last whole commit was never acknowledged, or
-            // follows a damaged record. Keep it in the cut file, then cut
-            // it off, so the next commit goes right after the last whole
-            // one and replay does not stop short of it.
-            let cut = &bytes[tail.end as usize..];
-            if !cut.is_empty() {
-                let kept = fs.open(&dir.join(CUT_FILE))?;
-                kept.write_all_at(cut, kept.size()?)?;
-                kept.sync_data()?;
-                fs.sync_dir(dir)?;
+            if wal_checkpoint.is_some_and(|after| after < slot.checkpoint) {
+                checkpoint::write_slot(&file, slot)?;
             }
-            wal.rewrite(&bytes[..tail.end as usize])?;
-        } else {
-            wal.start(checkpoint)?;
         }
+        let header = wal::encode_header(checkpoint).0;
+        let (kept, tail, in_wal) = match use_wal {
+            UseWal::Replay => {
+                let end = usize::try_from(tail.end).expect("the tail is inside what was read");
+                // What follows the last whole commit was never
+                // acknowledged, or follows a damaged record. Keep it in the
+                // cut file; the new WAL ends at the last whole commit, so
+                // the next one goes right after it.
+                let cut = &bytes[end..];
+                if !cut.is_empty() {
+                    let kept = fs.open(&dir.join(CUT_FILE))?;
+                    kept.write_all_at(cut, kept.size()?)?;
+                    kept.sync_data()?;
+                    fs.sync_dir(dir)?;
+                }
+                (&bytes[..end], tail, in_wal)
+            }
+            UseWal::Restart => (&header[..], Tail::after_header(checkpoint), BTreeSet::new()),
+        };
+        // This also syncs the directory, so the data file, if this open
+        // made it, is there to stay.
+        let wal_file = wal::write_new(&fs, dir, kept)?;
+        let mut wal = Wal::new(wal_file, tail, checkpoint, in_wal);
         let tree = match tree {
             Some(tree) => tree,
             // A new database, whose creation is the first commit.
@@ -168,10 +187,6 @@ impl<F: Fs> Db<F> {
                 tree
             }
         };
-        // A file this open made is only there to stay once its directory
-        // is synced. Syncing every time costs one sync per open and saves
-        // telling which of the two files is new.
-        fs.sync_dir(dir)?;
         Ok(Db {
             file,
             wal: Mutex::new(wal),

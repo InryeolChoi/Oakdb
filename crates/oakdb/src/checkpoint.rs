@@ -68,7 +68,7 @@ fn write(file: &impl FsFile, wal: &mut Wal<impl FsFile>, tree: &Tree) -> Result<
 /// first checkpoint fills both slots, so every page of the data file has
 /// its checksum from the start; later ones write the older slot, the one
 /// numbered `checkpoint % 2`. Opening writes the slot it read the same
-/// way again (issue #59).
+/// way again when the WAL follows an older checkpoint (issue #59).
 pub(crate) fn write_slot(file: &impl FsFile, slot: Slot) -> Result<()> {
     let slots = if slot.checkpoint == 1 {
         0..2
