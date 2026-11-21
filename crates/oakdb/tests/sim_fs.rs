@@ -301,7 +301,7 @@ fn a_sync_after_a_failed_one_makes_the_writes_durable() {
 
 /// A disk whose page 0 was synced as 1s and then written as 2s, with the
 /// sync of the 2s failed on a disk that forgets (issue #59).
-fn forgotten(fs: &SimFs, path: &Path) {
+fn with_a_forgotten_write(fs: &SimFs, path: &Path) {
     fs.set_failed_sync(FailedSync::Forgets);
     let file = fs.open(path).unwrap();
     file.write_all_at(&[1; PAGE], 0).unwrap();
@@ -315,7 +315,7 @@ fn forgotten(fs: &SimFs, path: &Path) {
 fn a_failed_sync_that_forgets_leaves_reads_seeing_what_the_disk_lost() {
     for seed in 0..SEEDS {
         let (fs, path) = disk();
-        forgotten(&fs, &path);
+        with_a_forgotten_write(&fs, &path);
         // Reads see the forgotten write, as the page cache does.
         assert_eq!(contents(&fs, &path), [2; PAGE]);
         let file = fs.open(&path).unwrap();
@@ -337,7 +337,7 @@ fn a_failed_sync_that_forgets_leaves_reads_seeing_what_the_disk_lost() {
 fn writing_the_forgotten_bytes_again_saves_them() {
     for seed in 0..SEEDS {
         let (fs, path) = disk();
-        forgotten(&fs, &path);
+        with_a_forgotten_write(&fs, &path);
         let file = fs.open(&path).unwrap();
         let mut seen = [0; PAGE];
         file.read_exact_at(&mut seen, 0).unwrap();
@@ -372,7 +372,7 @@ fn only_a_failed_sync_forgets() {
 #[test]
 fn forgetting_holds_across_crashes() {
     let (fs, path) = disk();
-    forgotten(&fs, &path);
+    with_a_forgotten_write(&fs, &path);
     fs.crash(0);
     // Set once, before the crash.
     let file = fs.open(&path).unwrap();

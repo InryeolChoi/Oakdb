@@ -415,11 +415,8 @@ fn a_power_cut_anywhere_in_a_checkpoint_keeps_every_commit() {
             fs.ops() - start
         };
         assert!(ops > 4, "a checkpoint takes {ops} operations");
-        for (torn_sector, cut) in TORN_SECTORS
-            .into_iter()
-            .flat_map(|torn_sector| (0..=ops).map(move |cut| (torn_sector, cut)))
-        {
-            for seed in 0..8 {
+        for torn_sector in TORN_SECTORS {
+            for (cut, seed) in (0..=ops).flat_map(|cut| (0..8).map(move |seed| (cut, seed))) {
                 let fs = SimFs::new();
                 fs.set_torn_sector(torn_sector);
                 let db = Db::open_with(fs.clone(), dir()).unwrap();

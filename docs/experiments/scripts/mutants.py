@@ -158,8 +158,8 @@ CACHE_BUGS = [
     ("K8 SimFs: a sync saves what reads see", SIM, [
         ("            for change in std::mem::take(&mut file.waiting) {", "            file.synced.clone_from(&file.now);\n            for change in std::mem::take(&mut file.waiting).into_iter().take(0) {"),
     ]),
-    ("K9 SimFs: a failed sync never forgets", SIM, "                    file.waiting.clear();", "                    let _ = file;"),
-    ("K10 SimFs: a failed write forgets too", SIM, "(Access::Sync, Fault::DiskFailed, FailedSync::Forgets)", "(_, Fault::DiskFailed, FailedSync::Forgets)"),
+    ("K9 SimFs: a failed sync never forgets", SIM, "                file.waiting.clear();", "                let _ = file;"),
+    ("K10 SimFs: a failed write forgets too", SIM, "            if access == Access::Sync {\n                disk.after_failed_sync", "            if access != Access::Read {\n                disk.after_failed_sync"),
     ("K11 SimFs: a crash resets forgetting", SIM, "        disk.fail_once_left = None;\n", "        disk.fail_once_left = None;\n        disk.failed_sync = FailedSync::KeepsWaiting;\n"),
     ("G1 SimFs: a disk that garbles keeps the old bytes", SIM, "                            garble(data, start..stop);", "                            let _ = (start, stop);"),
     ("G2 SimFs: garbling covers the whole sector, not just the bytes written", SIM, "                            garble(data, start..stop);", "                            garble(data, start / SECTOR * SECTOR..(start / SECTOR + 1) * SECTOR);"),

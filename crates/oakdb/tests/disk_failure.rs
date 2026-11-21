@@ -126,7 +126,7 @@ fn recovers(fs: &SimFs, crash: Option<u64>, acked: &Model, landed: &Model, what:
 const FAILED_SYNCS: [FailedSync; 2] = [FailedSync::KeepsWaiting, FailedSync::Forgets];
 
 /// An empty disk whose failed syncs do as `failed_sync` says.
-fn disk(failed_sync: FailedSync) -> SimFs {
+fn disk_whose_failed_syncs(failed_sync: FailedSync) -> SimFs {
     let fs = SimFs::new();
     fs.set_failed_sync(failed_sync);
     fs
@@ -135,6 +135,13 @@ fn disk(failed_sync: FailedSync) -> SimFs {
 /// No crash, and crash seeds 0..4.
 fn reopenings() -> impl Iterator<Item = Option<u64>> {
     std::iter::once(None).chain((0..4).map(Some))
+}
+
+/// Every way a failed sync can treat its changes, with every reopening.
+fn sweeps() -> impl Iterator<Item = (FailedSync, Option<u64>)> {
+    FAILED_SYNCS
+        .into_iter()
+        .flat_map(|failed_sync| reopenings().map(move |crash| (failed_sync, crash)))
 }
 
 #[test]
@@ -232,7 +239,7 @@ fn a_stopped_database_holds_its_lock_until_it_is_dropped() {
 #[test]
 fn reopening_after_a_failed_sync_recovers_every_acknowledged_commit() {
     for failed_sync in FAILED_SYNCS {
-        let fs = disk(failed_sync);
+        let fs = disk_whose_failed_syncs(failed_sync);
         let db = open(&fs);
         let model = fill(&db, 50);
         let (txn, landed) = writes(&db, &[1, 2, 3, 2000], b"new", &model);
@@ -264,12 +271,9 @@ fn a_failure_at_any_disk_operation_of_a_commit_keeps_every_acknowledged_commit()
     assert_eq!(ops, 2, "a commit writes and syncs the WAL once");
     let mut landings = [0, 0];
     for fail in 0..ops {
-        for (failed_sync, crash) in FAILED_SYNCS
-            .into_iter()
-            .flat_map(|f| reopenings().map(move |c| (f, c)))
-        {
+        for (failed_sync, crash) in sweeps() {
             let what = format!("failing operation {fail}, crash {crash:?}, {failed_sync:?}");
-            let fs = disk(failed_sync);
+            let fs = disk_whose_failed_syncs(failed_sync);
             let db = open(&fs);
             let model = fill(&db, 60);
             let (txn, landed) = writes(&db, &[1, 30, 59, 3000], &[9; 5000], &model);
@@ -318,14 +322,11 @@ fn a_failure_at_any_disk_operation_of_a_checkpoint_keeps_every_commit() {
         };
         assert!(ops > 4, "a checkpoint takes {ops} operations");
         for fail in 0..ops {
-            for (failed_sync, crash) in FAILED_SYNCS
-                .into_iter()
-                .flat_map(|f| reopenings().map(move |c| (f, c)))
-            {
+            for (failed_sync, crash) in sweeps() {
                 let what = format!(
                     "{before} checkpoints before, failing operation {fail}, crash {crash:?}, {failed_sync:?}"
                 );
-                let fs = disk(failed_sync);
+                let fs = disk_whose_failed_syncs(failed_sync);
                 let db = open(&fs);
                 let model = history(&db, before);
                 fs.fail_once_after(fail);
@@ -371,13 +372,10 @@ fn a_commit_whose_checkpoint_fails_is_kept_and_stops_the_engine() {
         .chain(ops - 5..ops)
         .collect();
     for fail in fails {
-        for (failed_sync, crash) in FAILED_SYNCS
-            .into_iter()
-            .flat_map(|f| reopenings().map(move |c| (f, c)))
-        {
+        for (failed_sync, crash) in sweeps() {
             let what =
                 format!("failing operation {fail} of {ops}, crash {crash:?}, {failed_sync:?}");
-            let fs = disk(failed_sync);
+            let fs = disk_whose_failed_syncs(failed_sync);
             let (db, model) = setup(&fs);
             let (txn, landed) = writes(&db, &[3], &long(3), &model);
             fs.fail_once_after(fail);
@@ -454,13 +452,10 @@ fn a_failure_at_any_disk_operation_of_opening_leaves_a_database_that_opens() {
         };
         assert!(ops >= 4, "{name}: opening takes {ops} operations");
         for fail in 0..ops {
-            for (failed_sync, crash) in FAILED_SYNCS
-                .into_iter()
-                .flat_map(|f| reopenings().map(move |c| (f, c)))
-            {
+            for (failed_sync, crash) in sweeps() {
                 let what =
                     format!("{name}, failing operation {fail}, crash {crash:?}, {failed_sync:?}");
-                let fs = disk(failed_sync);
+                let fs = disk_whose_failed_syncs(failed_sync);
                 let model = setup(&fs);
                 fs.fail_once_after(fail);
 

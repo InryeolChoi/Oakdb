@@ -220,9 +220,9 @@ impl SimFs {
     /// changes it was to save stay unsynced, for a crash to decide or a
     /// later sync to save. The operations after it work again (issue #24).
     /// It fails with EIO, as a disk does. [`SimFs::set_failed_sync`] can
-    /// make a failed sync forget the changes instead. If the power is cut at that
-    /// operation or before, the cut wins and [`SimFs::crash`] drops the
-    /// failure: it does not carry over to the next boot.
+    /// make a failed sync forget the changes instead. If the power is cut
+    /// at that operation or before, the cut wins and [`SimFs::crash`]
+    /// drops the failure: it does not carry over to the next boot.
     pub fn fail_once_after(&self, ops: u64) {
         self.disk().fail_once_left = Some(ops);
     }
@@ -532,6 +532,17 @@ impl Disk {
         is_root(path) || self.dirs.contains(path)
     }
 
+    /// What a sync of the file numbered `inode` that failed with `fault`
+    /// does to the changes it was to save: [`FailedSync`] says. A power
+    /// cut leaves them for the crash to decide.
+    fn after_failed_sync(&mut self, inode: u64, fault: &Fault) {
+        if matches!(fault, Fault::DiskFailed) && self.failed_sync == FailedSync::Forgets {
+            if let Some(file) = self.file_mut(inode) {
+                file.waiting.clear();
+            }
+        }
+    }
+
     /// The file numbered `inode`, under whatever name it has now.
     fn file_mut(&mut self, inode: u64) -> Option<&mut File> {
         self.files.values_mut().find(|file| file.inode == inode)
@@ -690,12 +701,8 @@ impl SimFile {
                 return Err(power_cut());
             }
         } else if let Err(fault) = disk.change() {
-            if let (Access::Sync, Fault::DiskFailed, FailedSync::Forgets) =
-                (access, &fault, disk.failed_sync)
-            {
-                if let Some(file) = disk.file_mut(self.inode) {
-                    file.waiting.clear();
-                }
+            if access == Access::Sync {
+                disk.after_failed_sync(self.inode, &fault);
             }
             return Err(fault.into());
         }

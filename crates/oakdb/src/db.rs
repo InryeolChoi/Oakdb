@@ -163,14 +163,14 @@ impl<F: Fs> Db<F> {
                 // acknowledged, or follows a damaged record. Keep it in the
                 // cut file; the new WAL ends at the last whole commit, so
                 // the next one goes right after it.
-                let cut = &bytes[end..];
+                let (whole, cut) = bytes.split_at(end);
                 if !cut.is_empty() {
                     let kept = fs.open(&dir.join(CUT_FILE))?;
                     kept.write_all_at(cut, kept.size()?)?;
                     kept.sync_data()?;
                     fs.sync_dir(dir)?;
                 }
-                (&bytes[..end], tail, in_wal)
+                (whole, tail, in_wal)
             }
             UseWal::Restart => (&header[..], Tail::after_header(checkpoint), BTreeSet::new()),
         };
