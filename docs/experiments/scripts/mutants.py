@@ -7,6 +7,7 @@ Run from the repository root:
     python3 docs/experiments/scripts/mutants.py engine   # experiment 0007
     python3 docs/experiments/scripts/mutants.py wal      # experiment 0009
     python3 docs/experiments/scripts/mutants.py checkpoint  # experiment 0010
+    python3 docs/experiments/scripts/mutants.py failure  # experiment 0011
 
 A bug is one replacement, or a list of them for a bug that spans places.
 
@@ -35,7 +36,7 @@ SIM_BUGS = [
     ("lock not released on drop", "file.locked_by = None;", "let _ = file;"),
     ("old handles keep working", "disk.boot += 1;", "disk.boot += 0;"),
     ("power stays cut after a crash", "disk.down = false;", "disk.down = disk.down;"),
-    ("ops miscounted", "None => {\n                self.ops += 1;", "None => {\n                self.ops += 2;"),
+    ("ops miscounted", "self.ops += 1;\n        Ok(())", "self.ops += 2;\n        Ok(())"),
     ("report lies about torn sectors", "sectors.push(landed);", "sectors.push(!landed);"),
     # Writes that land their length alone (#56).
     ("never length only", "Some(zeros_from) if draw >> 63 == 1 =>", "Some(zeros_from) if false =>"),
@@ -95,7 +96,7 @@ CHECKPOINT_BUGS = [
     ("C9 open: a first checkpoint cut short not recovered", DB, "(Err(Error::Corrupt(_)), Some(0)) if wal_has_commit =>", "(Err(Error::Corrupt(_)), Some(0)) if false =>"),
     ("C10 replay: header not checked", WAL, "if header != encode_header(checkpoint).0 {", "if false {"),
     ("C11 replay: chain does not start from the header", WAL, "let (mut at, mut crc) = (HEADER, done.tail.crc);", "let (mut at, mut crc) = (HEADER, START);"),
-    ("C12 checkpoint: a failure does not stop the engine", CKPT, "        wal.stop();\n", ""),
+    ("C12 checkpoint: a failure does not stop the engine", DB, ".inspect_err(|e| self.stop(e))", ""),
     ("C13 commit: never checkpoints", DB, "if wal.len() > CHECKPOINT_AFTER {", "if false {"),
     ("C14 open: data file length not checked", DB, "if u128::from(size) < pages_len(slot.meta.page_count) {", "if false {"),
     ("C15 checkpoint: runs with nothing to move", CKPT, "    if !wal.has_commits() {\n        return Ok(());\n    }\n", ""),
@@ -105,7 +106,35 @@ CHECKPOINT_BUGS = [
     ("C18 open: data file length wraps around (S3)", DB, "u128::from(pages) * PAGE_SIZE as u128", "u128::from(pages.wrapping_mul(PAGE_SIZE as u64))"),
     ("C19 checkpoint: number wraps around (S3)", CKPT, ".checked_add(1)", ".wrapping_add(1).checked_add(0)"),
 ]
-CHECKPOINT_TESTS = WAL_TESTS + [a for t in ["checkpoint", "checksum", "overflow"] for a in ("--test", t)]
+CHECKPOINT_TESTS = WAL_TESTS + [a for t in ["checkpoint", "checksum", "overflow", "disk_failure"] for a in ("--test", t)]
+
+# Engine bugs of stopping after a disk failure (#24), and SimFs bugs of
+# failing one call with the power on.
+FAILURE_BUGS = [
+    ("F1 commit: a failed WAL write does not stop the engine", DB, "                self.db.stop(&e);\n                return Err(e);", "                return Err(e);"),
+    ("F2 commit: a failed WAL write reports Io, not OutcomeUnknown", DB, "let e = Error::OutcomeUnknown(Arc::new(e));", "let e = Error::Io(Arc::new(e));"),
+    ("F3 commit: a failed checkpoint after it reports Err", DB, "                self.db.stop(&e);\n            }\n        }\n        Ok(())", "                self.db.stop(&e);\n                return Err(e);\n            }\n        }\n        Ok(())"),
+    ("F4 commit: a failed checkpoint after it does not stop the engine", DB, "                self.db.stop(&e);\n            }\n        }\n        Ok(())", "                let _ = e;\n            }\n        }\n        Ok(())"),
+    ("F5 commit: the stop not checked holding the lock", DB, "        self.db.check_running()?;\n        let mut next = Tree::clone(&tree);", "        let mut next = Tree::clone(&tree);"),
+    ("F6 commit of nothing: the stop not checked", DB, "return self.db.check_running();", "return Ok(());"),
+    ("F7 get: the stop not checked", DB, "-> Result<Option<Vec<u8>>> {\n        self.db.check_running()?;", "-> Result<Option<Vec<u8>>> {"),
+    ("F8 put: the stop not checked", DB, "value: &[u8]) -> Result<()> {\n        self.db.check_running()?;", "value: &[u8]) -> Result<()> {"),
+    ("F9 delete: the stop not checked", DB, "pub fn delete(&mut self, key: &[u8]) -> Result<()> {\n        self.db.check_running()?;", "pub fn delete(&mut self, key: &[u8]) -> Result<()> {"),
+    ("F10 scan: the stop not checked", DB, "        if let Err(e) = self.db.check_running() {\n            return Scan::stopped(tree, e);\n        }\n", ""),
+    ("F11 checkpoint: the stop not checked", DB, "        self.check_running()?;\n        checkpoint::run", "        checkpoint::run"),
+    ("F12 stop: the cause is not kept", DB, "Some(cause) => Err(Error::Stopped(Arc::clone(cause))),", "Some(_) => Err(Error::Stopped(Arc::new(Error::AlreadyOpen))),"),
+    ("S1 SimFs: a failure never ends", SIM, "            self.fail_once_left = None;\n            return Err(disk_failed());", "            self.fail_once_left = Some(0);\n            return Err(disk_failed());"),
+    ("S2 SimFs: the countdown never moves", SIM, "&mut self.fail_once_left {\n            *left -= 1;", "&mut self.fail_once_left {\n            let _ = left;"),
+    ("S3 SimFs: the failure comes before a power cut due at the same call", SIM,
+     "        if self.ops_left == Some(0) {\n            self.down = true;\n            return Err(power_cut());\n        }\n        if self.fail_once_left == Some(0) {\n            self.fail_once_left = None;\n            return Err(disk_failed());\n        }\n",
+     "        if self.fail_once_left == Some(0) {\n            self.fail_once_left = None;\n            return Err(disk_failed());\n        }\n        if self.ops_left == Some(0) {\n            self.down = true;\n            return Err(power_cut());\n        }\n"),
+    ("S4 SimFs: the failed call is counted", SIM, "            self.fail_once_left = None;\n            return Err(disk_failed());", "            self.fail_once_left = None;\n            self.ops += 1;\n            return Err(disk_failed());"),
+    # After the review of PR #57.
+    ("S5 SimFs: a failure the power cut got ahead of carries over to the next boot (P4)", SIM, "        disk.fail_once_left = None;\n", ""),
+    ("S6 SimFs: a failure gives no OS error code", SIM, "io::Error::from_raw_os_error(libc::EIO)", "io::Error::other(\"the disk failed\")"),
+    ("F13 stop: the cause is a flattened copy (S6, P5)", DB, "let _ = self.stopped.set(Arc::new(cause.clone()));", "let _ = self.stopped.set(Arc::new(Error::from(std::io::Error::other(cause.to_string()))));"),
+]
+FAILURE_TESTS = CHECKPOINT_TESTS
 
 REAL_DISK = [a for t in ["single_page", "delete_and_overwrite", "split", "multi_level", "scan", "overflow", "checksum"] for a in ("--test", t)]
 
@@ -119,7 +148,7 @@ def run(args):
 
 def engine(bugs, tests, label):
     """Plants each bug, which may change one of several files in places."""
-    originals = {path: open(path).read() for path in (DB, WAL, CKPT)}
+    originals = {path: open(path).read() for path in (DB, WAL, CKPT, SIM)}
     try:
         for name, path, *change in bugs:
             pairs = change[0] if len(change) == 1 else [tuple(change)]
@@ -142,6 +171,8 @@ def main():
         return engine(WAL_BUGS, WAL_TESTS, "WAL, crash and sim tests")
     if which == "checkpoint":
         return engine(CHECKPOINT_BUGS, CHECKPOINT_TESTS, "checkpoint, WAL, crash and sim tests")
+    if which == "failure":
+        return engine(FAILURE_BUGS, FAILURE_TESTS, "disk failure, checkpoint, WAL, crash and sim tests")
     path, bugs = (SIM, SIM_BUGS) if which == "sim" else (DB, ENGINE_BUGS)
     original = open(path).read()
     try:

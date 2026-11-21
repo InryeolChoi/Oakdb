@@ -126,10 +126,6 @@ pub(crate) struct Wal<F: FsFile> {
     /// Every page a commit in the WAL holds an image of: the pages the
     /// next checkpoint moves to the data file.
     pages: BTreeSet<u64>,
-    /// A checkpoint failed part way, so whether the data file holds a
-    /// newer checkpoint than this WAL follows is unknown. Nothing more is
-    /// written until the database is opened again (design 0011).
-    stopped: bool,
 }
 
 impl<F: FsFile> Wal<F> {
@@ -141,7 +137,6 @@ impl<F: FsFile> Wal<F> {
             tail,
             checkpoint,
             pages,
-            stopped: false,
         }
     }
 
@@ -170,11 +165,14 @@ impl<F: FsFile> Wal<F> {
     }
 
     /// Appends a commit of `pages` and `meta` and syncs it. If that fails,
-    /// the tail stays where it was, so the next commit writes over whatever
-    /// part of this one reached the file. Stopping the engine instead, as
-    /// ADR 0007 decides, comes with #24.
-    pub(crate) fn append(&mut self, pages: &[(u64, &[u8; PAGE_SIZE])], meta: Meta) -> Result<()> {
-        self.check_running()?;
+    /// the tail stays where it was, and the caller stops the engine: it
+    /// writes nothing to the WAL again, and opening the database again
+    /// finds the whole commit or cuts off what part of it reached the file.
+    pub(crate) fn append(
+        &mut self,
+        pages: &[(u64, &[u8; PAGE_SIZE])],
+        meta: Meta,
+    ) -> std::io::Result<()> {
         let (bytes, crc) = encode_commit(self.tail.crc, pages, meta);
         self.file.write_all_at(&bytes, self.tail.end)?;
         self.file.sync_data()?;
@@ -202,21 +200,6 @@ impl<F: FsFile> Wal<F> {
 
     pub(crate) fn pages(&self) -> &BTreeSet<u64> {
         &self.pages
-    }
-
-    /// Refuses to write from now on.
-    pub(crate) fn stop(&mut self) {
-        self.stopped = true;
-    }
-
-    /// Fails if [`Wal::stop`] was called.
-    pub(crate) fn check_running(&self) -> Result<()> {
-        if self.stopped {
-            return Err(Error::Io(std::io::Error::other(
-                "a checkpoint failed, so the engine stopped: open the database again",
-            )));
-        }
-        Ok(())
     }
 }
 

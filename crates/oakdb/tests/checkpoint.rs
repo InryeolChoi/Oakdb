@@ -2,13 +2,10 @@
 //! data file, a new meta page goes to the older of the two meta slots, and
 //! the WAL starts again under a header naming the new checkpoint.
 
-use std::cell::Cell;
 use std::collections::BTreeMap;
-use std::io;
-use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::path::PathBuf;
 
-use oakdb::fs::sim::{SimFile, SimFs};
+use oakdb::fs::sim::SimFs;
 use oakdb::fs::{Fs, FsFile};
 use oakdb::{Db, Error, CHECKPOINT_AFTER, DATA_FILE, WAL_FILE};
 
@@ -523,93 +520,6 @@ fn a_cut_while_writing_the_wal_header_can_leave_its_length_and_zeros() {
         assert_holds(&db, &model, &format!("seed {seed}"));
     }
     assert!(zeros > 0, "no seed left a header of zeros");
-}
-
-/// A file system whose next `sync_data` fails once when armed, with the
-/// power still on.
-#[derive(Clone)]
-struct FlakyFs {
-    sim: SimFs,
-    fail_next_sync: Rc<Cell<bool>>,
-}
-
-struct FlakyFile {
-    file: SimFile,
-    fail_next_sync: Rc<Cell<bool>>,
-}
-
-impl Fs for FlakyFs {
-    type File = FlakyFile;
-
-    fn create_dir_all(&self, path: &Path) -> io::Result<()> {
-        self.sim.create_dir_all(path)
-    }
-
-    fn open(&self, path: &Path) -> io::Result<FlakyFile> {
-        Ok(FlakyFile {
-            file: self.sim.open(path)?,
-            fail_next_sync: Rc::clone(&self.fail_next_sync),
-        })
-    }
-
-    fn sync_dir(&self, dir: &Path) -> io::Result<()> {
-        self.sim.sync_dir(dir)
-    }
-}
-
-impl FsFile for FlakyFile {
-    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
-        self.file.read_exact_at(buf, offset)
-    }
-
-    fn write_all_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
-        self.file.write_all_at(buf, offset)
-    }
-
-    fn size(&self) -> io::Result<u64> {
-        self.file.size()
-    }
-
-    fn set_len(&self, len: u64) -> io::Result<()> {
-        self.file.set_len(len)
-    }
-
-    fn try_lock(&self) -> io::Result<()> {
-        self.file.try_lock()
-    }
-
-    fn sync_data(&self) -> io::Result<()> {
-        if self.fail_next_sync.replace(false) {
-            return Err(io::Error::other("sync failed"));
-        }
-        self.file.sync_data()
-    }
-}
-
-#[test]
-fn a_failed_checkpoint_stops_the_engine() {
-    let fs = FlakyFs {
-        sim: SimFs::new(),
-        fail_next_sync: Rc::new(Cell::new(false)),
-    };
-    let db = Db::open_with(fs.clone(), dir()).unwrap();
-    let model = fill(&db, 50);
-
-    fs.fail_next_sync.set(true);
-    assert!(matches!(db.checkpoint(), Err(Error::Io(_))));
-
-    // The disk works again, but the engine does not trust it.
-    let mut txn = db.begin();
-    txn.put(b"after", b"1").unwrap();
-    assert!(matches!(txn.commit(), Err(Error::Io(_))));
-    assert!(matches!(db.checkpoint(), Err(Error::Io(_))));
-    assert_eq!(get(&db, b"after"), None);
-    drop(db);
-
-    let db = Db::open_with(fs.clone(), dir()).unwrap();
-    assert_holds(&db, &model, "after reopening");
-    put(&db, b"after", b"1");
-    assert_eq!(get(&db, b"after"), Some(b"1".to_vec()));
 }
 
 #[test]

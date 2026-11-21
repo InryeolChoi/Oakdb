@@ -426,7 +426,7 @@ svg text{font-family:"Noto Sans KR",sans-serif}
 
 <nav class="toc"><div class="wrap">
   <a class="part" href="#p1">1 기본기</a><a href="#c11">파일 vs DB</a><a href="#c12">DB의 층</a><a href="#c13">디스크</a><a href="#c14">트리</a><a href="#c15">B+Tree·LSM</a><a href="#c16">동시성</a><a href="#c17">정전·로그</a>
-  <a class="part" href="#p2">2 Oakdb</a><a href="#c21">결정 12개</a><a href="#c22">페이지</a><a href="#c23">트리</a><a href="#c24">검증</a><a href="#c25">큰 값</a><a href="#c26">체크섬</a><a href="#c27">가짜 디스크</a><a href="#c28">정전 실험</a><a href="#c29">WAL</a><a href="#c210">체크포인트</a><a href="#c212">길이만 닿는 쓰기</a>
+  <a class="part" href="#p2">2 Oakdb</a><a href="#c21">결정 12개</a><a href="#c22">페이지</a><a href="#c23">트리</a><a href="#c24">검증</a><a href="#c25">큰 값</a><a href="#c26">체크섬</a><a href="#c27">가짜 디스크</a><a href="#c28">정전 실험</a><a href="#c29">WAL</a><a href="#c210">체크포인트</a><a href="#c211">기록 실패</a><a href="#c212">길이만 닿는 쓰기</a>
   <a class="part" href="#p3">3 SQLite</a><a href="#c31">동시 쓰기</a><a href="#c32">서버</a><a href="#c33">비교표</a><a href="#c34">대가</a>
   <a class="part" href="#p4">4 앞으로</a><a href="#c41">지도</a><a href="#c42">충돌 판정</a><a href="#c43">그룹 커밋</a><a href="#c44">체크포인트</a><a href="#c45">SQL→키</a><a href="#c46">최종 증명</a><a href="#gl">용어</a>
 </div></nav>
@@ -879,6 +879,27 @@ svg text{font-family:"Noto Sans KR",sans-serif}
     <p>그래서 길이 비교를 <code>u128</code>로 해요. <code>u128</code>에는 <code>u64 × 4096</code>이 언제나 들어가니 넘칠 수가 없어요. 다른 방법은 "읽을 때 말도 안 되는 값을 거절"하는 거예요. ATM으로 치면 앞은 "큰 금액도 적을 수 있게 종이를 키우기", 뒤는 "입력할 때 거절하기"예요.</p>
     <p><b>타입을 넓히면 그 자리만 막아요.</b> 그래서 디스크에서 읽은 숫자로 하는 계산을 전부 훑었어요. 그러다 하나를 더 찾았어요. 다음 정리 회차를 구하는 <code>+ 1</code>이에요. release에서 최댓값이 0으로 감기면 새 표지(0)가 옛 표지(최대)에 지고, 다음 열기가 일지를 "옛것"으로 버려 <b>OK 받은 커밋이 조용히 사라져요</b>. <code>checked_add</code>로 바꿔 아무것도 쓰기 전에 거절하게 했어요.</p>
   </div>
+</section>
+
+<section class="ch reveal" id="c211">
+  <span class="chno">2-11 · 티켓 12</span>
+  <h3>디스크 기록 실패: 다시 해 보지 말고, 창구를 닫는다</h3>
+  <p>2-8~2-10은 <b>전원이 꺼지는</b> 고장이었어요. 이번에는 전원은 멀쩡한데 디스크가 <b>"못 썼어요"</b>라고 대답하는 고장이에요. sync 실패, 쓰기 실패, 디스크 공간 부족이 그래요. Oakdb는 <b>다시 해 보지 않고 엔진을 멈춰요</b>.</p>
+  <div class="analogy"><b>비유: 금고가 "걸렸어요"라고 할 때.</b> 창구 직원이 쪽지를 금고에 넣는데 금고가 "넣다가 걸렸어요, 들어갔는지는 몰라요"라고 해요. 같은 쪽지를 다시 넣어 보는 게 제일 위험해요. 금고가 이미 쪽지를 버렸는데 두 번째엔 "됐어요"라고 할 수 있거든요. 그래서 직원은 <b>창구를 닫아요</b>. 그 손님에겐 "처리됐는지 몰라요", 뒤 손님들에겐 "창구가 닫혔어요". 창구는 <b>금고 안을 처음부터 다시 확인한 뒤</b>(다시 열기 = WAL 재생)에야 열어요.</div>
+  <div class="tablewrap"><table>
+    <tr><th>누구</th><th>받는 대답</th><th>뜻</th></tr>
+    <tr><td>실패를 만난 커밋</td><td><code>OutcomeUnknown</code></td><td>디스크에 있을 수도, 없을 수도 있어요. 다시 열어 읽어 보면 <b>통째로 있거나 통째로 없어요</b></td></tr>
+    <tr><td>그 뒤 모든 요청 (읽기도)</td><td><code>Stopped</code></td><td>아무것도 안 했어요. Db를 버리고 다시 열면 돼요</td></tr>
+    <tr><td>커밋은 됐는데 뒤따른 정리가 실패</td><td><code>Ok</code> + 엔진 멈춤</td><td>커밋은 이미 일지에 sync됐으니 남아요</td></tr>
+    <tr><td>다시 열기</td><td>평소대로</td><td>OK 받은 커밋은 모두 있어요</td></tr>
+  </table></div>
+  <div class="term"><b>왜 다시 해 보면 안 되나 (fsyncgate, 2018)</b>: Linux는 <code>fsync</code>가 실패하면 못 쓴 페이지를 "깨끗함"으로 표시하고 오류를 <b>한 번만</b> 알려 줘요. 다시 <code>fsync</code>를 부르면 "성공"이 돌아오지만 처음 내용은 디스크에 없어요. PostgreSQL이 이 일로 20년 가까이 데이터를 잃을 수 있었고, 그 뒤로 "fsync가 실패하면 멈추고 WAL로 복구"로 바꿨어요. Oakdb도 같은 길이에요.</div>
+  <div class="tablewrap"><table>
+    <tr><th>시험 (가짜 디스크가 "한 번만 실패")</th><th>결과</th></tr>
+    <tr><td>커밋·정리·열기의 <b>모든 디스크 연산</b>마다 한 번 실패 → 정전 없이 / 정전 시드 4개로 다시 열기</td><td>OK 받은 커밋 잃음 <b>0</b>, 실패한 커밋 반쪽 <b>0</b></td></tr>
+    <tr><td>정전 실험 10만 시드 (티켓 11과 같음)</td><td><b>100%</b> 약속 지킴</td></tr>
+  </table></div>
+  <div class="term"><b>남은 구멍</b>: Linux에서 실패한 페이지가 캐시에 "깨끗함"으로 남아 있으면, 같은 부팅에서 다시 열 때 <b>디스크에 없는 내용을 읽을 수</b> 있어요. DB를 여는 도중 실패한 뒤 같은 프로그램에서 다시 열 때도 같아요. 가짜 디스크가 아직 이 고장을 흉내 내지 못해서 #59로 남겼어요. 그래서 엔진이 멈추면 디스크를 점검하고, 되도록 재부팅 뒤에 여는 게 안전해요.</div>
 </section>
 
 <section class="ch reveal" id="c212">

@@ -25,19 +25,15 @@ use crate::tree::Tree;
 use crate::wal::Wal;
 
 /// Checkpoints `tree`, the last commit in `wal`, to the data file `file`.
-/// Does nothing if the WAL holds no commit. If any step fails, stops the
-/// WAL: whether the data file now holds the newer checkpoint is unknown,
-/// and a commit appended to a WAL it holds would be dropped on opening.
+/// Does nothing if the WAL holds no commit. If any step fails, the caller
+/// stops the engine (design 0012): whether the data file now holds the
+/// newer checkpoint is unknown, and a commit appended to a WAL it holds
+/// would be dropped on opening.
 pub(crate) fn run(file: &impl FsFile, wal: &mut Wal<impl FsFile>, tree: &Tree) -> Result<()> {
-    wal.check_running()?;
     if !wal.has_commits() {
         return Ok(());
     }
-    let result = write(file, wal, tree);
-    if result.is_err() {
-        wal.stop();
-    }
-    result
+    write(file, wal, tree)
 }
 
 fn write(file: &impl FsFile, wal: &mut Wal<impl FsFile>, tree: &Tree) -> Result<()> {
