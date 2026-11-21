@@ -143,12 +143,12 @@ impl<F: FsFile> Wal<F> {
     /// Empties the WAL and starts it again after `checkpoint`. The length
     /// change is synced before the header is written, so a header torn by
     /// a power cut is never followed by older records, and a WAL no longer
-    /// than a header never holds one ([`replay`] relies on it).
+    /// than a header never holds one ([`replay`] relies on it). The length
+    /// is set even if reads say the WAL is empty: after a failed sync the
+    /// disk may still hold an older one (issue #59).
     pub(crate) fn start(&mut self, checkpoint: u64) -> Result<()> {
-        if self.file.size()? > 0 {
-            self.file.set_len(0)?;
-            self.file.sync_data()?;
-        }
+        self.file.set_len(0)?;
+        self.file.sync_data()?;
         self.file.write_all_at(&encode_header(checkpoint).0, 0)?;
         self.file.sync_data()?;
         self.tail = Tail::after_header(checkpoint);
@@ -157,8 +157,14 @@ impl<F: FsFile> Wal<F> {
         Ok(())
     }
 
-    /// Cuts off whatever follows the last whole commit, and syncs.
-    pub(crate) fn cut_to_tail(&self) -> Result<()> {
+    /// Writes `read`, the WAL as opening read it up to the end of its
+    /// last whole commit, over the WAL again, cuts off whatever follows,
+    /// and syncs. Reads may have come from the page cache, holding bytes
+    /// a failed sync never got to the disk; writing them again is what
+    /// makes the next sync save them (issue #59, design 0014).
+    pub(crate) fn rewrite(&self, read: &[u8]) -> Result<()> {
+        debug_assert_eq!(read.len() as u64, self.tail.end);
+        self.file.write_all_at(read, 0)?;
         self.file.set_len(self.tail.end)?;
         self.file.sync_data()?;
         Ok(())

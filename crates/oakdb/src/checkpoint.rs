@@ -54,16 +54,26 @@ fn write(file: &impl FsFile, wal: &mut Wal<impl FsFile>, tree: &Tree) -> Result<
         file.write_all_at(&page, page_offset(page_no))?;
     }
     file.sync_data()?;
-    let slot = Slot {
-        meta: tree.meta(),
-        checkpoint: next,
-    };
-    // The first checkpoint fills both slots, so every page of the data file
-    // has its checksum from the start; later ones write the older slot.
-    let slots = if next == 1 {
+    write_slot(
+        file,
+        Slot {
+            meta: tree.meta(),
+            checkpoint: next,
+        },
+    )?;
+    wal.start(next)
+}
+
+/// Writes `slot` to its place in the data file `file`, and syncs. The
+/// first checkpoint fills both slots, so every page of the data file has
+/// its checksum from the start; later ones write the older slot, the one
+/// numbered `checkpoint % 2`. Opening writes the slot it read the same
+/// way again (issue #59).
+pub(crate) fn write_slot(file: &impl FsFile, slot: Slot) -> Result<()> {
+    let slots = if slot.checkpoint == 1 {
         0..2
     } else {
-        next % 2..next % 2 + 1
+        slot.checkpoint % 2..slot.checkpoint % 2 + 1
     };
     for slot_no in slots {
         let mut page = slot.encode();
@@ -71,5 +81,5 @@ fn write(file: &impl FsFile, wal: &mut Wal<impl FsFile>, tree: &Tree) -> Result<
         file.write_all_at(&page, page_offset(slot_no))?;
     }
     file.sync_data()?;
-    wal.start(next)
+    Ok(())
 }

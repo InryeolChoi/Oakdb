@@ -134,6 +134,15 @@ impl<F: Fs> Db<F> {
             None => None,
         };
         let mut wal = Wal::new(wal_file, tail, checkpoint, in_wal);
+        // Everything above was read, perhaps from the page cache. In the
+        // same boot as a sync that failed, that can hold bytes the disk
+        // never got, and no later sync saves them unless they are written
+        // again. So what opening relies on is written again and synced
+        // before anything is appended to it (issue #59, design 0014): the
+        // meta slot first, then the WAL that follows it.
+        if let Some(slot) = base {
+            checkpoint::write_slot(&file, slot)?;
+        }
         if use_wal == UseWal::Replay {
             // What follows the last whole commit was never acknowledged, or
             // follows a damaged record. Keep it in the cut file, then cut
@@ -145,8 +154,8 @@ impl<F: Fs> Db<F> {
                 kept.write_all_at(cut, kept.size()?)?;
                 kept.sync_data()?;
                 fs.sync_dir(dir)?;
-                wal.cut_to_tail()?;
             }
+            wal.rewrite(&bytes[..tail.end as usize])?;
         } else {
             wal.start(checkpoint)?;
         }

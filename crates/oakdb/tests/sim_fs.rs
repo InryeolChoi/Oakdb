@@ -346,20 +346,22 @@ fn writing_the_forgotten_bytes_again_saves_them() {
 }
 
 #[test]
-fn a_disk_that_forgets_still_keeps_a_failed_write_out() {
+fn only_a_failed_sync_forgets() {
     let (fs, path) = disk();
     fs.set_failed_sync(FailedSync::Forgets);
     let file = fs.open(&path).unwrap();
     file.write_all_at(&[1; PAGE], 0).unwrap();
-    file.sync_data().unwrap();
     fs.fail_once_after(0);
 
-    // Only a failed sync forgets; a failed write changes nothing.
+    // A failed write changes nothing, and forgets nothing either: the
+    // write before it is still there for the next sync.
     assert!(file.write_all_at(&[2; PAGE], 0).is_err());
+    file.sync_data().unwrap();
 
-    assert_eq!(contents(&fs, &path), [1; PAGE]);
-    fs.crash(0);
-    assert_eq!(contents(&fs, &path), [1; PAGE]);
+    for seed in 0..SEEDS {
+        fs.crash(seed);
+        assert_eq!(contents(&fs, &path), [1; PAGE], "seed {seed}");
+    }
 }
 
 #[test]
@@ -367,8 +369,15 @@ fn forgetting_holds_across_crashes() {
     let (fs, path) = disk();
     forgotten(&fs, &path);
     fs.crash(0);
-    forgotten(&fs, &path);
+    // Set once, before the crash.
+    let file = fs.open(&path).unwrap();
+    file.write_all_at(&[2; PAGE], 0).unwrap();
+    fs.fail_once_after(0);
+    assert!(file.sync_data().is_err());
+    file.sync_data().unwrap();
+
     fs.crash(1);
+
     assert_eq!(contents(&fs, &path), [1; PAGE]);
 }
 

@@ -536,3 +536,103 @@ fn every_request_after_a_failed_checkpoint_reports_the_original_error() {
         other => panic!("the cause is {other:?}"),
     }
 }
+
+/// A database whose last commit failed at its WAL sync on a disk that
+/// forgets, dropped without a crash, so the page cache still holds the
+/// commit the disk never got. The commit changes pages no commit since the
+/// last checkpoint changed, so the WAL on the disk holds no image of them.
+/// Returns what it held before that commit and what it holds with it.
+fn with_a_forgotten_commit(fs: &SimFs) -> (Model, Model) {
+    fs.set_failed_sync(FailedSync::Forgets);
+    let db = open(fs);
+    let mut model = history(&db, 2);
+    db.checkpoint().unwrap();
+    put(&db, 119, &[7; 30], &mut model);
+    let (txn, landed) = writes(&db, &[1, 2, 3, 3000], &[9; 5000], &model);
+    fs.fail_once_after(1);
+    txn.commit().unwrap_err();
+    (model, landed)
+}
+
+/// A database whose checkpoint failed at operation `fail` on a disk that
+/// forgets, dropped without a crash. Returns what it holds, twice: no
+/// commit's outcome is unknown.
+fn with_a_forgotten_checkpoint(fs: &SimFs, fail: u64) -> (Model, Model) {
+    fs.set_failed_sync(FailedSync::Forgets);
+    let db = open(fs);
+    let model = history(&db, 2);
+    fs.fail_once_after(fail);
+    db.checkpoint().unwrap_err();
+    (model.clone(), model)
+}
+
+/// Cuts the power at every operation of opening the database `setup`
+/// leaves, then opens it after the crash, and checks that every
+/// acknowledged commit is there: those before `setup`'s failure, and one
+/// made after opening if opening finished.
+fn power_cuts_while_reopening(name: &str, setup: &dyn Fn(&SimFs) -> (Model, Model)) {
+    let ops = {
+        let fs = SimFs::new();
+        setup(&fs);
+        let start = fs.ops();
+        open(&fs);
+        fs.ops() - start
+    };
+    assert!(ops >= 4, "{name}: opening takes {ops} operations");
+    for cut in 0..=ops {
+        for seed in 0..4 {
+            let what = format!("{name}, power cut at operation {cut} of opening, seed {seed}");
+            let fs = SimFs::new();
+            let (model, landed) = setup(&fs);
+            fs.fail_after(cut);
+
+            // What the database may hold after the crash.
+            let mut allowed = vec![model, landed.clone()];
+            if let Ok(db) = Db::open_with(fs.clone(), dir()) {
+                // Opening finished: what it read is on the disk, and a
+                // commit now is acknowledged or its outcome is unknown.
+                assert_eq!(read_all(&db), landed, "{what}");
+                let mut later = landed.clone();
+                later.insert(4242, b"later".to_vec());
+                let mut txn = db.begin();
+                txn.put(&4242u32.to_be_bytes(), b"later").unwrap();
+                allowed = match txn.commit() {
+                    Ok(()) => vec![later],
+                    Err(_) => vec![landed, later],
+                };
+            }
+            fs.crash(seed);
+            let db = Db::open_with(fs.clone(), dir()).unwrap_or_else(|e| panic!("{what}: {e}"));
+            assert!(
+                allowed.contains(&read_all(&db)),
+                "{what}: lost an acknowledged commit or half of one"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_power_cut_while_reopening_after_a_forgotten_commit_keeps_every_acknowledged_commit() {
+    // Issue #59: opening writes again what it read before it appends
+    // anything. A cut part way through leaves the disk as the failed
+    // commit left it, or with what was read made durable.
+    power_cuts_while_reopening("a forgotten commit", &with_a_forgotten_commit);
+}
+
+#[test]
+fn a_power_cut_while_reopening_after_a_forgotten_checkpoint_keeps_every_commit() {
+    let ops = {
+        let fs = SimFs::new();
+        let db = open(&fs);
+        history(&db, 2);
+        let start = fs.ops();
+        db.checkpoint().unwrap();
+        fs.ops() - start
+    };
+    for fail in 0..ops {
+        power_cuts_while_reopening(
+            &format!("checkpoint failing at operation {fail}"),
+            &|fs: &SimFs| with_a_forgotten_checkpoint(fs, fail),
+        );
+    }
+}
