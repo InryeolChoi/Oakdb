@@ -137,75 +137,80 @@ fn every_seed_keeps_the_promise() {
     }
 }
 
-// Seeds where the design before the WAL broke (docs/experiments/0008),
-// each a short example of its kind found in seeds 0..2000. The WAL (#22)
-// must keep them all intact.
-// Replay one with `cargo run --example crash_sim -- one <seed>`.
+// Pinned seeds. The first nine broke the design before the WAL
+// (docs/experiments/0008), one of each way of breaking; the engine has
+// changed since, so the same seed now cuts somewhere else, and each comment
+// says what it does today (`crash_sim one <seed>`, issue #56). They stay as
+// seeds that once broke and must keep the promise.
 
 fn stays_intact(seed: u64) {
     let run = Case::from_seed(seed).run();
     assert!(run.verdict.is_intact(), "seed {seed}: {:?}", run.verdict);
 }
 
-/// Cut while creating the database: the first leaf landed, the meta page
-/// did not, and the file is no longer empty, so it is opened as a database
-/// and refused ("not an Oakdb data file").
+/// Once: a cut while creating left a file opened as a database and
+/// refused. Now: the power goes as the new WAL's header is about to be
+/// written, and the WAL, created but not yet in a synced directory,
+/// vanishes. Opening creates the database again.
 #[test]
 fn a_cut_while_creating_leaves_a_file_that_can_be_opened() {
     stays_intact(184);
 }
 
-/// Cut while creating: the meta page landed, the leaf did not ("data file
-/// is shorter than its meta page says").
+/// Once: a cut after the meta page while creating. Now: the power goes
+/// as the WAL is about to be opened, leaving an empty data file and no
+/// WAL, which open as a new database.
 #[test]
 fn a_cut_while_creating_after_the_meta_page_is_written() {
     stays_intact(536);
 }
 
-/// The first commit's leaf landed, but the pages it points to past the old
-/// end of the file, leaves from a split or the overflow pages of a long
-/// value, did not ("page number is outside the file").
+/// Once: a commit's leaf landed without the new pages it points to. Now:
+/// the power goes before the first operation, so there is nothing on the
+/// disk but what opening makes.
 #[test]
 fn a_page_lands_without_the_new_pages_it_points_to() {
     stays_intact(213);
 }
 
-/// A torn leaf: the checksum notices, but nothing can repair it yet
-/// ("page 2 has a wrong checksum").
+/// Once: a torn leaf. Now: the power goes in commit 5 before its WAL
+/// write, with nothing unsynced; the five acknowledged commits are there.
 #[test]
 fn a_torn_page_is_repaired() {
     stays_intact(84);
 }
 
-/// A split part way: leaves landed, lost and torn, so the sibling chain
-/// breaks ("leaves do not point to the next leaf").
+/// Once: a split cut part way. Now: the power goes at the sync of commit
+/// 1, whose WAL write of pages 2..4 lands whole, so the cut commit is
+/// there in full.
 #[test]
 fn a_split_cut_part_way() {
     stays_intact(319);
 }
 
-/// A commit over two leaves: one landed, the other was never written, so
-/// half its keys are new ("half a commit").
+/// Once: a commit over two leaves landed half. Now: 1680 cuts in the
+/// checkpoint after commit 4 with a meta slot written but not synced
+/// (kept); 406 cuts in the checkpoint after commit 3 at the sync after
+/// emptying the WAL, and the emptying is lost, so the old WAL is dropped
+/// as older than the new slot.
 #[test]
 fn a_commit_over_two_leaves_lands_whole_or_not_at_all() {
     stays_intact(1680);
     stays_intact(406);
 }
 
-/// Every page write was synced and nothing was lost or torn; the power
-/// went as the meta page was about to be written. Overwritten pages and
-/// the old meta page disagree ("page is reached twice"): the design breaks
-/// even on a disk that never loses a write.
+/// Once: a cut between the page sync and the meta page. Now: a cut in the
+/// checkpoint after commit 24, while it moves pages into the data file;
+/// one page is torn, and the WAL still holds them all.
 #[test]
 fn a_cut_between_the_page_sync_and_the_meta_page() {
     stays_intact(159);
 }
 
-/// The meta page write was lost, so the old free list head now names a
-/// page that has since been reused. Opening used to read that page's next
-/// before checking it was free, and a debug build panicked on a
-/// `debug_assert` instead of refusing the file. Fixed in this PR; the
-/// refusal itself still needs the WAL.
+/// Once: a free list head on a page in use made opening panic on a
+/// `debug_assert`. Now: a cut in the checkpoint after commit 9 while it
+/// moves pages; some are lost, one torn, and one past the end of the data
+/// file lands its length alone. The WAL still holds them all.
 #[test]
 fn a_free_list_head_on_a_page_in_use_is_refused_without_panicking() {
     let run = Case::from_seed(529).run();
@@ -214,4 +219,13 @@ fn a_free_list_head_on_a_page_in_use_is_refused_without_panicking() {
         "{:?}",
         run.verdict
     );
+}
+
+/// A cut at the sync after a checkpoint wrote the WAL header, which
+/// landed its length alone: 20 bytes of zeros (issue #56). Opening takes
+/// them for no header and writes it again; refused as a damaged header
+/// before review P1 of PR #55 (mutant C16).
+#[test]
+fn a_wal_header_that_landed_as_zeros_opens() {
+    stays_intact(109);
 }

@@ -439,6 +439,176 @@ fn a_power_cut_anywhere_in_a_checkpoint_keeps_every_commit() {
     }
 }
 
+/// Seeds for the cuts while the WAL starts again. The landing that leaves
+/// a length and zeros comes one crash in twelve or so, so many seeds.
+const START_SEEDS: u64 = 64;
+
+/// The operations that end a checkpoint by starting the WAL again
+/// (`Wal::start`): empty it, sync, write the header, sync. The tests below
+/// check that cutting there does leave a header of zeros, so they notice
+/// if a change to the checkpoint moves these operations.
+const WAL_START_OPS: u64 = 4;
+
+/// How many operations a checkpoint of what `setup` commits takes.
+fn checkpoint_ops(setup: impl Fn(&Db<SimFs>)) -> u64 {
+    let fs = SimFs::new();
+    let db = Db::open_with(fs.clone(), dir()).unwrap();
+    setup(&db);
+    let start = fs.ops();
+    db.checkpoint().unwrap();
+    fs.ops() - start
+}
+
+/// Whether the WAL is one header long and all zeros.
+fn wal_is_a_header_of_zeros(fs: &SimFs) -> bool {
+    contents(fs, WAL_FILE) == [0; WAL_HEADER as usize]
+}
+
+#[test]
+fn a_power_cut_while_the_wal_starts_again_keeps_every_commit() {
+    // Issue #56. A checkpoint ends by emptying the WAL, syncing, writing
+    // the header and syncing. The header is written past the end of the
+    // emptied file, so a crash can land its length alone: 20 bytes of
+    // zeros (review P1 of PR #55), which opening must take for no header.
+    for before in [0, 2] {
+        let ops = checkpoint_ops(|db| {
+            history(db, before);
+        });
+        let mut zeros = 0;
+        for cut in ops - WAL_START_OPS..=ops {
+            for seed in 0..START_SEEDS {
+                let fs = SimFs::new();
+                let db = Db::open_with(fs.clone(), dir()).unwrap();
+                let model = history(&db, before);
+                fs.fail_after(cut);
+                let _ = db.checkpoint();
+                drop(db);
+
+                fs.crash(seed);
+
+                zeros += u32::from(wal_is_a_header_of_zeros(&fs));
+                let what = format!("{before} checkpoints before, cut {cut}, seed {seed}");
+                let db = Db::open_with(fs.clone(), dir()).unwrap_or_else(|e| panic!("{what}: {e}"));
+                assert_holds(&db, &model, &what);
+            }
+        }
+        assert!(zeros > 0, "{before} checkpoints before: no header of zeros");
+    }
+}
+
+#[test]
+fn a_cut_while_writing_the_wal_header_can_leave_its_length_and_zeros() {
+    // The case review P1 found by reading the code, now made by a crash:
+    // the WAL is one header long and all zeros, and the database opens.
+    let ops = checkpoint_ops(|db| {
+        fill(db, 30);
+    });
+    let mut zeros = 0;
+    for seed in 0..START_SEEDS {
+        let fs = SimFs::new();
+        let db = Db::open_with(fs.clone(), dir()).unwrap();
+        let model = fill(&db, 30);
+        // The power goes at the sync after the header, the last operation.
+        fs.fail_after(ops - 1);
+        assert!(db.checkpoint().is_err());
+        drop(db);
+
+        fs.crash(seed);
+
+        zeros += u32::from(wal_is_a_header_of_zeros(&fs));
+        let db = Db::open_with(fs.clone(), dir()).unwrap_or_else(|e| panic!("seed {seed}: {e}"));
+        assert_holds(&db, &model, &format!("seed {seed}"));
+    }
+    assert!(zeros > 0, "no seed left a header of zeros");
+}
+
+/// A file system whose next `sync_data` fails once when armed, with the
+/// power still on.
+#[derive(Clone)]
+struct FlakyFs {
+    sim: SimFs,
+    fail_next_sync: Rc<Cell<bool>>,
+}
+
+struct FlakyFile {
+    file: SimFile,
+    fail_next_sync: Rc<Cell<bool>>,
+}
+
+impl Fs for FlakyFs {
+    type File = FlakyFile;
+
+    fn create_dir_all(&self, path: &Path) -> io::Result<()> {
+        self.sim.create_dir_all(path)
+    }
+
+    fn open(&self, path: &Path) -> io::Result<FlakyFile> {
+        Ok(FlakyFile {
+            file: self.sim.open(path)?,
+            fail_next_sync: Rc::clone(&self.fail_next_sync),
+        })
+    }
+
+    fn sync_dir(&self, dir: &Path) -> io::Result<()> {
+        self.sim.sync_dir(dir)
+    }
+}
+
+impl FsFile for FlakyFile {
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
+        self.file.read_exact_at(buf, offset)
+    }
+
+    fn write_all_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
+        self.file.write_all_at(buf, offset)
+    }
+
+    fn size(&self) -> io::Result<u64> {
+        self.file.size()
+    }
+
+    fn set_len(&self, len: u64) -> io::Result<()> {
+        self.file.set_len(len)
+    }
+
+    fn try_lock(&self) -> io::Result<()> {
+        self.file.try_lock()
+    }
+
+    fn sync_data(&self) -> io::Result<()> {
+        if self.fail_next_sync.replace(false) {
+            return Err(io::Error::other("sync failed"));
+        }
+        self.file.sync_data()
+    }
+}
+
+#[test]
+fn a_failed_checkpoint_stops_the_engine() {
+    let fs = FlakyFs {
+        sim: SimFs::new(),
+        fail_next_sync: Rc::new(Cell::new(false)),
+    };
+    let db = Db::open_with(fs.clone(), dir()).unwrap();
+    let model = fill(&db, 50);
+
+    fs.fail_next_sync.set(true);
+    assert!(matches!(db.checkpoint(), Err(Error::Io(_))));
+
+    // The disk works again, but the engine does not trust it.
+    let mut txn = db.begin();
+    txn.put(b"after", b"1").unwrap();
+    assert!(matches!(txn.commit(), Err(Error::Io(_))));
+    assert!(matches!(db.checkpoint(), Err(Error::Io(_))));
+    assert_eq!(get(&db, b"after"), None);
+    drop(db);
+
+    let db = Db::open_with(fs.clone(), dir()).unwrap();
+    assert_holds(&db, &model, "after reopening");
+    put(&db, b"after", b"1");
+    assert_eq!(get(&db, b"after"), Some(b"1".to_vec()));
+}
+
 #[test]
 fn a_data_file_shorter_than_its_meta_slot_says_is_refused() {
     // Mutant C14: nothing cut the data file short before.
