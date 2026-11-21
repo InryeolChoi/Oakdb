@@ -6,11 +6,16 @@
 //! zeros where its bytes would be (issue #56); and a file created since its
 //! directory was last synced may vanish. A seed makes every choice, so the
 //! same seed always gives the same disk.
+//!
+//! The disk can also garble the sectors a torn write did not land, and
+//! renames land in order once their directory is synced (design 0014).
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use oakdb::fs::sim::{FailedSync, Landing, LengthFate, SimFs, WriteFate, SECTOR};
+use oakdb::fs::sim::{
+    FailedSync, Landing, LengthFate, RenameFate, SimFs, TornSector, WriteFate, SECTOR,
+};
 use oakdb::fs::{Fs, FsFile};
 use oakdb::{Db, DATA_FILE};
 
@@ -747,4 +752,234 @@ fn a_new_database_survives_a_crash_right_after_opening() {
         assert!(fs.exists(&dir().join(DATA_FILE)), "seed {seed}");
         Db::open_with(fs.clone(), dir()).unwrap();
     }
+}
+
+/// A disk whose file at `path` was synced as 1s, then written as 2s at
+/// `at` without a sync, and crashed with `seed` on a disk that garbles.
+fn garbled(seed: u64, at: std::ops::Range<usize>) -> (Vec<u8>, Landing) {
+    let (fs, path) = disk();
+    fs.set_torn_sector(TornSector::Garbled);
+    let file = fs.open(&path).unwrap();
+    file.write_all_at(&[1; PAGE], 0).unwrap();
+    file.sync_data().unwrap();
+    file.write_all_at(&vec![2; at.len()], at.start as u64)
+        .unwrap();
+    drop(file);
+    let report = fs.crash(seed);
+    (contents(&fs, &path), report.writes[0].landing.clone())
+}
+
+#[test]
+fn a_disk_that_garbles_leaves_garbage_in_the_sectors_a_torn_write_missed() {
+    let mut seen = BTreeSet::new();
+    for seed in 0..SEEDS {
+        let (after, landing) = garbled(seed, 0..PAGE);
+        assert_eq!(after.len(), PAGE, "seed {seed}");
+        for (i, sector) in after.chunks(SECTOR as usize).enumerate() {
+            let landed = match &landing {
+                Landing::Kept => true,
+                Landing::Lost => false,
+                Landing::Torn { sectors } => sectors[i],
+                other => panic!("seed {seed}: {other:?}"),
+            };
+            let want = match (&landing, landed) {
+                (_, true) => 2,
+                (Landing::Lost, false) => 1,
+                // Neither the old bytes nor the new ones.
+                _ => !1,
+            };
+            assert!(sector.iter().all(|&b| b == want), "seed {seed}, sector {i}");
+            seen.insert(want);
+        }
+    }
+    assert_eq!(seen, BTreeSet::from([1, 2, !1]));
+}
+
+#[test]
+fn a_disk_that_garbles_touches_only_the_bytes_the_write_covers() {
+    // Powersafe overwrite: the rest of a sector a write covers in part
+    // stays as it was.
+    for seed in 0..SEEDS {
+        let (after, _) = garbled(seed, 100..700);
+        assert!(after[..100].iter().all(|&b| b == 1), "seed {seed}");
+        assert!(after[700..].iter().all(|&b| b == 1), "seed {seed}");
+    }
+}
+
+#[test]
+fn a_disk_that_garbles_leaves_nothing_past_the_end_a_torn_write_missed() {
+    for seed in 0..SEEDS {
+        let (fs, path) = disk();
+        fs.set_torn_sector(TornSector::Garbled);
+        let file = fs.open(&path).unwrap();
+        file.write_all_at(&[2; PAGE], 0).unwrap();
+        drop(file);
+
+        let report = fs.crash(seed);
+        let after = contents(&fs, &path);
+        if let Landing::Torn { sectors } = &report.writes[0].landing {
+            let landed = sectors.iter().rposition(|&l| l).map_or(0, |i| i + 1);
+            assert_eq!(after.len(), landed * SECTOR as usize, "seed {seed}");
+            for (sector, &landed) in after.chunks(SECTOR as usize).zip(sectors) {
+                let want = if landed { 2 } else { 0 };
+                assert!(sector.iter().all(|&b| b == want), "seed {seed}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_disk_that_garbles_lands_the_same_sectors_for_a_seed() {
+    for seed in 0..SEEDS {
+        let (fs, path) = disk();
+        let file = fs.open(&path).unwrap();
+        file.write_all_at(&[1; PAGE], 0).unwrap();
+        file.sync_data().unwrap();
+        file.write_all_at(&[2; PAGE], 0).unwrap();
+        drop(file);
+        let report = fs.crash(seed);
+        assert_eq!(
+            report.writes[0].landing,
+            garbled(seed, 0..PAGE).1,
+            "seed {seed}"
+        );
+    }
+}
+
+/// A disk with `old` synced at `dir()/b` and `new` synced at `dir()/a`,
+/// both entries durable, then `a` renamed to `b` without a directory sync.
+fn renamed(old: &[u8], new: &[u8]) -> SimFs {
+    let fs = SimFs::new();
+    fs.create_dir_all(&dir()).unwrap();
+    for (name, bytes) in [("b", old), ("a", new)] {
+        let file = fs.open(&dir().join(name)).unwrap();
+        file.write_all_at(bytes, 0).unwrap();
+        file.sync_data().unwrap();
+    }
+    fs.sync_dir(&dir()).unwrap();
+    fs.rename(&dir().join("a"), &dir().join("b")).unwrap();
+    fs
+}
+
+#[test]
+fn a_rename_moves_the_file_and_its_open_handles() {
+    let fs = SimFs::new();
+    fs.create_dir_all(&dir()).unwrap();
+    let file = fs.open(&dir().join("a")).unwrap();
+    file.write_all_at(b"oak", 0).unwrap();
+    fs.open(&dir().join("b"))
+        .unwrap()
+        .write_all_at(b"old", 0)
+        .unwrap();
+
+    fs.rename(&dir().join("a"), &dir().join("b")).unwrap();
+
+    assert!(!fs.exists(&dir().join("a")));
+    assert_eq!(contents(&fs, &dir().join("b")), b"oak");
+    file.write_all_at(b"!", 3).unwrap();
+    assert_eq!(contents(&fs, &dir().join("b")), b"oak!");
+}
+
+#[test]
+fn an_unsynced_rename_lands_whole_or_not_at_all() {
+    let mut seen = BTreeSet::new();
+    for seed in 0..SEEDS {
+        let fs = renamed(b"old", b"new");
+        let report = fs.crash(seed);
+        let landed = report.renames[0].landed;
+        assert_eq!(
+            report.renames,
+            [RenameFate {
+                from: dir().join("a"),
+                to: dir().join("b"),
+                landed
+            }]
+        );
+        if landed {
+            assert_eq!(contents(&fs, &dir().join("b")), b"new", "seed {seed}");
+            assert!(!fs.exists(&dir().join("a")), "seed {seed}");
+        } else {
+            assert_eq!(contents(&fs, &dir().join("b")), b"old", "seed {seed}");
+            assert_eq!(contents(&fs, &dir().join("a")), b"new", "seed {seed}");
+        }
+        seen.insert(landed);
+    }
+    assert_eq!(seen, BTreeSet::from([false, true]));
+}
+
+#[test]
+fn a_rename_whose_directory_was_synced_survives_every_crash() {
+    for seed in 0..SEEDS {
+        let fs = renamed(b"old", b"new");
+        fs.sync_dir(&dir()).unwrap();
+        let report = fs.crash(seed);
+        assert!(report.renames.is_empty());
+        assert_eq!(contents(&fs, &dir().join("b")), b"new", "seed {seed}");
+        assert!(!fs.exists(&dir().join("a")), "seed {seed}");
+    }
+}
+
+#[test]
+fn renames_land_in_order() {
+    let mut landed = BTreeSet::new();
+    for seed in 0..SEEDS {
+        let fs = renamed(b"old", b"new");
+        let file = fs.open(&dir().join("a")).unwrap();
+        file.write_all_at(b"newer", 0).unwrap();
+        file.sync_data().unwrap();
+        fs.rename(&dir().join("a"), &dir().join("b")).unwrap();
+
+        let report = fs.crash(seed);
+        let fates: Vec<bool> = report.renames.iter().map(|r| r.landed).collect();
+        assert!(
+            fates != [false, true],
+            "seed {seed}: a later rename landed alone"
+        );
+        let want: &[u8] = match fates[..] {
+            [true, true] => b"newer",
+            [true, false] => b"new",
+            _ => b"old",
+        };
+        assert_eq!(contents(&fs, &dir().join("b")), want, "seed {seed}");
+        landed.insert(fates);
+    }
+    assert_eq!(landed.len(), 3);
+}
+
+#[test]
+fn a_rename_of_a_new_file_that_does_not_land_may_lose_the_file() {
+    let mut vanished = false;
+    for seed in 0..SEEDS {
+        let fs = SimFs::new();
+        fs.create_dir_all(&dir()).unwrap();
+        let file = fs.open(&dir().join("a")).unwrap();
+        file.write_all_at(b"oak", 0).unwrap();
+        file.sync_data().unwrap();
+        fs.rename(&dir().join("a"), &dir().join("b")).unwrap();
+
+        let report = fs.crash(seed);
+        if !report.renames[0].landed {
+            assert!(!fs.exists(&dir().join("b")), "seed {seed}");
+            vanished |= !fs.exists(&dir().join("a"));
+        }
+    }
+    assert!(vanished);
+}
+
+#[test]
+fn a_failed_rename_changes_nothing() {
+    let fs = SimFs::new();
+    fs.create_dir_all(&dir()).unwrap();
+    fs.open(&dir().join("a"))
+        .unwrap()
+        .write_all_at(b"new", 0)
+        .unwrap();
+    fs.open(&dir().join("b"))
+        .unwrap()
+        .write_all_at(b"old", 0)
+        .unwrap();
+    fs.fail_once_after(0);
+    assert!(fs.rename(&dir().join("a"), &dir().join("b")).is_err());
+    assert_eq!(contents(&fs, &dir().join("a")), b"new");
+    assert_eq!(contents(&fs, &dir().join("b")), b"old");
 }

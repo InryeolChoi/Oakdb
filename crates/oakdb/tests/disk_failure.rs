@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use oakdb::fs::sim::{FailedSync, SimFs};
+use oakdb::fs::sim::{FailedSync, SimFs, TornSector};
 use oakdb::fs::{Fs, FsFile};
 use oakdb::{Db, Error, WAL_FILE};
 
@@ -566,10 +566,16 @@ fn with_a_forgotten_checkpoint(fs: &SimFs, fail: u64) -> (Model, Model) {
     (model.clone(), model)
 }
 
+/// Both ways a sector a torn write missed can come out of a crash: as it
+/// was, or garbled (design 0014).
+const TORN_SECTORS: [TornSector; 2] = [TornSector::KeepsOld, TornSector::Garbled];
+
 /// Cuts the power at every operation of opening the database `setup`
 /// leaves, then opens it after the crash, and checks that every
 /// acknowledged commit is there: those before `setup`'s failure, and one
-/// made after opening if opening finished.
+/// made after opening if opening finished. On a disk that keeps the old
+/// bytes of a torn sector and on one that garbles them: opening must not
+/// write over the only copy of what it relies on.
 fn power_cuts_while_reopening(name: &str, setup: &dyn Fn(&SimFs) -> (Model, Model)) {
     let ops = {
         let fs = SimFs::new();
@@ -579,36 +585,74 @@ fn power_cuts_while_reopening(name: &str, setup: &dyn Fn(&SimFs) -> (Model, Mode
         fs.ops() - start
     };
     assert!(ops >= 4, "{name}: opening takes {ops} operations");
-    for cut in 0..=ops {
-        for seed in 0..4 {
-            let what = format!("{name}, power cut at operation {cut} of opening, seed {seed}");
-            let fs = SimFs::new();
-            let (model, landed) = setup(&fs);
-            fs.fail_after(cut);
+    for torn_sector in TORN_SECTORS {
+        for cut in 0..=ops {
+            for seed in 0..8 {
+                let what = format!(
+                    "{name}, {torn_sector:?}, power cut at operation {cut} of opening, seed {seed}"
+                );
+                let fs = SimFs::new();
+                fs.set_torn_sector(torn_sector);
+                let (model, landed) = setup(&fs);
+                fs.fail_after(cut);
 
-            // What the database may hold after the crash.
-            let mut allowed = vec![model, landed.clone()];
-            if let Ok(db) = Db::open_with(fs.clone(), dir()) {
-                // Opening finished: what it read is on the disk, and a
-                // commit now is acknowledged or its outcome is unknown.
-                assert_eq!(read_all(&db), landed, "{what}");
-                let mut later = landed.clone();
-                later.insert(4242, b"later".to_vec());
-                let mut txn = db.begin();
-                txn.put(&4242u32.to_be_bytes(), b"later").unwrap();
-                allowed = match txn.commit() {
-                    Ok(()) => vec![later],
-                    Err(_) => vec![landed, later],
-                };
+                // What the database may hold after the crash.
+                let mut allowed = vec![model, landed.clone()];
+                if let Ok(db) = Db::open_with(fs.clone(), dir()) {
+                    // Opening finished: what it read is on the disk, and a
+                    // commit now is acknowledged or its outcome is unknown.
+                    assert_eq!(read_all(&db), landed, "{what}");
+                    let mut later = landed.clone();
+                    later.insert(4242, b"later".to_vec());
+                    let mut txn = db.begin();
+                    txn.put(&4242u32.to_be_bytes(), b"later").unwrap();
+                    allowed = match txn.commit() {
+                        Ok(()) => vec![later],
+                        Err(_) => vec![landed, later],
+                    };
+                }
+                fs.crash(seed);
+                let db = Db::open_with(fs.clone(), dir()).unwrap_or_else(|e| panic!("{what}: {e}"));
+                assert!(
+                    allowed.contains(&read_all(&db)),
+                    "{what}: lost an acknowledged commit or half of one"
+                );
             }
-            fs.crash(seed);
-            let db = Db::open_with(fs.clone(), dir()).unwrap_or_else(|e| panic!("{what}: {e}"));
-            assert!(
-                allowed.contains(&read_all(&db)),
-                "{what}: lost an acknowledged commit or half of one"
-            );
         }
     }
+}
+
+/// A database with commits in its WAL since its last checkpoint, cut off
+/// by a crash, so everything is on the disk. Returns what it holds, twice.
+fn after_a_crash(fs: &SimFs) -> (Model, Model) {
+    let db = open(fs);
+    let model = history(&db, 2);
+    drop(db);
+    fs.crash(0);
+    (model.clone(), model)
+}
+
+#[test]
+fn a_power_cut_while_reopening_after_a_crash_keeps_every_commit() {
+    // Design 0014: opening writes nothing over the only copy of a commit
+    // or a meta slot, so a disk that garbles what it was overwriting when
+    // the power went loses nothing.
+    power_cuts_while_reopening("after a crash", &after_a_crash);
+}
+
+/// A database that was checkpointed and closed. Returns what it holds,
+/// twice.
+fn after_closing(fs: &SimFs) -> (Model, Model) {
+    let db = open(fs);
+    let model = history(&db, 2);
+    db.close().unwrap();
+    fs.crash(0);
+    (model.clone(), model)
+}
+
+#[test]
+fn a_power_cut_while_reopening_after_closing_keeps_every_commit() {
+    power_cuts_while_reopening("after closing", &after_closing);
 }
 
 #[test]

@@ -30,6 +30,12 @@ pub trait Fs {
     /// A newly created file can vanish after a crash even if its contents were
     /// synced, unless the directory that holds it is synced too.
     fn sync_dir(&self, dir: &Path) -> io::Result<()>;
+
+    /// Renames `from` to `to` in the same directory, replacing any file at
+    /// `to` in one step: `to` names the old file or the new one, never
+    /// neither. Open handles of `from` follow it. Durable once the
+    /// directory is synced.
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()>;
 }
 
 /// An open file. Reads and writes use explicit offsets so the engine never
@@ -98,6 +104,10 @@ impl Fs for StdFs {
     fn sync_dir(&self, dir: &Path) -> io::Result<()> {
         let dir = File::open(dir)?;
         full_sync(&dir)
+    }
+
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        std::fs::rename(from, to)
     }
 }
 

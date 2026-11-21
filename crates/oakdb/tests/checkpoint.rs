@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use oakdb::fs::sim::SimFs;
+use oakdb::fs::sim::{SimFs, TornSector};
 use oakdb::fs::{Fs, FsFile};
 use oakdb::{Db, Error, CHECKPOINT_AFTER, DATA_FILE, WAL_FILE};
 
@@ -395,6 +395,12 @@ fn history(db: &Db<SimFs>, before: u32) -> BTreeMap<u32, Vec<u8>> {
     model
 }
 
+/// Both ways a sector a torn write missed can come out of a crash: as it
+/// was, or garbled (design 0014). A checkpoint writes over pages the WAL
+/// holds images of and over the older meta slot only, so neither loses
+/// anything.
+const TORN_SECTORS: [TornSector; 2] = [TornSector::KeepsOld, TornSector::Garbled];
+
 #[test]
 fn a_power_cut_anywhere_in_a_checkpoint_keeps_every_commit() {
     // The first checkpoint writes both slots; later ones write one. Cut
@@ -409,9 +415,13 @@ fn a_power_cut_anywhere_in_a_checkpoint_keeps_every_commit() {
             fs.ops() - start
         };
         assert!(ops > 4, "a checkpoint takes {ops} operations");
-        for cut in 0..=ops {
+        for (torn_sector, cut) in TORN_SECTORS
+            .into_iter()
+            .flat_map(|torn_sector| (0..=ops).map(move |cut| (torn_sector, cut)))
+        {
             for seed in 0..8 {
                 let fs = SimFs::new();
+                fs.set_torn_sector(torn_sector);
                 let db = Db::open_with(fs.clone(), dir()).unwrap();
                 let mut model = history(&db, before);
                 fs.fail_after(cut);
@@ -420,7 +430,8 @@ fn a_power_cut_anywhere_in_a_checkpoint_keeps_every_commit() {
 
                 fs.crash(seed);
 
-                let what = format!("{before} checkpoints before, cut {cut}, seed {seed}");
+                let what =
+                    format!("{before} checkpoints before, {torn_sector:?}, cut {cut}, seed {seed}");
                 let db = Db::open_with(fs.clone(), dir()).unwrap_or_else(|e| panic!("{what}: {e}"));
                 assert_holds(&db, &model, &what);
                 // And it goes on: commit, checkpoint, crash, reopen.
