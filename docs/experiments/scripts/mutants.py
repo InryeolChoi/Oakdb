@@ -3,7 +3,7 @@
 
 Run from the repository root:
 
-    python3 docs/experiments/scripts/mutants.py sim      # 14 bugs in SimFs
+    python3 docs/experiments/scripts/mutants.py sim      # 20 bugs in SimFs
     python3 docs/experiments/scripts/mutants.py engine   # experiment 0007
     python3 docs/experiments/scripts/mutants.py wal      # experiment 0009
     python3 docs/experiments/scripts/mutants.py checkpoint  # experiment 0010
@@ -25,7 +25,7 @@ CKPT = "crates/oakdb/src/checkpoint.rs"
 SIM_BUGS = [
     ("unsynced writes always kept", "Landing::Lost => {}", "Landing::Lost => write_at(data, offset, &bytes),"),
     ("unsynced writes always lost", "Landing::Kept => write_at(data, offset, &bytes),", "Landing::Kept => {}"),
-    ("never torn", "match rng.below(3) {", "match rng.below(2) {"),
+    ("never torn", "match draw % 3 {", "match draw % 2 {"),
     ("torn ignores sector bounds", "let stop = ((start / SECTOR + 1) * SECTOR).min(end);", "let stop = (start + 100).min(end);"),
     ("sync_dir does nothing", "file.entry_synced = true;\n            }", "let _ = file;\n            }"),
     ("files never vanish", "if !file.entry_synced && rng.coin() {", "if false && !file.entry_synced && rng.coin() {"),
@@ -37,6 +37,22 @@ SIM_BUGS = [
     ("power stays cut after a crash", "disk.down = false;", "disk.down = disk.down;"),
     ("ops miscounted", "None => {\n                self.ops += 1;", "None => {\n                self.ops += 2;"),
     ("report lies about torn sectors", "sectors.push(landed);", "sectors.push(!landed);"),
+    # Writes that land their length alone (#56).
+    ("never length only", "Some(zeros_from) if draw >> 63 == 1 =>", "Some(zeros_from) if false =>"),
+    ("length only writes the bytes", "data.resize(grown.end, 0);", "let _ = grown; write_at(data, offset, &bytes);"),
+    ("length only does not grow the file", "data.resize(grown.end, 0);", "let _ = grown;"),
+    ("zeros from the offset, not the disk's end", ".then(|| offset.max(disk_len))", ".then_some(offset)"),
+    ("writes inside the file land length only", "(end > disk_len).then(|| offset.max(disk_len))", "Some(offset)"),
+    # The rule before the review of PR #58: the end measured when the write
+    # was made, so zeros could cover bytes the disk still held.
+    ("end measured when the write was made", [
+        ("    Write { offset: u64, bytes: Vec<u8> },", "    Write { offset: u64, bytes: Vec<u8>, old_len: usize },"),
+        ("Change::Write { offset, bytes } => {", "Change::Write { offset, bytes, old_len } => {"),
+        ("let disk_len = data.len() as u64;", "let disk_len = old_len as u64;"),
+        ("data.resize(grown.end, 0);", "let zeros = disk_len.max(offset) as usize..grown.end; data.resize(data.len().max(grown.end), 0); data[zeros].fill(0);"),
+        ("            write_at(&mut file.now, offset, buf);\n            file.waiting.push(Change::Write {\n                offset,\n                bytes: buf.to_vec(),\n            });",
+         "            let old_len = file.now.len();\n            write_at(&mut file.now, offset, buf);\n            file.waiting.push(Change::Write {\n                offset,\n                bytes: buf.to_vec(),\n                old_len,\n            });"),
+    ]),
 ]
 
 ENGINE_BUGS = [
@@ -67,7 +83,10 @@ WAL_TESTS = ["--lib", "--test", "wal", "--test", "crash", "--test", "sim_fs"]
 CHECKPOINT_BUGS = [
     ("C1 checkpoint: no sync before the meta slot", CKPT, "    file.sync_data()?;\n    let slot = Slot {", "    let slot = Slot {"),
     ("C2 checkpoint: no sync after the meta slot", CKPT, "    file.sync_data()?;\n    wal.start(next)", "    wal.start(next)"),
-    ("C3 WAL start: no sync between emptying and the header", WAL, "            self.file.set_len(0)?;\n            self.file.sync_data()?;", "            self.file.set_len(0)?;"),
+    # C3 is expected to survive since PR #58: on a disk that journals the
+    # emptying before the growth, losing this sync loses nothing (design
+    # 0013, section 9). The sync stays as a cheap defence.
+    ("C3 WAL start: no sync between emptying and the header (expected to survive)", WAL, "            self.file.set_len(0)?;\n            self.file.sync_data()?;", "            self.file.set_len(0)?;"),
     ("C4 first checkpoint: one slot only", CKPT, "0..2\n", "0..1\n"),
     ("C5 checkpoint: writes over the newest slot", CKPT, "next % 2..next % 2 + 1", "(next + 1) % 2..(next + 1) % 2 + 1"),
     ("C6 open: always slot A", DB, "(Ok(a), Ok(b)) if b.checkpoint > a.checkpoint => Ok(b),", "(Ok(a), Ok(b)) if false && b.checkpoint > a.checkpoint => Ok(b),"),
@@ -126,9 +145,13 @@ def main():
     path, bugs = (SIM, SIM_BUGS) if which == "sim" else (DB, ENGINE_BUGS)
     original = open(path).read()
     try:
-        for name, old, new in bugs:
-            assert original.count(old) == 1, f"{name}: pattern not found exactly once"
-            open(path, "w").write(original.replace(old, new))
+        for name, *change in bugs:
+            pairs = change[0] if len(change) == 1 else [tuple(change)]
+            text = original
+            for old, new in pairs:
+                assert text.count(old) == 1, f"{name}: pattern not found exactly once"
+                text = text.replace(old, new)
+            open(path, "w").write(text)
             print(name)
             if which == "sim":
                 print("  sim tests:", run(["--lib", "--test", "sim_fs", "--test", "fs_contract"]))

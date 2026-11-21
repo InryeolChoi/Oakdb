@@ -4,9 +4,11 @@
 //! the "disk", which is only what was synced. Until then each write and
 //! length change waits in a list. [`SimFs::crash`] cuts the power and starts
 //! again: each waiting change is kept, lost, or (for a write) torn so that
-//! only some of its 512-byte sectors land, and a file created since its
-//! directory was last synced may vanish. A seed makes every choice, so the
-//! same seed and the same operations always give the same disk.
+//! only some of its 512-byte sectors land. A write past the end of the
+//! file on the disk may also land its new length alone, the grown part
+//! reading as zeros. A file created since its directory was last synced may vanish.
+//! A seed makes every choice, so the same seed and the same operations
+//! always give the same disk.
 //!
 //! [`SimFs::fail_after`] cuts the power part way through the engine's work:
 //! after a given number of operations that change the disk, every call
@@ -183,8 +185,10 @@ fn lock(disk: &Mutex<Disk>) -> MutexGuard<'_, Disk> {
     disk.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// What a crash does to one unsynced write.
+/// What a crash does to one unsynced write. More ways may be added as
+/// the simulated disk learns new faults.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Landing {
     Lost,
     Kept,
@@ -193,13 +197,35 @@ pub enum Landing {
     Torn {
         sectors: Vec<bool>,
     },
+    /// The file's new length landed but the bytes did not, as on a file
+    /// system that can write the length before the contents. Only a write
+    /// past the end of the file on the disk, as the changes before it left
+    /// it, lands this way: its bytes from `zeros_from` (that end, or its
+    /// offset if later) to its own end read as zeros, and the bytes before
+    /// stay as the disk has them. So zeros never cover bytes the disk
+    /// still holds: a file system grows a file only after every length
+    /// change it journaled before.
+    LengthOnly {
+        zeros_from: u64,
+    },
 }
 
 impl Landing {
-    /// One of the three, each a third of the time.
-    fn roll(rng: &mut Rng) -> Landing {
-        match rng.below(3) {
-            0 => Landing::Lost,
+    /// Kept, lost or torn, each a third of the time. A write past the end
+    /// of the file on the disk, whose part from `zeros_from` on is new,
+    /// lands only its length in half the cases it would be lost. That takes no more draws
+    /// than before, so a seed gives the disk it gave before this landing
+    /// was added unless a write past the end was lost. The tiny bias of
+    /// `%` does not matter here.
+    fn roll(rng: &mut Rng, zeros_from: Option<u64>) -> Landing {
+        let draw = rng.next();
+        match draw % 3 {
+            0 => match zeros_from {
+                // `% 3` used the low end of the draw; the top bit is a
+                // second coin from the same draw, so no draw is added.
+                Some(zeros_from) if draw >> 63 == 1 => Landing::LengthOnly { zeros_from },
+                _ => Landing::Lost,
+            },
             1 => Landing::Kept,
             _ => Landing::Torn {
                 sectors: Vec::new(),
@@ -230,16 +256,24 @@ fn apply_after_crash(
             });
         }
         Change::Write { offset, bytes } => {
-            let mut landing = Landing::roll(rng);
+            let end = offset + bytes.len() as u64;
+            let disk_len = data.len() as u64;
+            let zeros_from = (end > disk_len).then(|| offset.max(disk_len));
+            let mut landing = Landing::roll(rng, zeros_from);
             match landing {
                 Landing::Lost => {}
                 Landing::Kept => write_at(data, offset, &bytes),
+                Landing::LengthOnly { .. } => {
+                    // Everything past the disk's end is new, so growing
+                    // the file with zeros is all there is to it.
+                    let grown = range(offset, bytes.len()).expect("checked when written");
+                    data.resize(grown.end, 0);
+                }
                 Landing::Torn { ref mut sectors } => {
                     // Sectors are counted from the start of the file. A
                     // torn write past the end leaves the file as long as
                     // the end of the last piece that landed, never past
                     // the end of the write.
-                    let end = offset + bytes.len() as u64;
                     let mut start = offset;
                     while start < end {
                         let stop = ((start / SECTOR + 1) * SECTOR).min(end);
@@ -513,11 +547,6 @@ impl Rng {
 
     fn coin(&mut self) -> bool {
         self.next() & 1 == 1
-    }
-
-    /// A number in `0..n`. The tiny bias of `%` does not matter here.
-    fn below(&mut self, n: u64) -> u64 {
-        self.next() % n
     }
 }
 
