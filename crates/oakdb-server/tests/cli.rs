@@ -2,10 +2,12 @@
 //! and `oakdb cli` run as child processes, plus how the CLI cuts input into
 //! statements and prints results.
 
-use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Output as ProcessOutput, Stdio};
 
 use oakdb_server::cli::{format_output, Splitter};
+
+mod common;
+use common::{first_line, output_within};
 use oakdb_sql::{Output, Value};
 
 #[test]
@@ -135,10 +137,7 @@ fn serve(data: &std::path::Path) -> ServerProcess {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let mut line = String::new();
-    BufReader::new(child.stdout.take().unwrap())
-        .read_line(&mut line)
-        .unwrap();
+    let line = first_line(&mut child);
     // "oakdb 0.1.0 listening on 127.0.0.1:54321, data ..."
     let addr = line
         .split("listening on ")
@@ -151,20 +150,7 @@ fn serve(data: &std::path::Path) -> ServerProcess {
 }
 
 fn cli(port: u16, input: &str) -> ProcessOutput {
-    let mut child = oakdb()
-        .args(["cli", "--port", &port.to_string()])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(input.as_bytes())
-        .unwrap();
-    child.wait_with_output().unwrap()
+    output_within(oakdb().args(["cli", "--port", &port.to_string()]), input)
 }
 
 fn text(bytes: &[u8]) -> String {
@@ -241,13 +227,14 @@ fn serve_refuses_to_start_on_a_bad_allowlist_line() {
     let dir = tempfile::tempdir().unwrap();
     let list = dir.path().join("allow");
     std::fs::write(&list, "10.0.0.5\n10.0.0.5/24\n").unwrap();
-    let out = oakdb()
-        .args(["serve", "--port", "0", "--data"])
-        .arg(dir.path().join("db"))
-        .arg("--allow-file")
-        .arg(&list)
-        .output()
-        .unwrap();
+    let out = output_within(
+        oakdb()
+            .args(["serve", "--port", "0", "--data"])
+            .arg(dir.path().join("db"))
+            .arg("--allow-file")
+            .arg(&list),
+        "",
+    );
     assert_eq!(out.status.code(), Some(1));
     let err = text(&out.stderr);
     assert!(err.contains(":2:") && err.contains("10.0.0.5/24"), "{err}");
@@ -256,15 +243,16 @@ fn serve_refuses_to_start_on_a_bad_allowlist_line() {
 #[test]
 fn serve_refuses_a_bad_allow_flag_and_needs_a_data_directory() {
     let dir = tempfile::tempdir().unwrap();
-    let out = oakdb()
-        .args(["serve", "--port", "0", "--allow", "::1", "--data"])
-        .arg(dir.path())
-        .output()
-        .unwrap();
+    let out = output_within(
+        oakdb()
+            .args(["serve", "--port", "0", "--allow", "::1", "--data"])
+            .arg(dir.path()),
+        "",
+    );
     assert_eq!(out.status.code(), Some(1));
     assert!(text(&out.stderr).contains("IPv6"), "{}", text(&out.stderr));
 
-    let out = oakdb().args(["serve", "--port", "0"]).output().unwrap();
+    let out = output_within(oakdb().args(["serve", "--port", "0"]), "");
     assert_eq!(out.status.code(), Some(2));
     assert!(
         text(&out.stderr).contains("--data"),
@@ -275,7 +263,7 @@ fn serve_refuses_a_bad_allow_flag_and_needs_a_data_directory() {
 
 #[test]
 fn an_unknown_subcommand_prints_the_usage() {
-    let out = oakdb().arg("frobnicate").output().unwrap();
+    let out = output_within(oakdb().arg("frobnicate"), "");
     assert_eq!(out.status.code(), Some(2));
     let err = text(&out.stderr);
     assert!(
@@ -292,7 +280,7 @@ fn help_after_a_subcommand_prints_the_usage_and_succeeds() {
         &["serve", "--port", "0", "-h"],
         &["--help"],
     ] {
-        let out = oakdb().args(args).output().unwrap();
+        let out = output_within(oakdb().args(args), "");
         assert!(out.status.success(), "{args:?}: {}", text(&out.stderr));
         let usage = text(&out.stdout);
         assert!(usage.contains("NOT AUTHENTICATION"), "{args:?}: {usage}");

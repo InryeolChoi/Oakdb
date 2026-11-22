@@ -16,6 +16,8 @@ use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+mod common;
+
 const BIN: &str = env!("CARGO_BIN_EXE_oakdb");
 const MAX_FRAME: u32 = 16 * 1024 * 1024;
 
@@ -377,32 +379,27 @@ fn a_server_on_a_port_already_in_use_refuses_to_start_with_exit_code_1() {
     let taken = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = taken.local_addr().unwrap().port().to_string();
     let dir = tempfile::tempdir().unwrap();
-    let out = Command::new(BIN)
-        .arg("serve")
-        .arg("--data")
-        .arg(dir.path())
-        .args(["--port", &port])
-        .output()
-        .unwrap();
+    let out = common::output_within(
+        Command::new(BIN)
+            .arg("serve")
+            .arg("--data")
+            .arg(dir.path())
+            .args(["--port", &port]),
+        "",
+    );
     assert_eq!(out.status.code(), Some(1), "stderr: {}", lossy(&out.stderr));
 }
 
 #[test]
 fn serve_without_data_does_not_start() {
-    let out = Command::new(BIN)
-        .args(["serve", "--port", "0"])
-        .output()
-        .unwrap();
+    let out = common::output_within(Command::new(BIN).args(["serve", "--port", "0"]), "");
     assert!(!out.status.success());
     assert!(!lossy(&out.stdout).contains("listening on"));
 }
 
 #[test]
 fn serve_help_explains_that_the_allowlist_is_not_authentication() {
-    let out = Command::new(BIN)
-        .args(["serve", "--help"])
-        .output()
-        .unwrap();
+    let out = common::output_within(Command::new(BIN).args(["serve", "--help"]), "");
     let all = format!("{}{}", lossy(&out.stdout), lossy(&out.stderr));
     assert!(all.contains("NOT AUTHENTICATION"), "output: {all}");
     assert!(
