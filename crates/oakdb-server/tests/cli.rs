@@ -283,3 +283,18 @@ fn an_unknown_subcommand_prints_the_usage() {
         "{err}"
     );
 }
+
+#[test]
+fn help_after_a_subcommand_prints_the_usage_and_succeeds() {
+    for args in [
+        &["serve", "--help"][..],
+        &["cli", "--help"],
+        &["serve", "--port", "0", "-h"],
+        &["--help"],
+    ] {
+        let out = oakdb().args(args).output().unwrap();
+        assert!(out.status.success(), "{args:?}: {}", text(&out.stderr));
+        let usage = text(&out.stdout);
+        assert!(usage.contains("NOT AUTHENTICATION"), "{args:?}: {usage}");
+    }
+}
