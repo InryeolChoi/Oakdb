@@ -148,7 +148,10 @@ impl<F: FsFile> Wal<F> {
     /// Empties the WAL and starts it again after `checkpoint`. The length
     /// change is synced before the header is written, so a header torn by
     /// a power cut is never followed by older records, and a WAL no longer
-    /// than a header never holds one ([`replay`] relies on it).
+    /// than a header never holds one ([`replay`] relies on it). Only a
+    /// checkpoint calls it, on a WAL with commits in it, so reads seeing it
+    /// empty while the disk does not cannot happen here: the engine stops
+    /// at a failed sync, and opening writes a new WAL file (design 0014).
     pub(crate) fn start(&mut self, checkpoint: u64) -> Result<()> {
         if self.file.size()? > 0 {
             self.file.set_len(0)?;
@@ -257,15 +260,6 @@ fn seal(out: &mut Vec<u8>, start: usize, prev: u32) -> u32 {
     crc
 }
 
-/// Replays the WAL `bytes`: every commit up to the first record that does
-/// not check out.
-///
-/// A WAL no longer than a header holds no record: it is emptied and synced
-/// before a header is written. So if its header does not check out, which
-/// a cut while writing the header can leave (the new length lands, the
-/// bytes do not), it counts as having none. A longer WAL whose header does
-/// not check out is refused: the records after it may be acknowledged
-/// commits.
 /// Makes `bytes` the WAL of the database in `dir`, durably, and returns
 /// the file that holds it. They go to a new file, synced, which is then
 /// renamed over the WAL and the directory synced: the old WAL is never
@@ -276,16 +270,29 @@ fn seal(out: &mut Vec<u8>, start: usize, prev: u32) -> u32 {
 /// disk (issue #59).
 pub(crate) fn write_new<F: Fs>(fs: &F, dir: &Path, bytes: &[u8]) -> Result<F::File> {
     let new = dir.join(NEW_FILE);
-    // A file left by an opening cut short holds nothing anyone needs.
+    // A file left by an opening cut short holds nothing anyone needs, but
+    // it may be longer, and end in a commit chained to these bytes that
+    // this opening did not see: cut it to their length, or a crash later
+    // could bring that commit back (PR #60, mutant K7).
     let file = fs.open(&new)?;
     file.write_all_at(bytes, 0)?;
-    file.set_len(bytes.len() as u64)?;
+    let len = u64::try_from(bytes.len()).expect("a WAL read into memory fits in a u64");
+    file.set_len(len)?;
     file.sync_data()?;
     fs.rename(&new, &dir.join(WAL_FILE))?;
     fs.sync_dir(dir)?;
     Ok(file)
 }
 
+/// Replays the WAL `bytes`: every commit up to the first record that does
+/// not check out.
+///
+/// A WAL no longer than a header holds no record: it is emptied and synced
+/// before a header is written. So if its header does not check out, which
+/// a cut while writing the header can leave (the new length lands, the
+/// bytes do not), it counts as having none. A longer WAL whose header does
+/// not check out is refused: the records after it may be acknowledged
+/// commits.
 pub(crate) fn replay(bytes: &[u8]) -> Result<Replayed> {
     let mut done = Replayed {
         checkpoint: None,

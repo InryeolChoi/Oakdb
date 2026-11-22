@@ -74,6 +74,7 @@ struct Disk {
 /// What a sector that a torn write did not land holds after the crash
 /// (design 0014).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TornSector {
     /// The bytes the disk held before: a disk writes a sector whole or
     /// not at all.
@@ -99,6 +100,7 @@ struct Rename {
 /// What a sync that fails with the power on does to the changes it was to
 /// save (issue #59, design 0014).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FailedSync {
     /// They stay unsynced, for a crash to decide or a later sync to save.
     #[default]
@@ -308,7 +310,7 @@ fn undo_renames(disk: &mut Disk, rng: &mut Rng, report: &mut CrashReport) {
     if renames.is_empty() {
         return;
     }
-    let landed = (rng.next() % (renames.len() as u64 + 1)) as usize;
+    let landed = rng.below(renames.len() + 1);
     for (i, rename) in renames.iter().enumerate() {
         report.renames.push(RenameFate {
             from: rename.from.clone(),
@@ -465,8 +467,10 @@ fn apply_after_crash(
 /// neither what was there nor the same bytes written again. Takes no
 /// draws, so a seed lands the same sectors either way.
 fn garble(data: &mut [u8], at: Range<u64>) {
-    let end = at.end.min(data.len() as u64);
-    for byte in data.iter_mut().take(end as usize).skip(at.start as usize) {
+    // The range was checked by [`range`] when the write was made.
+    let start = usize::try_from(at.start).expect("checked when written");
+    let end = usize::try_from(at.end).expect("checked when written");
+    for byte in data.iter_mut().take(end).skip(start) {
         *byte = !*byte;
     }
 }
@@ -811,6 +815,12 @@ impl Rng {
 
     fn coin(&mut self) -> bool {
         self.next() & 1 == 1
+    }
+
+    /// A number below `n`. The tiny bias of `%` does not matter here.
+    fn below(&mut self, n: usize) -> usize {
+        let n = u64::try_from(n).expect("a count fits in a u64");
+        usize::try_from(self.next() % n).expect("below a usize")
     }
 }
 

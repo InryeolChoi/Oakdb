@@ -156,7 +156,7 @@ CACHE_BUGS = [
         ("        if let Some(slot) = base {\n" + SLOT_AGAIN + "        }\n", ""),
         ("        let mut wal = Wal::new(wal_file, tail, checkpoint, in_wal);\n", "        if let Some(slot) = base {\n" + SLOT_AGAIN + "        }\n        let mut wal = Wal::new(wal_file, tail, checkpoint, in_wal);\n"),
     ]),
-    ("K7 open: a new WAL file left longer than what was written", WAL, "    file.set_len(bytes.len() as u64)?;\n", ""),
+    ("K7 open: a new WAL file left longer than what was written", WAL, "    file.set_len(len)?;\n", ""),
     ("K8 SimFs: a sync saves what reads see", SIM, [
         ("            for change in std::mem::take(&mut file.waiting) {", "            file.synced.clone_from(&file.now);\n            for change in std::mem::take(&mut file.waiting).into_iter().take(0) {"),
     ]),
@@ -169,7 +169,7 @@ CACHE_BUGS = [
     ("R1 SimFs: the newest renames land, not the oldest", SIM, "            landed: i < landed,", "            landed: i >= renames.len() - landed,"),
     ("R2 SimFs: a directory sync leaves renames unsynced", SIM, "            disk.renames.drain(..=last);", "            let _ = last;"),
     ("R3 SimFs: a rename that does not land loses the file it replaced", SIM, "        if let Some(replaced) = rename.replaced {\n            disk.files.insert(rename.to, replaced);\n        }\n", ""),
-    ("R4 SimFs: no rename ever lands before a sync", SIM, "    let landed = (rng.next() % (renames.len() as u64 + 1)) as usize;", "    let landed = (rng.next() % 1) as usize;"),
+    ("R4 SimFs: no rename ever lands before a sync", SIM, "    let landed = rng.below(renames.len() + 1);", "    let landed = rng.below(1);"),
     ("R5 SimFs: a failed rename still renames", SIM, "        disk.change()?;\n        if from == to {", "        let _ = disk.change();\n        if from == to {"),
 ]
 CACHE_TESTS = CHECKPOINT_TESTS + ["--test", "fs_contract", "--test", "single_page"]

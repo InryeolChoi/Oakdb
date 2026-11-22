@@ -55,7 +55,7 @@ python3 docs/experiments/scripts/ab_versions.py a5deefd <HEAD> 20 200 reopen,clo
 
 | 모드 | 0012 (#56) | 제자리 덮어쓰기 (be7dfdf) | 지금 |
 |---|---|---|---|
-| `cache` (#59) | — | 9/10 (K4 예상된 생존) | **18/19** (K7 놓침, 아래) |
+| `cache` (#59) | — | 9/10 (K4 예상된 생존) | **18/19** (K7 놓침 → 테스트를 더해 19/19, 아래) |
 | `sim` | 20/20 | 20/20 | **20/20** |
 | `checkpoint` (C1~C19) | 18/19 (C3 예상된 생존) | 18/19 | **19/19** (C3를 이제 잡음, 아래) |
 | `failure` (F1~F13, S1~S6) | — | 19/19 | **19/19** |
@@ -71,7 +71,7 @@ python3 docs/experiments/scripts/ab_versions.py a5deefd <HEAD> 20 200 reopen,clo
 | K4 열기: rename 전에 새 WAL sync 안 함 | 잡음 | 다시 열기 정전 |
 | K5 열기: rename 뒤 디렉터리 sync 안 함 | 잡음 | 고정 시드들, 만드는 도중 정전 |
 | K6 열기: 슬롯을 새 WAL 뒤에 씀 (순서) | 잡음 | 잊힌 정리 뒤 다시 열기 |
-| K7 열기: 남은 새 WAL 파일의 길이를 안 맞춤 | **놓침** | — |
+| K7 열기: 남은 새 WAL 파일의 길이를 안 맞춤 | 놓침 → **잡음** | `what_opening_again_finds_stays_through_a_crash` (사용자 결정 뒤 추가) |
 | K8~K11 SimFs: 잊는 sync | 4/4 잡음 | `sim_fs.rs` |
 | G1~G3 SimFs: 쓰레기 칸 | 3/3 잡음 | `sim_fs.rs` |
 | R1~R5 SimFs: rename | 5/5 잡음 | `sim_fs.rs`, `fs_contract.rs` |
@@ -83,7 +83,7 @@ python3 docs/experiments/scripts/ab_versions.py a5deefd <HEAD> 20 200 reopen,clo
 3. 다음 열기는 c1…c5를 읽고 **c6가 없는 상태로 연다.** 길이를 안 맞추면 wal.new에 c6가 남고, c6는 c5의 사슬에 이어진다.
 4. 커밋 없이 다시 정전이 나면 **c6가 되살아난다.**
 
-c6는 "결과 모름"인 커밋이라 있어도 되고 없어도 된다. 하지만 다시 열어서 "없음"을 본 뒤에 되살아나면 안 된다. 지금 코드는 길이를 맞추니 안전하다. 그러나 이 성질("한 번 본 결과는 바뀌지 않는다")을 보는 테스트가 없다. PR #60 판단할 것으로 올렸다.
+c6는 "결과 모름"인 커밋이라 있어도 되고 없어도 된다. 하지만 다시 열어서 "없음"을 본 뒤에 되살아나면 안 된다. 지금 코드는 길이를 맞추니 안전하다. 그러나 이 성질("한 번 본 결과는 바뀌지 않는다")을 보는 테스트가 없었다. 사용자 결정으로 `what_opening_again_finds_stays_through_a_crash`를 더했다. 잊힌 커밋이 있는 DB를 여는 모든 연산에서 끊고, 정전 뒤 다시 연 상태가 한 번 더 정전해도 그대로인지 본다(칸 두 방식 × 시드 8). K7을 심으면 `KeepsOld, cut at operation 5 of opening, seed 4`에서 잡힌다.
 
 **W2·W3은 자리를 옮겼다.** 꼬리를 잘라 내는 일과 열기 끝의 디렉터리 sync가 `wal::write_new`로 옮겨 가서, 같은 버그를 새 자리에 심도록 패턴을 바꿨다. W2는 새 WAL에 잘린 꼬리까지 쓰고, W3은 rename 뒤 디렉터리 sync를 뺀다.
 

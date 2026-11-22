@@ -675,3 +675,45 @@ fn a_power_cut_while_reopening_after_a_forgotten_checkpoint_keeps_every_commit()
         );
     }
 }
+
+#[test]
+fn what_opening_again_finds_stays_through_a_crash() {
+    // PR #60, mutant K7: an opening cut short after writing the new WAL
+    // file, holding a forgotten commit, then an opening that does not see
+    // that commit. Whatever the second opening finds, failed commit or
+    // not, a crash after it must not change. A new WAL file left longer
+    // than what that opening wrote would bring the commit back.
+    let ops = {
+        let fs = SimFs::new();
+        with_a_forgotten_commit(&fs);
+        let start = fs.ops();
+        open(&fs);
+        fs.ops() - start
+    };
+    for torn_sector in TORN_SECTORS {
+        for cut in 0..=ops {
+            for seed in 0..8 {
+                let what =
+                    format!("{torn_sector:?}, cut at operation {cut} of opening, seed {seed}");
+                let fs = SimFs::new();
+                fs.set_torn_sector(torn_sector);
+                with_a_forgotten_commit(&fs);
+                fs.fail_after(cut);
+                drop(Db::open_with(fs.clone(), dir()));
+                fs.crash(seed);
+
+                let found = read_all(
+                    &Db::open_with(fs.clone(), dir()).unwrap_or_else(|e| panic!("{what}: {e}")),
+                );
+                fs.crash(seed + 100);
+                let db = Db::open_with(fs.clone(), dir())
+                    .unwrap_or_else(|e| panic!("{what}, then: {e}"));
+                assert_eq!(
+                    read_all(&db),
+                    found,
+                    "{what}: what opening found changed in a crash"
+                );
+            }
+        }
+    }
+}
