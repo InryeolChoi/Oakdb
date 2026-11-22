@@ -142,17 +142,39 @@ fn a_rolled_back_or_dropped_transaction_leaves_no_trace() {
     );
 }
 
-/// One step of a history: a commit of puts and deletes, or a new snapshot.
+/// One step of a history: a commit of puts and deletes, or a new
+/// transaction that makes its own puts and deletes and stays open.
 #[derive(Debug, Clone)]
 enum Step {
     Commit(Vec<(u8, Option<u8>)>),
-    Begin,
+    Begin(Vec<(u8, Option<u8>)>),
+}
+
+/// Puts (`Some`) and deletes (`None`) under the keys the numbers stand for.
+fn writes() -> impl Strategy<Value = Vec<(u8, Option<u8>)>> {
+    prop::collection::vec((0u8..40, prop::option::of(any::<u8>())), 0..6)
+}
+
+/// Makes `writes` in `txn` and in `model`.
+fn write(txn: &mut oakdb::Txn<'_, SimFs>, model: &mut Model, writes: Vec<(u8, Option<u8>)>) {
+    for (k, v) in writes {
+        match v {
+            Some(v) => {
+                txn.put(&key_of(k), &value_of(v)).unwrap();
+                model.insert(key_of(k), value_of(v));
+            }
+            None => {
+                txn.delete(&key_of(k)).unwrap();
+                model.remove(&key_of(k));
+            }
+        }
+    }
 }
 
 fn step() -> impl Strategy<Value = Step> {
     prop_oneof![
-        3 => prop::collection::vec((0u8..40, prop::option::of(any::<u8>())), 1..6).prop_map(Step::Commit),
-        1 => Just(Step::Begin),
+        3 => writes().prop_map(Step::Commit),
+        1 => writes().prop_map(Step::Begin),
     ]
 }
 
@@ -170,7 +192,8 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
 
     /// Every transaction, read at the end of a random history, sees
-    /// exactly what was committed when it began.
+    /// exactly what was committed when it began, with its own writes on
+    /// top.
     #[test]
     fn every_snapshot_reads_the_database_as_of_its_beginning(steps in prop::collection::vec(step(), 1..60)) {
         let db = open();
@@ -178,21 +201,15 @@ proptest! {
         let mut snapshots = Vec::new();
         for step in steps {
             match step {
-                Step::Begin => snapshots.push((db.begin(), model.clone())),
+                Step::Begin(own) => {
+                    let mut txn = db.begin();
+                    let mut seen = model.clone();
+                    write(&mut txn, &mut seen, own);
+                    snapshots.push((txn, seen));
+                }
                 Step::Commit(writes) => {
                     let mut txn = db.begin();
-                    for (k, v) in writes {
-                        match v {
-                            Some(v) => {
-                                txn.put(&key_of(k), &value_of(v)).unwrap();
-                                model.insert(key_of(k), value_of(v));
-                            }
-                            None => {
-                                txn.delete(&key_of(k)).unwrap();
-                                model.remove(&key_of(k));
-                            }
-                        }
-                    }
+                    write(&mut txn, &mut model, writes);
                     txn.commit().unwrap();
                 }
             }

@@ -202,7 +202,9 @@ impl<F: Fs> Db<F> {
     /// Starts a transaction. It reads the database as committed now,
     /// whatever is committed while it runs (issue #25). Holding it holds
     /// that version of the tree in memory: pages commits change after this
-    /// are copies, so the ones it reads stay until it ends.
+    /// are copies, so the ones it reads stay until it ends. It takes the
+    /// tree's lock for a moment, so it waits while a commit syncs (#27 and
+    /// #28 are to let commits sync without the lock).
     pub fn begin(&self) -> Txn<'_, F> {
         Txn {
             db: self,
