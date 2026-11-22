@@ -72,6 +72,15 @@ pub enum Error {
     /// or another one. Two of them writing the same file would silently
     /// overwrite each other's commits.
     AlreadyOpen,
+    /// Another transaction wrote `key`, which this one writes too, and
+    /// committed after this one began (issue #26, ADR 0006: first
+    /// committer wins). This commit wrote nothing, and the engine goes on:
+    /// begin a new transaction, which reads the winner's write, and try
+    /// again.
+    Conflict {
+        /// A key both wrote. There may be more.
+        key: Vec<u8>,
+    },
 }
 
 /// Result type of the engine.
@@ -93,6 +102,12 @@ impl fmt::Display for Error {
             ),
             Error::Corrupt(reason) => write!(f, "data file is corrupt: {reason}"),
             Error::AlreadyOpen => write!(f, "the database is already open"),
+            Error::Conflict { key } => write!(
+                f,
+                "another transaction committed a write to key {} since this one began; \
+                 begin again and retry",
+                printable(key)
+            ),
             Error::OutcomeUnknown(e) => write!(
                 f,
                 "the disk failed during the commit, so its outcome is unknown, \
@@ -113,6 +128,19 @@ impl std::error::Error for Error {
             Error::Stopped(cause) => Some(&**cause),
             _ => None,
         }
+    }
+}
+
+/// `key` as text if it is printable ASCII, or else in hex, cut short past
+/// 64 bytes so an error message stays short.
+fn printable(key: &[u8]) -> String {
+    let shown = &key[..key.len().min(64)];
+    let more = if key.len() > shown.len() { "…" } else { "" };
+    if shown.iter().all(|b| b.is_ascii_graphic() || *b == b' ') {
+        format!("\"{}{more}\"", String::from_utf8_lossy(shown))
+    } else {
+        let hex: String = shown.iter().map(|b| format!("{b:02x}")).collect();
+        format!("0x{hex}{more}")
     }
 }
 

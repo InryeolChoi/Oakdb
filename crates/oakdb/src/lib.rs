@@ -6,6 +6,7 @@
 
 mod checkpoint;
 mod checksum;
+mod conflict;
 mod db;
 mod error;
 pub mod fs;
