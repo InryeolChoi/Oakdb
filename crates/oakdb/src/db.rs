@@ -39,6 +39,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use crate::checkpoint;
 use crate::checksum;
+use crate::conflict::Writes;
 use crate::error::{Error, Result, MAX_KEY_LEN, MAX_VALUE_LEN};
 use crate::fs::{Fs, FsFile, StdFs};
 use crate::meta::{Meta, Slot, META_LEN};
@@ -58,18 +59,26 @@ pub const CHECKPOINT_AFTER: u64 = 4 * 1024 * 1024;
 pub struct Db<F: Fs = StdFs> {
     /// The data file, held open for its lock. Checkpoints write it.
     file: F::File,
-    /// Where commits go. Only taken while holding `tree` for now; a lock of
+    /// Where commits go. Only taken while holding `committed` for now; a lock of
     /// its own so the commit thread (ADR 0006, #27) can later write the
     /// WAL while readers take the tree.
     wal: Mutex<Wal<F::File>>,
-    /// The committed tree. Commits hold the lock while they write, so they
-    /// happen one at a time, and swap in a new tree when done. A scan keeps
-    /// the tree it started on, so commits never change it under the scan.
-    tree: Mutex<Arc<Tree>>,
+    /// The committed tree, and the keys recent commits wrote. Commits hold
+    /// the lock while they check for conflicts and write, so they happen
+    /// one at a time, and swap in a new tree when done. A transaction keeps
+    /// the tree it began on, so commits never change it under it.
+    committed: Mutex<Committed>,
     /// Why the engine stopped, once a write or sync failed. Set at most
-    /// once, while holding `tree`, and never cleared: this process does not
+    /// once, while holding `committed`, and never cleared: this process does not
     /// trust the files again (design 0012).
     stopped: OnceLock<Arc<Error>>,
+}
+
+/// What commits change, under one lock, so a transaction's snapshot and
+/// the commit number it began at always match.
+struct Committed {
+    tree: Arc<Tree>,
+    writes: Writes,
 }
 
 impl<F: Fs> std::fmt::Debug for Db<F> {
@@ -194,7 +203,10 @@ impl<F: Fs> Db<F> {
         Ok(Db {
             file,
             wal: Mutex::new(wal),
-            tree: Mutex::new(Arc::new(tree)),
+            committed: Mutex::new(Committed {
+                tree: Arc::new(tree),
+                writes: Writes::default(),
+            }),
             stopped: OnceLock::new(),
         })
     }
@@ -204,9 +216,11 @@ impl<F: Fs> Db<F> {
     /// that version of the tree in memory: pages commits change after this
     /// are copies, so the ones it reads stay until it ends.
     pub fn begin(&self) -> Txn<'_, F> {
+        let mut committed = self.committed();
         Txn {
             db: self,
-            snapshot: Arc::clone(&self.tree()),
+            snapshot: Arc::clone(&committed.tree),
+            begun_after: committed.writes.begin(),
             writes: BTreeMap::new(),
         }
     }
@@ -214,7 +228,7 @@ impl<F: Fs> Db<F> {
     /// How many pages the database uses, free ones included, counting the
     /// two meta pages: what its data file holds once checkpointed.
     pub fn page_count(&self) -> u64 {
-        self.tree().meta().page_count
+        self.committed().tree.meta().page_count
     }
 
     /// Moves the pages the WAL holds to the data file and empties the WAL,
@@ -229,11 +243,11 @@ impl<F: Fs> Db<F> {
     /// checkpoint changes nothing the database holds, so no commit's
     /// outcome is in doubt, wherever it stopped.
     pub fn checkpoint(&self) -> Result<()> {
-        let tree = self.tree();
+        let committed = self.committed();
         // Checked holding the lock, so a commit that failed while this one
         // waited for it is seen, and nothing is written after a failure.
         self.check_running()?;
-        checkpoint::run(&self.file, &mut self.wal(), &tree).inspect_err(|e| self.stop(e))
+        checkpoint::run(&self.file, &mut self.wal(), &committed.tree).inspect_err(|e| self.stop(e))
     }
 
     /// Checkpoints and closes the database. Every committed transaction is
@@ -263,10 +277,13 @@ impl<F: Fs> Db<F> {
         self.wal.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn tree(&self) -> MutexGuard<'_, Arc<Tree>> {
+    fn committed(&self) -> MutexGuard<'_, Committed> {
         // A panic while holding the lock cannot leave the tree half changed:
-        // commits change a copy and swap it in at the end.
-        self.tree.lock().unwrap_or_else(PoisonError::into_inner)
+        // commits change a copy and swap it in at the end, and record their
+        // keys after that.
+        self.committed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -280,6 +297,10 @@ pub struct Txn<'db, F: Fs = StdFs> {
     /// never changes, checkpoints included: they write the data file, not
     /// the pages in memory.
     snapshot: Arc<Tree>,
+    /// The number of the last commit in the snapshot: a commit numbered
+    /// higher that wrote one of this transaction's keys makes its commit
+    /// fail (issue #26).
+    begun_after: u64,
     /// The last write to each key: `Some(value)` for a put, `None` for a
     /// delete.
     writes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
@@ -371,11 +392,19 @@ impl<F: Fs> Txn<'_, F> {
         if self.writes.is_empty() {
             return self.db.check_running();
         }
-        let mut tree = self.db.tree();
+        let mut committed = self.db.committed();
         // Checked holding the lock, so a commit that failed while this one
         // waited for it is seen, and nothing is written after a failure.
         self.db.check_running()?;
-        let mut next = Tree::clone(&tree);
+        // First committer wins (ADR 0006): if a commit since this
+        // transaction began wrote one of its keys, it writes nothing. Only
+        // writes are compared, so reads never conflict (snapshot isolation;
+        // write skew is allowed).
+        let keys = self.writes.keys().map(Vec::as_slice);
+        if let Some(key) = committed.writes.conflict(self.begun_after, keys) {
+            return Err(Error::Conflict { key: key.to_vec() });
+        }
+        let mut next = Tree::clone(&committed.tree);
         // Take out every key this transaction writes before putting any
         // back, so space freed by a delete or a shrinking value is there for
         // a put that sorts before it.
@@ -390,7 +419,7 @@ impl<F: Fs> Txn<'_, F> {
         // Taken even for a commit that writes nothing, to see whether the
         // WAL is due a checkpoint.
         let mut wal = self.db.wal();
-        if next.has_dirty() || next.meta() != tree.meta() {
+        if next.has_dirty() || next.meta() != committed.tree.meta() {
             if let Err(e) = append(&mut wal, &mut next) {
                 // Appending only fails writing or syncing, so whatever it
                 // is, the outcome is unknown. The tree is not swapped and
@@ -401,9 +430,15 @@ impl<F: Fs> Txn<'_, F> {
                 return Err(e);
             }
         }
-        *tree = Arc::new(next);
+        committed.tree = Arc::new(next);
+        // Even if the writes changed nothing in the tree: a write is a
+        // write, and a transaction that began before this one and writes
+        // the same key must fail all the same.
+        committed
+            .writes
+            .record(self.writes.keys().cloned().collect());
         if wal.len() > CHECKPOINT_AFTER {
-            if let Err(e) = checkpoint::run(&self.db.file, &mut wal, &tree) {
+            if let Err(e) = checkpoint::run(&self.db.file, &mut wal, &committed.tree) {
                 // The commit is in the WAL and synced: it stays, whatever
                 // the checkpoint did. The next request reports the stop.
                 self.db.stop(&e);
@@ -414,6 +449,14 @@ impl<F: Fs> Txn<'_, F> {
 
     /// Throws away the writes.
     pub fn rollback(self) {}
+}
+
+impl<F: Fs> Drop for Txn<'_, F> {
+    /// Ends the transaction, committed or not, so the commits it began
+    /// after no longer need keeping for conflicts with it.
+    fn drop(&mut self) {
+        self.db.committed().writes.end(self.begun_after);
+    }
 }
 
 /// The range from `start` to `end`, or, if it holds no key because its
