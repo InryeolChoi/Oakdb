@@ -9,7 +9,7 @@
 use oakdb::fs::Fs;
 use oakdb::Txn;
 
-use crate::encoding::{Reader, CATALOG_PREFIX, TAG_BLOB, TAG_INTEGER, TAG_TEXT};
+use crate::encoding::{column_type_of, tag_of, Reader, CATALOG_PREFIX};
 use crate::{ColumnType, SqlError};
 
 /// A table's description.
@@ -76,11 +76,7 @@ pub(crate) fn encode(table: &Table) -> Vec<u8> {
     for column in &table.columns {
         out.extend_from_slice(&u16_of(column.name.len()).to_be_bytes());
         out.extend_from_slice(column.name.as_bytes());
-        out.push(match column.column_type {
-            ColumnType::Integer => TAG_INTEGER,
-            ColumnType::Text => TAG_TEXT,
-            ColumnType::Blob => TAG_BLOB,
-        });
+        out.push(tag_of(column.column_type));
     }
     out
 }
@@ -95,12 +91,9 @@ pub(crate) fn decode(name: &str, bytes: &[u8]) -> Result<Table, SqlError> {
     for _ in 0..count {
         let len = u16::from_be_bytes(reader.array()?) as usize;
         let name = reader.text(len)?;
-        let column_type = match reader.u8()? {
-            TAG_INTEGER => ColumnType::Integer,
-            TAG_TEXT => ColumnType::Text,
-            TAG_BLOB => ColumnType::Blob,
-            tag => return Err(reader.corrupt(&format!("unknown column type {tag:#04x}"))),
-        };
+        let tag = reader.u8()?;
+        let column_type = column_type_of(tag)
+            .ok_or_else(|| reader.corrupt(&format!("unknown column type {tag:#04x}")))?;
         columns.push(Column { name, column_type });
     }
     if !reader.is_empty() {

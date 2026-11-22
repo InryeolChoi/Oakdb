@@ -6,7 +6,7 @@
 //! Row values never get compared, so they are encoded only to be read
 //! back (C6).
 
-use crate::{SqlError, Value};
+use crate::{ColumnType, SqlError, Value};
 
 /// First byte of every catalog key: `[0x00]` alone holds the next table
 /// id, `[0x00][table name]` holds a table's description.
@@ -70,13 +70,36 @@ pub(crate) const TAG_INTEGER: u8 = 0x01;
 pub(crate) const TAG_TEXT: u8 = 0x02;
 pub(crate) const TAG_BLOB: u8 = 0x03;
 
+/// The column type `tag` stands for in the catalog, or `None` for a tag
+/// that is no column type (NULL's, or none at all).
+pub(crate) fn column_type_of(tag: u8) -> Option<ColumnType> {
+    match tag {
+        TAG_INTEGER => Some(ColumnType::Integer),
+        TAG_TEXT => Some(ColumnType::Text),
+        TAG_BLOB => Some(ColumnType::Blob),
+        _ => None,
+    }
+}
+
+/// The tag of `column_type`: the same byte a value of that type has in a
+/// row.
+pub(crate) fn tag_of(column_type: ColumnType) -> u8 {
+    match column_type {
+        ColumnType::Integer => TAG_INTEGER,
+        ColumnType::Text => TAG_TEXT,
+        ColumnType::Blob => TAG_BLOB,
+    }
+}
+
 /// Encodes a row's values, one per column in column order: a tag byte,
 /// then an integer as 8 big-endian bytes, or text or a blob as a 4-byte
 /// big-endian length and the bytes, or nothing for NULL.
 ///
-/// Panics if a text or blob is longer than `u32::MAX` bytes; the executor
-/// rejects those first, as the engine would anyway.
-pub(crate) fn encode_row(values: &[Value]) -> Vec<u8> {
+/// A text or blob longer than that length field holds (`u32::MAX` bytes,
+/// the engine's [`oakdb::MAX_VALUE_LEN`] too) is refused here, where the
+/// field is: the engine would refuse the row anyway, but encoding comes
+/// first.
+pub(crate) fn encode_row(values: &[Value]) -> Result<Vec<u8>, SqlError> {
     let mut out = Vec::new();
     for value in values {
         match value {
@@ -87,22 +110,29 @@ pub(crate) fn encode_row(values: &[Value]) -> Vec<u8> {
             }
             Value::Text(text) => {
                 out.push(TAG_TEXT);
-                put_bytes(text.as_bytes(), &mut out);
+                put_bytes(text.as_bytes(), &mut out)?;
             }
             Value::Blob(bytes) => {
                 out.push(TAG_BLOB);
-                put_bytes(bytes, &mut out);
+                put_bytes(bytes, &mut out)?;
             }
         }
     }
-    out
+    Ok(out)
 }
 
-/// Appends a 4-byte big-endian length and `bytes`.
-fn put_bytes(bytes: &[u8], out: &mut Vec<u8>) {
-    let len = u32::try_from(bytes.len()).expect("the executor checks value lengths");
+/// Appends a 4-byte big-endian length and `bytes`, or refuses bytes too
+/// long for the length field.
+fn put_bytes(bytes: &[u8], out: &mut Vec<u8>) -> Result<(), SqlError> {
+    let len = u32::try_from(bytes.len()).map_err(|_| {
+        SqlError::Engine(oakdb::Error::ValueTooLarge {
+            len: bytes.len(),
+            max: u32::MAX as usize,
+        })
+    })?;
     out.extend_from_slice(&len.to_be_bytes());
     out.extend_from_slice(bytes);
+    Ok(())
 }
 
 /// Decodes a row that [`encode_row`] encoded.
@@ -275,7 +305,7 @@ mod tests {
 
         #[test]
         fn a_row_reads_back_as_it_was_written(row in prop::collection::vec(any_value(), 0..8)) {
-            prop_assert_eq!(decode_row(&encode_row(&row)).unwrap(), row);
+            prop_assert_eq!(decode_row(&encode_row(&row).unwrap()).unwrap(), row);
         }
 
         #[test]
@@ -283,7 +313,7 @@ mod tests {
             row in prop::collection::vec(any_value(), 1..6),
             cut in any::<prop::sample::Index>(),
         ) {
-            let bytes = encode_row(&row);
+            let bytes = encode_row(&row).unwrap();
             let len = cut.index(bytes.len());
             // Cutting before the end loses at least part of the last value,
             // unless it falls between whole values; either way it must not
@@ -330,7 +360,7 @@ mod tests {
             Value::Blob(vec![0xab]),
         ];
         assert_eq!(
-            encode_row(&row),
+            encode_row(&row).unwrap(),
             [
                 0x01, 0, 0, 0, 0, 0, 0, 0, 1, // INTEGER 1
                 0x02, 0, 0, 0, 3, b'k', b'i', b'm', // TEXT 'kim'

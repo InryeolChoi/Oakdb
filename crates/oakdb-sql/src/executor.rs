@@ -2,7 +2,7 @@
 //! (design 0017, section 5).
 
 use oakdb::fs::Fs;
-use oakdb::{Db, Txn, MAX_VALUE_LEN};
+use oakdb::{Db, Txn};
 
 use crate::catalog::{self, Column, Table};
 use crate::encoding::{decode_row, encode_row, row_key};
@@ -137,7 +137,7 @@ fn insert<F: Fs>(
                 table: table.name.clone(),
             });
         }
-        txn.put(&key, &encode_row(&row))?;
+        txn.put(&key, &encode_row(&row)?)?;
     }
     Ok(Output::Affected(count as u64))
 }
@@ -158,17 +158,6 @@ fn check_row(table: &Table, row: &[Value]) -> Result<(), SqlError> {
                 expected: column.column_type,
                 found,
             });
-        }
-        let len = match value {
-            Value::Text(text) => text.len(),
-            Value::Blob(bytes) => bytes.len(),
-            Value::Null | Value::Integer(_) => 0,
-        };
-        if len > MAX_VALUE_LEN {
-            return Err(SqlError::Engine(oakdb::Error::ValueTooLarge {
-                len,
-                max: MAX_VALUE_LEN,
-            }));
         }
     }
     Ok(())
