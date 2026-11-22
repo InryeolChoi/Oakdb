@@ -190,5 +190,5 @@ pub enum Value { Null, Integer(i64), Text(String), Blob(Vec<u8>) }
 | `lexer.rs` 단위 테스트 | 키워드 대소문자, `''`, `X'..'`, 음수, 위치, 닫히지 않은 따옴표·잘못된 16진수 |
 | `tests/sql.rs` | CREATE → INSERT → SELECT 왕복, 열 고르기, 열 목록 INSERT, 여러 행, NULL, `''`와 BLOB, i64 끝값, 엔진을 닫고 다시 열어도 표·행이 남음 |
 | `tests/sql.rs` 오류 | 오류 종류마다 하나 이상: 지원 안 함(UPDATE, `>`, WHERE 없음, REAL, 두 문장), 문법 오류 위치, 없는 표·열, 이미 있는 표, 기본 키 중복과 그때 같은 문장의 앞 행도 안 들어감, 타입 불일치, NULL 기본 키 |
-| `tests/sql.rs` 정전 | `SimFs`에서 INSERT를 응답받은 뒤 `crash(seed)` → 다시 열기, 시드 여러 개 → 표 정보와 응답한 행이 모두 SELECT로 보임 |
+| `tests/sql.rs` 정전 | `SimFs`에서 INSERT를 응답받은 뒤 `crash(seed)` → 다시 열기, 시드 여러 개 → 표 정보와 응답한 행이 모두 SELECT로 보임. 행 세 개짜리 INSERT의 **모든 디스크 연산**에서 정전 → 세 행이 다 있거나 다 없음, 응답했으면 다 있음 |
 | `tests/sql.rs` 실제 파일시스템 | 임시 디렉터리에서 `Db::open`으로 한 번 왕복 |

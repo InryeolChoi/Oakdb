@@ -342,6 +342,43 @@ fn acknowledged_tables_and_rows_survive_a_power_cut() {
     }
 }
 
+#[test]
+fn an_insert_cut_by_a_power_cut_is_all_there_or_not_at_all() {
+    // Cut the power at every disk operation the INSERT does, until one
+    // cut comes too late to stop it.
+    for cut in 0.. {
+        let fs = SimFs::new();
+        let db = open(&fs);
+        run(&db, "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)");
+        run(&db, "INSERT INTO t VALUES (0, 'before')");
+        fs.fail_after(cut);
+        let finished = execute(&db, "INSERT INTO t VALUES (1, 'a'), (2, 'b'), (3, 'c')").is_ok();
+        fs.crash(cut);
+        drop(db);
+
+        let db = open(&fs);
+        assert_eq!(
+            rows(&db, "SELECT v FROM t WHERE id = 0"),
+            vec![vec![text("before")]],
+            "cut {cut}"
+        );
+        let found: Vec<bool> = (1..=3)
+            .map(|id| !rows(&db, &format!("SELECT v FROM t WHERE id = {id}")).is_empty())
+            .collect();
+        assert!(
+            found == [true; 3] || found == [false; 3],
+            "cut {cut}: half an INSERT: {found:?}"
+        );
+        if finished {
+            assert_eq!(
+                found, [true; 3],
+                "cut {cut}: an acknowledged INSERT was lost"
+            );
+            break;
+        }
+    }
+}
+
 // ----------------------------------------------------------------- errors
 
 #[test]

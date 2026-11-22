@@ -36,9 +36,130 @@ pub(crate) struct Spanned {
 }
 
 /// Cuts `sql` into tokens, ending with [`Token::End`].
+///
+/// It walks the bytes: everything that ends a token in SQL is ASCII, so
+/// text between quotes can be copied as it is, whatever letters it holds.
 pub(crate) fn tokenize(sql: &str) -> Result<Vec<Spanned>, SqlError> {
-    let _ = sql;
-    unimplemented!("lexer")
+    let bytes = sql.as_bytes();
+    let mut tokens = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        let start = at;
+        let b = bytes[at];
+        let token = if b.is_ascii_whitespace() {
+            at += 1;
+            continue;
+        } else if (b == b'x' || b == b'X') && bytes.get(at + 1) == Some(&b'\'') {
+            let (text, end) = quoted(sql, at + 1, start)?;
+            at = end;
+            Token::Blob(hex(&text, start)?)
+        } else if b.is_ascii_alphabetic() || b == b'_' {
+            at = run_of(bytes, at, is_word_byte);
+            Token::Word(sql[start..at].to_owned())
+        } else if b.is_ascii_digit() {
+            at = run_of(bytes, at, |b| b.is_ascii_digit());
+            // `12ab` is neither a number nor a name; saying so here gives a
+            // clearer error than letting the parser trip over two tokens.
+            if bytes.get(at).is_some_and(|&b| is_word_byte(b)) {
+                return Err(syntax(start, "a number runs into letters"));
+            }
+            Token::Integer(sql[start..at].to_owned())
+        } else if b == b'\'' {
+            let (text, end) = quoted(sql, at, start)?;
+            at = end;
+            Token::Text(text)
+        } else if let Some(symbol) = symbol(&bytes[at..]) {
+            at += symbol.len();
+            Token::Symbol(symbol)
+        } else {
+            let found = sql[at..].chars().next().unwrap_or_default();
+            return Err(syntax(start, &format!("unexpected character `{found}`")));
+        };
+        tokens.push(Spanned {
+            token,
+            position: start,
+        });
+    }
+    tokens.push(Spanned {
+        token: Token::End,
+        position: bytes.len(),
+    });
+    Ok(tokens)
+}
+
+/// Whether `b` can be part of a name or keyword after its first byte.
+fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Where the run of bytes matching `keep` that starts at `from` ends.
+fn run_of(bytes: &[u8], from: usize, keep: impl Fn(u8) -> bool) -> usize {
+    bytes[from..]
+        .iter()
+        .position(|&b| !keep(b))
+        .map_or(bytes.len(), |len| from + len)
+}
+
+/// The text of the quoted literal whose opening quote is at `open`, with
+/// `''` turned into `'`, and the offset just past its closing quote. An
+/// unclosed literal is an error at `start`, where the token starts.
+fn quoted(sql: &str, open: usize, start: usize) -> Result<(String, usize), SqlError> {
+    let bytes = sql.as_bytes();
+    let mut text = String::new();
+    let mut from = open + 1;
+    loop {
+        let Some(len) = bytes[from..].iter().position(|&b| b == b'\'') else {
+            return Err(syntax(start, "the quote is never closed"));
+        };
+        let quote = from + len;
+        text.push_str(&sql[from..quote]);
+        if bytes.get(quote + 1) == Some(&b'\'') {
+            text.push('\'');
+            from = quote + 2;
+        } else {
+            return Ok((text, quote + 1));
+        }
+    }
+}
+
+/// The bytes that `digits`, the inside of a blob literal at `start`, spell
+/// in hexadecimal, two digits a byte.
+fn hex(digits: &str, start: usize) -> Result<Vec<u8>, SqlError> {
+    let digits = digits.as_bytes();
+    if !digits.len().is_multiple_of(2) {
+        return Err(syntax(start, "a blob needs two hex digits per byte"));
+    }
+    digits
+        .chunks(2)
+        .map(|pair| {
+            let high = (pair[0] as char).to_digit(16);
+            let low = (pair[1] as char).to_digit(16);
+            match (high, low) {
+                // Two hex digits always fit in a byte.
+                (Some(high), Some(low)) => Ok((high * 16 + low) as u8),
+                _ => Err(syntax(start, "a blob holds only hex digits")),
+            }
+        })
+        .collect()
+}
+
+/// The symbol `rest` starts with, longest first, so `<=` is not read as
+/// `<` and `=`.
+fn symbol(rest: &[u8]) -> Option<&'static str> {
+    const SYMBOLS: [&str; 16] = [
+        "<=", ">=", "<>", "!=", "(", ")", ",", ";", "*", "=", "-", "<", ">", ".", "+", "/",
+    ];
+    SYMBOLS
+        .into_iter()
+        .find(|symbol| rest.starts_with(symbol.as_bytes()))
+}
+
+/// A syntax error at byte `position`.
+pub(crate) fn syntax(position: usize, message: &str) -> SqlError {
+    SqlError::Syntax {
+        position,
+        message: message.to_owned(),
+    }
 }
 
 #[cfg(test)]

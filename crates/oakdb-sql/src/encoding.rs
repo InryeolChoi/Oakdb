@@ -19,27 +19,162 @@ pub(crate) const ROW_PREFIX: u8 = 0x01;
 /// do. Integers sort among integers, and text and blobs bytewise among
 /// themselves; a table's primary key holds one type, so values of
 /// different types are never compared. NULL is never a primary key.
+///
+/// - An integer is its 8 big-endian bytes with the sign bit flipped. In
+///   two's complement a negative number starts with a 1 bit, so left alone
+///   it would sort after every positive one; flipped, negatives start with
+///   0 and positives with 1, and within each the bytes already sort.
+/// - Text and blobs are their bytes, with each 0x00 written as `00 FF`,
+///   then `00 00` to end. The end sorts below any byte the value could go
+///   on with (`00 00` < `00 FF` < `01`), so a value sorts before every
+///   longer value it starts. The key ends here today, so the end marker is
+///   not yet needed for order, but it keeps order once something follows
+///   the key, as in a secondary index.
 pub(crate) fn encode_key(value: &Value, out: &mut Vec<u8>) {
-    let _ = (value, out);
-    unimplemented!("key encoding")
+    match value {
+        Value::Integer(i) => out.extend_from_slice(&(*i as u64 ^ (1 << 63)).to_be_bytes()),
+        Value::Text(text) => escape(text.as_bytes(), out),
+        Value::Blob(bytes) => escape(bytes, out),
+        // The executor rejects a NULL primary key before it makes a key,
+        // and `WHERE pk = NULL` finds nothing without looking.
+        Value::Null => unreachable!("NULL is never a primary key"),
+    }
+}
+
+/// Appends `bytes` with 0x00 escaped as `00 FF`, then the end `00 00`.
+fn escape(bytes: &[u8], out: &mut Vec<u8>) {
+    for &b in bytes {
+        out.push(b);
+        if b == 0x00 {
+            out.push(0xFF);
+        }
+    }
+    out.extend_from_slice(&[0x00, 0x00]);
 }
 
 /// The key of the row of table `table_id` whose primary key is `key`.
+///
+/// The table id is big-endian, so all the rows of one table sit together
+/// in key order, before every row of the next table.
 pub(crate) fn row_key(table_id: u32, key: &Value) -> Vec<u8> {
-    let _ = (table_id, key);
-    unimplemented!("row key")
+    let mut out = vec![ROW_PREFIX];
+    out.extend_from_slice(&table_id.to_be_bytes());
+    encode_key(key, &mut out);
+    out
 }
 
-/// Encodes a row's values, one per column in column order.
+/// Tag byte of each value type in a row, and of each column type in the
+/// catalog.
+pub(crate) const TAG_NULL: u8 = 0x00;
+pub(crate) const TAG_INTEGER: u8 = 0x01;
+pub(crate) const TAG_TEXT: u8 = 0x02;
+pub(crate) const TAG_BLOB: u8 = 0x03;
+
+/// Encodes a row's values, one per column in column order: a tag byte,
+/// then an integer as 8 big-endian bytes, or text or a blob as a 4-byte
+/// big-endian length and the bytes, or nothing for NULL.
+///
+/// Panics if a text or blob is longer than `u32::MAX` bytes; the executor
+/// rejects those first, as the engine would anyway.
 pub(crate) fn encode_row(values: &[Value]) -> Vec<u8> {
-    let _ = values;
-    unimplemented!("row encoding")
+    let mut out = Vec::new();
+    for value in values {
+        match value {
+            Value::Null => out.push(TAG_NULL),
+            Value::Integer(i) => {
+                out.push(TAG_INTEGER);
+                out.extend_from_slice(&i.to_be_bytes());
+            }
+            Value::Text(text) => {
+                out.push(TAG_TEXT);
+                put_bytes(text.as_bytes(), &mut out);
+            }
+            Value::Blob(bytes) => {
+                out.push(TAG_BLOB);
+                put_bytes(bytes, &mut out);
+            }
+        }
+    }
+    out
+}
+
+/// Appends a 4-byte big-endian length and `bytes`.
+fn put_bytes(bytes: &[u8], out: &mut Vec<u8>) {
+    let len = u32::try_from(bytes.len()).expect("the executor checks value lengths");
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(bytes);
 }
 
 /// Decodes a row that [`encode_row`] encoded.
 pub(crate) fn decode_row(bytes: &[u8]) -> Result<Vec<Value>, SqlError> {
-    let _ = bytes;
-    unimplemented!("row decoding")
+    let mut reader = Reader::new(bytes, "row");
+    let mut values = Vec::new();
+    while !reader.is_empty() {
+        let value = match reader.u8()? {
+            TAG_NULL => Value::Null,
+            TAG_INTEGER => Value::Integer(i64::from_be_bytes(reader.array()?)),
+            TAG_TEXT => {
+                let len = u32::from_be_bytes(reader.array()?) as usize;
+                Value::Text(reader.text(len)?)
+            }
+            TAG_BLOB => {
+                let len = u32::from_be_bytes(reader.array()?) as usize;
+                Value::Blob(reader.bytes(len)?.to_vec())
+            }
+            tag => return Err(reader.corrupt(&format!("unknown value tag {tag:#04x}"))),
+        };
+        values.push(value);
+    }
+    Ok(values)
+}
+
+/// Reads stored bytes front to back, turning a short or malformed input
+/// into [`SqlError::Corrupt`] instead of a panic: what is in the engine
+/// may have been written by a broken build.
+pub(crate) struct Reader<'a> {
+    bytes: &'a [u8],
+    /// What is being read, for the error.
+    what: &'static str,
+}
+
+impl<'a> Reader<'a> {
+    pub(crate) fn new(bytes: &'a [u8], what: &'static str) -> Self {
+        Reader { bytes, what }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    /// The next `len` bytes.
+    pub(crate) fn bytes(&mut self, len: usize) -> Result<&'a [u8], SqlError> {
+        if self.bytes.len() < len {
+            return Err(self.corrupt("it ends too soon"));
+        }
+        let (taken, rest) = self.bytes.split_at(len);
+        self.bytes = rest;
+        Ok(taken)
+    }
+
+    /// The next `N` bytes, as an array for `from_be_bytes`.
+    pub(crate) fn array<const N: usize>(&mut self) -> Result<[u8; N], SqlError> {
+        let bytes = self.bytes(N)?;
+        Ok(bytes.try_into().expect("bytes returned N bytes"))
+    }
+
+    pub(crate) fn u8(&mut self) -> Result<u8, SqlError> {
+        Ok(self.array::<1>()?[0])
+    }
+
+    /// The next `len` bytes, which must be UTF-8.
+    pub(crate) fn text(&mut self, len: usize) -> Result<String, SqlError> {
+        let bytes = self.bytes(len)?;
+        String::from_utf8(bytes.to_vec()).map_err(|_| self.corrupt("text is not UTF-8"))
+    }
+
+    pub(crate) fn corrupt(&self, reason: &str) -> SqlError {
+        SqlError::Corrupt(format!("{}: {reason}", self.what))
+    }
 }
 
 #[cfg(test)]
