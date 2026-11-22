@@ -38,7 +38,7 @@ use crate::checksum;
 use crate::error::{Error, Result, MAX_KEY_LEN, MAX_VALUE_LEN};
 use crate::fs::{Fs, FsFile, StdFs};
 use crate::meta::{Meta, Slot, META_LEN};
-use crate::page::{Page, Value, PAGE_SIZE};
+use crate::page::{Page, PAGE_SIZE};
 use crate::tree::{Cursor, Tree};
 use crate::wal::{self, Replayed, Tail, Wal, CUT_FILE, HEADER_LEN, WAL_FILE};
 
@@ -195,10 +195,14 @@ impl<F: Fs> Db<F> {
         })
     }
 
-    /// Starts a transaction.
+    /// Starts a transaction. It reads the database as committed now,
+    /// whatever is committed while it runs (issue #25). Holding it holds
+    /// that version of the tree in memory: pages commits change after this
+    /// are copies, so the ones it reads stay until it ends.
     pub fn begin(&self) -> Txn<'_, F> {
         Txn {
             db: self,
+            snapshot: Arc::clone(&self.tree()),
             writes: BTreeMap::new(),
         }
     }
@@ -262,35 +266,35 @@ impl<F: Fs> Db<F> {
     }
 }
 
-/// A transaction. Its writes stay private until [`Txn::commit`]; dropping it
-/// without committing throws them away.
+/// A transaction. It reads the snapshot taken when it began, with its own
+/// writes on top. Its writes stay private until [`Txn::commit`]; dropping
+/// it without committing throws them away.
 pub struct Txn<'db, F: Fs = StdFs> {
     db: &'db Db<F>,
+    /// The committed tree when the transaction began. The whole database
+    /// is in memory and a commit swaps in a changed copy, so this tree
+    /// never changes, checkpoints included: they write the data file, not
+    /// the pages in memory.
+    snapshot: Arc<Tree>,
     /// The last write to each key: `Some(value)` for a put, `None` for a
     /// delete.
     writes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
 }
 
 impl<F: Fs> Txn<'_, F> {
-    /// The value under `key`, including this transaction's own writes.
+    /// The value under `key` in the transaction's snapshot, or its own
+    /// write to it.
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         self.db.check_running()?;
         check_key(key)?;
         if let Some(write) = self.writes.get(key) {
             return Ok(write.clone());
         }
-        let (tree, r) = {
-            let locked = self.db.tree();
-            match locked.find(key) {
-                None => return Ok(None),
-                Some(Value::Inline(value)) => return Ok(Some(value.to_vec())),
-                Some(Value::Overflow(r)) => (Arc::clone(&locked), r),
-            }
-            // The lock is released here, at the end of the block that holds
-            // it, so commits do not wait while a long value is gathered
-            // from its overflow pages below.
-        };
-        Ok(Some(tree.value(Value::Overflow(r)).into_owned()))
+        // No lock: the snapshot is the transaction's own.
+        Ok(self
+            .snapshot
+            .find(key)
+            .map(|value| self.snapshot.value(value).into_owned()))
     }
 
     /// The entries whose keys are in `range`, in key order, including this
@@ -301,11 +305,11 @@ impl<F: Fs> Txn<'_, F> {
     /// named where the range alone does not say it. A range whose start is
     /// past its end is empty.
     ///
-    /// The scan reads the tree committed when it starts; commits made while
-    /// it runs do not change what it yields. If the engine stopped, its
-    /// only item is [`Error::Stopped`].
+    /// The scan reads the transaction's snapshot, so commits made since it
+    /// began, or while the scan runs, do not change what it yields. If the
+    /// engine stopped, its only item is [`Error::Stopped`].
     pub fn scan<K: AsRef<[u8]>>(&self, range: impl RangeBounds<K>) -> Scan<'_> {
-        let tree = Arc::clone(&self.db.tree());
+        let tree = Arc::clone(&self.snapshot);
         if let Err(e) = self.db.check_running() {
             return Scan::stopped(tree, e);
         }
