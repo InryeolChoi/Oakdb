@@ -576,6 +576,7 @@ fn every_request_is_stopped_after_a_failed_commit() {
         assert_stopped(first, "scan");
         assert_stopped(db.begin().commit(), "empty commit");
         assert_stopped(db.checkpoint(), "checkpoint");
+        drop(txn);
         match db.close() {
             Err(Error::Stopped(inner)) => match &*inner {
                 Error::OutcomeUnknown(c) => assert!(std::sync::Arc::ptr_eq(c, &cause)),
