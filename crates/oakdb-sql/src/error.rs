@@ -60,6 +60,15 @@ pub enum SqlError {
         /// The value's type, `None` for NULL.
         found: Option<ColumnType>,
     },
+    /// An expression mixes types where it cannot (design 0019, section
+    /// 3): arithmetic on text, a condition that is not true-or-false, two
+    /// sides of a comparison of different types where neither side is a
+    /// plain column (that case is [`SqlError::TypeMismatch`]). Found
+    /// before any row is read.
+    Type(String),
+    /// Integer arithmetic overflowed or divided by zero (design 0019,
+    /// section 2-2).
+    Arithmetic(String),
     /// What the SQL layer stored in the engine could not be read back. The
     /// text says what is wrong.
     Corrupt(String),
@@ -97,6 +106,8 @@ impl fmt::Display for SqlError {
                 found: None,
                 ..
             } => write!(f, "column {column} is the primary key and cannot be NULL"),
+            SqlError::Type(what) => write!(f, "type error: {what}"),
+            SqlError::Arithmetic(what) => write!(f, "arithmetic error: {what}"),
             SqlError::Corrupt(reason) => write!(f, "stored SQL data is corrupt: {reason}"),
             SqlError::Engine(e) => write!(f, "engine error: {e}"),
         }
