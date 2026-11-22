@@ -39,7 +39,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use crate::checkpoint;
 use crate::checksum;
-use crate::conflict::Writes;
+use crate::conflict::RecentWrites;
 use crate::error::{Error, Result, MAX_KEY_LEN, MAX_VALUE_LEN};
 use crate::fs::{Fs, FsFile, StdFs};
 use crate::meta::{Meta, Slot, META_LEN};
@@ -78,7 +78,8 @@ pub struct Db<F: Fs = StdFs> {
 /// the commit number it began at always match.
 struct Committed {
     tree: Arc<Tree>,
-    writes: Writes,
+    /// The keys recent commits wrote, to find conflicts (issue #26).
+    recent: RecentWrites,
 }
 
 impl<F: Fs> std::fmt::Debug for Db<F> {
@@ -205,7 +206,7 @@ impl<F: Fs> Db<F> {
             wal: Mutex::new(wal),
             committed: Mutex::new(Committed {
                 tree: Arc::new(tree),
-                writes: Writes::default(),
+                recent: RecentWrites::default(),
             }),
             stopped: OnceLock::new(),
         })
@@ -222,7 +223,7 @@ impl<F: Fs> Db<F> {
         Txn {
             db: self,
             snapshot: Arc::clone(&committed.tree),
-            begun_after: committed.writes.begin(),
+            begun_after: committed.recent.begin(),
             writes: BTreeMap::new(),
         }
     }
@@ -292,6 +293,13 @@ impl<F: Fs> Db<F> {
 /// A transaction. It reads the snapshot taken when it began, with its own
 /// writes on top. Its writes stay private until [`Txn::commit`]; dropping
 /// it without committing throws them away.
+///
+/// Transactions are isolated by snapshot (ADR 0006): of two that write the
+/// same key, the later to commit fails with [`Error::Conflict`]. Reads are
+/// not compared, so **write skew** is allowed: two transactions that each
+/// read keys the other writes, and write different keys, both commit,
+/// even if a rule both checked no longer holds afterwards. Write a key
+/// both depend on to make them conflict.
 pub struct Txn<'db, F: Fs = StdFs> {
     db: &'db Db<F>,
     /// The committed tree when the transaction began. The whole database
@@ -390,7 +398,13 @@ impl<F: Fs> Txn<'_, F> {
     /// [`Error::Stopped`]. A commit that leaves the WAL longer than
     /// [`CHECKPOINT_AFTER`] checkpoints; if that fails, the commit is
     /// durable, so it returns `Ok`, and the engine stops.
-    pub fn commit(self) -> Result<()> {
+    ///
+    /// If another transaction wrote one of the keys this one writes and
+    /// committed after this one began, it returns [`Error::Conflict`] and
+    /// writes nothing (issue #26: the first to commit wins). The engine
+    /// goes on; begin a new transaction, which sees the winner's write, and
+    /// try again.
+    pub fn commit(mut self) -> Result<()> {
         if self.writes.is_empty() {
             return self.db.check_running();
         }
@@ -403,7 +417,7 @@ impl<F: Fs> Txn<'_, F> {
         // writes are compared, so reads never conflict (snapshot isolation;
         // write skew is allowed).
         let keys = self.writes.keys().map(Vec::as_slice);
-        if let Some(key) = committed.writes.conflict(self.begun_after, keys) {
+        if let Some(key) = committed.recent.conflict(self.begun_after, keys) {
             return Err(Error::Conflict { key: key.to_vec() });
         }
         let mut next = Tree::clone(&committed.tree);
@@ -432,13 +446,17 @@ impl<F: Fs> Txn<'_, F> {
                 return Err(e);
             }
         }
-        committed.tree = Arc::new(next);
-        // Even if the writes changed nothing in the tree: a write is a
+        // The keys go down before the new tree goes in: were anything in
+        // between to panic, a transaction could see the tree with no record
+        // of who wrote it, and overwrite it without a conflict. This way it
+        // can at worst conflict with a commit that never showed. Even
+        // writes that changed nothing in the tree count: a write is a
         // write, and a transaction that began before this one and writes
         // the same key must fail all the same.
         committed
-            .writes
-            .record(self.writes.keys().cloned().collect());
+            .recent
+            .record(std::mem::take(&mut self.writes).into_keys());
+        committed.tree = Arc::new(next);
         if wal.len() > CHECKPOINT_AFTER {
             if let Err(e) = checkpoint::run(&self.db.file, &mut wal, &committed.tree) {
                 // The commit is in the WAL and synced: it stays, whatever
@@ -457,7 +475,7 @@ impl<F: Fs> Drop for Txn<'_, F> {
     /// Ends the transaction, committed or not, so the commits it began
     /// after no longer need keeping for conflicts with it.
     fn drop(&mut self) {
-        self.db.committed().writes.end(self.begun_after);
+        self.db.committed().recent.end(self.begun_after);
     }
 }
 

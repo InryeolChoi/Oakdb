@@ -271,7 +271,12 @@ proptest! {
                         .cloned();
                     let result = t.txn.commit();
                     match lost_to {
-                        Some(_) => prop_assert!(matches!(result, Err(Error::Conflict { ref key }) if t.keys.contains(key)), "{:?}", result),
+                        // The key it names is one of its own that a commit
+                        // since it began wrote.
+                        Some(_) => {
+                            let written_since = |key: &Vec<u8>| history[t.begun_after..].iter().flatten().any(|w| w == key);
+                            prop_assert!(matches!(result, Err(Error::Conflict { ref key }) if t.keys.contains(key) && written_since(key)), "{:?}", result)
+                        }
                         None => {
                             prop_assert!(result.is_ok(), "{:?}", result);
                             if !t.writes.is_empty() {

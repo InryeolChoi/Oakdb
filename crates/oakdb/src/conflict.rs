@@ -12,55 +12,62 @@
 //! restart no transaction is open, so none is compared across it.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::sync::Arc;
 
 /// The keys commits wrote, by commit number, for as long as an open
 /// transaction could conflict with them.
 #[derive(Default)]
-pub(crate) struct Writes {
+pub(crate) struct RecentWrites {
     /// The number of the last commit that wrote anything.
     last: u64,
-    /// Each key a kept commit wrote, with the last such commit.
-    by_key: HashMap<Vec<u8>, u64>,
+    /// Each key a kept commit wrote, with the last such commit. The key is
+    /// shared with `commits`, so each is stored once.
+    by_key: HashMap<Arc<[u8]>, u64>,
     /// The kept commits, oldest first, with the keys each wrote: what
     /// pruning goes through.
-    commits: VecDeque<(u64, Vec<Vec<u8>>)>,
+    commits: VecDeque<(u64, Vec<Arc<[u8]>>)>,
     /// How many open transactions began after each commit number.
     open: BTreeMap<u64, usize>,
 }
 
-impl Writes {
-    /// A transaction begins: returns its snapshot, the last commit number,
-    /// and counts it as open until [`Writes::end`].
+impl RecentWrites {
+    /// A transaction begins: returns the number of the last commit, which
+    /// its snapshot holds, and counts it as open until
+    /// [`RecentWrites::end`]. A transaction that never ends (one passed to
+    /// `mem::forget`) keeps every commit after it here: conflicts are still
+    /// found right, but the table only grows.
     pub(crate) fn begin(&mut self) -> u64 {
         *self.open.entry(self.last).or_default() += 1;
         self.last
     }
 
-    /// A transaction that began at `snapshot` ends, committed or not.
-    pub(crate) fn end(&mut self, snapshot: u64) {
-        if let Some(count) = self.open.get_mut(&snapshot) {
+    /// A transaction that began after commit `begun_after` ends,
+    /// committed or not.
+    pub(crate) fn end(&mut self, begun_after: u64) {
+        if let Some(count) = self.open.get_mut(&begun_after) {
             *count -= 1;
             if *count == 0 {
-                self.open.remove(&snapshot);
+                self.open.remove(&begun_after);
             }
         }
         self.prune();
     }
 
-    /// A key of `keys` that a commit after `snapshot` wrote, if any.
+    /// A key of `keys` that a commit after `begun_after` wrote, if any.
     pub(crate) fn conflict<'k>(
         &self,
-        snapshot: u64,
+        begun_after: u64,
         mut keys: impl Iterator<Item = &'k [u8]>,
     ) -> Option<&'k [u8]> {
-        keys.find(|key| self.by_key.get(*key).is_some_and(|&n| n > snapshot))
+        keys.find(|key| self.by_key.get(*key).is_some_and(|&n| n > begun_after))
     }
 
     /// A commit wrote `keys`: gives it the next number.
-    pub(crate) fn record(&mut self, keys: Vec<Vec<u8>>) {
+    pub(crate) fn record(&mut self, keys: impl IntoIterator<Item = Vec<u8>>) {
         self.last += 1;
+        let keys: Vec<Arc<[u8]>> = keys.into_iter().map(Arc::from).collect();
         for key in &keys {
-            self.by_key.insert(key.clone(), self.last);
+            self.by_key.insert(Arc::clone(key), self.last);
         }
         self.commits.push_back((self.last, keys));
         self.prune();
@@ -100,7 +107,7 @@ mod tests {
         names.iter().map(|k| k.as_bytes().to_vec()).collect()
     }
 
-    fn conflict(writes: &Writes, snapshot: u64, names: &[&str]) -> Option<Vec<u8>> {
+    fn conflict(writes: &RecentWrites, snapshot: u64, names: &[&str]) -> Option<Vec<u8>> {
         let keys = keys(names);
         writes
             .conflict(snapshot, keys.iter().map(Vec::as_slice))
@@ -109,7 +116,7 @@ mod tests {
 
     #[test]
     fn a_commit_after_a_snapshot_conflicts_on_its_keys_only() {
-        let mut writes = Writes::default();
+        let mut writes = RecentWrites::default();
         let early = writes.begin();
         writes.record(keys(&["a", "b"]));
         let late = writes.begin();
@@ -121,7 +128,7 @@ mod tests {
 
     #[test]
     fn with_no_transaction_open_nothing_is_kept() {
-        let mut writes = Writes::default();
+        let mut writes = RecentWrites::default();
         for i in 0..100 {
             let snapshot = writes.begin();
             writes.record(keys(&[&format!("k{i}")]));
@@ -132,7 +139,7 @@ mod tests {
 
     #[test]
     fn commits_are_kept_while_a_transaction_that_began_before_them_is_open() {
-        let mut writes = Writes::default();
+        let mut writes = RecentWrites::default();
         let long = writes.begin();
         for i in 0..10 {
             writes.record(keys(&[&format!("k{i}")]));
@@ -146,7 +153,7 @@ mod tests {
 
     #[test]
     fn pruning_keeps_a_key_a_later_commit_wrote_again() {
-        let mut writes = Writes::default();
+        let mut writes = RecentWrites::default();
         let first = writes.begin();
         writes.record(keys(&["k"]));
         let second = writes.begin();
@@ -161,7 +168,7 @@ mod tests {
 
     #[test]
     fn transactions_that_began_together_are_counted_apart() {
-        let mut writes = Writes::default();
+        let mut writes = RecentWrites::default();
         let a = writes.begin();
         let b = writes.begin();
         writes.record(keys(&["k"]));
