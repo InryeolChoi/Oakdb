@@ -67,8 +67,10 @@ ENGINE_BUGS = [
 # Engine bugs of the WAL (#22), each in db.rs or wal.rs.
 WAL_BUGS = [
     ("W1 commit: no sync", WAL, "        self.file.write_all_at(&bytes, self.tail.end)?;\n        self.file.sync_data()?;", "        self.file.write_all_at(&bytes, self.tail.end)?;"),
-    ("W2 open: tail not cut off", WAL, "        self.file.set_len(self.tail.end)?;\n", ""),
-    ("W3 open: no directory sync", DB, "        fs.sync_dir(dir)?;\n        Ok(Db {", "        Ok(Db {"),
+    # Since #59 opening writes a new WAL of the whole commits only and
+    # renames it in; W2 and W3 plant the same bugs there.
+    ("W2 open: tail not cut off", DB, "                (whole, tail, in_wal)", "                (&bytes[..], tail, in_wal)"),
+    ("W3 open: no directory sync", WAL, "    fs.sync_dir(dir)?;\n    Ok(file)", "    Ok(file)"),
     ("W4 replay: pages applied without a commit", WAL, "pending.push((u64_at(PAGE_NO_AT), Box::new(image)));", "done.pages.insert(u64_at(PAGE_NO_AT), Box::new(image));"),
     ("W5 crc not chained", WAL, [("let crc = crc32c::crc32c_append(prev, &out[start..]);", "let crc = crc32c::crc32c_append(START, &out[start..]); let _ = prev;"),
                                  ("crc = crc32c::crc32c_append(crc, body);", "crc = crc32c::crc32c_append(START, body);")]),
