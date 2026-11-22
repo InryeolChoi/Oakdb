@@ -13,7 +13,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use oakdb::fs::sim::{CrashReport, SimFs};
+use oakdb::fs::sim::{CrashReport, SimFs, TornSector};
 use oakdb::Db;
 
 /// Where the database lives on the simulated disk.
@@ -260,7 +260,19 @@ pub struct Run {
 /// Panics if opening or a commit fails before the power is cut: the
 /// verdict only means something for failures the power cut caused.
 pub fn run(workload: &Workload, cut_after: u64, crash_seed: u64) -> Run {
+    run_on(workload, cut_after, crash_seed, TornSector::KeepsOld)
+}
+
+/// [`run`] on a disk whose torn sectors come out as `torn_sector` says
+/// (design 0014).
+pub fn run_on(
+    workload: &Workload,
+    cut_after: u64,
+    crash_seed: u64,
+    torn_sector: TornSector,
+) -> Run {
     let fs = SimFs::new();
+    fs.set_torn_sector(torn_sector);
     fs.fail_after(cut_after);
     let caused_by_the_cut = |what: &str, e: oakdb::Error| {
         assert_eq!(

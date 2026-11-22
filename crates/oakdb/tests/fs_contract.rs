@@ -117,6 +117,23 @@ fn set_len_grows_with_zeros_and_truncates(fs: impl Fs, dir: &Path) {
     assert_eq!(buf[10..], [0; 10]);
 }
 
+fn a_rename_replaces_the_target_and_open_handles_follow(fs: impl Fs, dir: &Path) {
+    let (from, to) = (dir.join("new"), dir.join("data"));
+    fs.open(&to).unwrap().write_all_at(b"old", 0).unwrap();
+    let file = fs.open(&from).unwrap();
+    file.write_all_at(b"new", 0).unwrap();
+
+    fs.rename(&from, &to).unwrap();
+    fs.sync_dir(dir).unwrap();
+
+    let err = fs.rename(&from, &to).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    file.write_all_at(b"!", 3).unwrap();
+    let mut buf = [0u8; 4];
+    fs.open(&to).unwrap().read_exact_at(&mut buf, 0).unwrap();
+    assert_eq!(&buf, b"new!");
+}
+
 /// Runs each check once on the real file system, in a fresh temporary
 /// directory, and once on a fresh simulated one.
 macro_rules! on_both {
@@ -157,4 +174,5 @@ on_both!(
     create_dir_all_fails_when_a_file_is_in_the_way,
     a_locked_file_cannot_be_locked_again_until_it_is_closed,
     set_len_grows_with_zeros_and_truncates,
+    a_rename_replaces_the_target_and_open_handles_follow,
 );

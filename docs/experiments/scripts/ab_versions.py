@@ -6,7 +6,8 @@ Run from the repository root:
     python3 docs/experiments/scripts/ab_versions.py <rev A> <rev B> [rounds] [commits] [modes]
 
 `modes` is a comma-separated list of `commit_time` modes, by default
-`overwrite,grow`; `reopen` times opening after the commits instead.
+`overwrite,grow`; `reopen` and `closed` time opening after the commits
+instead, without and with closing first.
 
 Builds `ab_versions/commit_time.rs` as an example against each revision (in
 a temporary git worktree), then runs the two binaries in ABBA order, each

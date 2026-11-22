@@ -60,6 +60,10 @@ impl Fs for CrashFs {
     fn sync_dir(&self, dir: &Path) -> io::Result<()> {
         StdFs.sync_dir(dir)
     }
+
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        StdFs.rename(from, to)
+    }
 }
 
 impl FsFile for CrashFile {

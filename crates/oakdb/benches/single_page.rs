@@ -47,6 +47,10 @@ impl Fs for NoSyncFs {
     fn sync_dir(&self, _: &Path) -> io::Result<()> {
         Ok(())
     }
+
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        std::fs::rename(from, to)
+    }
 }
 
 impl FsFile for NoSyncFile {

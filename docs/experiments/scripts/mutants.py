@@ -8,6 +8,7 @@ Run from the repository root:
     python3 docs/experiments/scripts/mutants.py wal      # experiment 0009
     python3 docs/experiments/scripts/mutants.py checkpoint  # experiment 0010
     python3 docs/experiments/scripts/mutants.py failure  # experiment 0011
+    python3 docs/experiments/scripts/mutants.py cache    # experiment 0013
 
 A bug is one replacement, or a list of them for a bug that spans places.
 
@@ -66,8 +67,10 @@ ENGINE_BUGS = [
 # Engine bugs of the WAL (#22), each in db.rs or wal.rs.
 WAL_BUGS = [
     ("W1 commit: no sync", WAL, "        self.file.write_all_at(&bytes, self.tail.end)?;\n        self.file.sync_data()?;", "        self.file.write_all_at(&bytes, self.tail.end)?;"),
-    ("W2 open: tail not cut off", WAL, "        self.file.set_len(self.tail.end)?;\n", ""),
-    ("W3 open: no directory sync", DB, "        fs.sync_dir(dir)?;\n        Ok(Db {", "        Ok(Db {"),
+    # Since #59 opening writes a new WAL of the whole commits only and
+    # renames it in; W2 and W3 plant the same bugs there.
+    ("W2 open: tail not cut off", DB, "                (whole, tail, in_wal)", "                (&bytes[..], tail, in_wal)"),
+    ("W3 open: no directory sync", WAL, "    fs.sync_dir(dir)?;\n    Ok(file)", "    Ok(file)"),
     ("W4 replay: pages applied without a commit", WAL, "pending.push((u64_at(PAGE_NO_AT), Box::new(image)));", "done.pages.insert(u64_at(PAGE_NO_AT), Box::new(image));"),
     ("W5 crc not chained", WAL, [("let crc = crc32c::crc32c_append(prev, &out[start..]);", "let crc = crc32c::crc32c_append(START, &out[start..]); let _ = prev;"),
                                  ("crc = crc32c::crc32c_append(crc, body);", "crc = crc32c::crc32c_append(START, body);")]),
@@ -82,14 +85,14 @@ WAL_TESTS = ["--lib", "--test", "wal", "--test", "crash", "--test", "sim_fs"]
 
 # Engine bugs of checkpoints and the two meta slots (#23).
 CHECKPOINT_BUGS = [
-    ("C1 checkpoint: no sync before the meta slot", CKPT, "    file.sync_data()?;\n    let slot = Slot {", "    let slot = Slot {"),
-    ("C2 checkpoint: no sync after the meta slot", CKPT, "    file.sync_data()?;\n    wal.start(next)", "    wal.start(next)"),
+    ("C1 checkpoint: no sync before the meta slot", CKPT, "    file.sync_data()?;\n    write_slot(", "    write_slot("),
+    ("C2 checkpoint: no sync after the meta slot", CKPT, "    file.sync_data()?;\n    Ok(())\n}", "    Ok(())\n}"),
     # C3 is expected to survive since PR #58: on a disk that journals the
     # emptying before the growth, losing this sync loses nothing (design
     # 0013, section 9). The sync stays as a cheap defence.
     ("C3 WAL start: no sync between emptying and the header (expected to survive)", WAL, "            self.file.set_len(0)?;\n            self.file.sync_data()?;", "            self.file.set_len(0)?;"),
     ("C4 first checkpoint: one slot only", CKPT, "0..2\n", "0..1\n"),
-    ("C5 checkpoint: writes over the newest slot", CKPT, "next % 2..next % 2 + 1", "(next + 1) % 2..(next + 1) % 2 + 1"),
+    ("C5 checkpoint: writes over the newest slot", CKPT, "slot.checkpoint % 2..slot.checkpoint % 2 + 1", "(slot.checkpoint + 1) % 2..(slot.checkpoint + 1) % 2 + 1"),
     ("C6 open: always slot A", DB, "(Ok(a), Ok(b)) if b.checkpoint > a.checkpoint => Ok(b),", "(Ok(a), Ok(b)) if false && b.checkpoint > a.checkpoint => Ok(b),"),
     ("C7 open: a WAL of an older checkpoint replayed", DB, "if after == slot.checkpoint => {", "if after <= slot.checkpoint => {"),
     ("C8 open: a WAL newer than every slot not refused", DB, "if after > slot.checkpoint => {", "if false && after > slot.checkpoint => {"),
@@ -123,12 +126,12 @@ FAILURE_BUGS = [
     ("F10 scan: the stop not checked", DB, "        if let Err(e) = self.db.check_running() {\n            return Scan::stopped(tree, e);\n        }\n", ""),
     ("F11 checkpoint: the stop not checked", DB, "        self.check_running()?;\n        checkpoint::run", "        checkpoint::run"),
     ("F12 stop: the cause is not kept", DB, "Some(cause) => Err(Error::Stopped(Arc::clone(cause))),", "Some(_) => Err(Error::Stopped(Arc::new(Error::AlreadyOpen))),"),
-    ("S1 SimFs: a failure never ends", SIM, "            self.fail_once_left = None;\n            return Err(disk_failed());", "            self.fail_once_left = Some(0);\n            return Err(disk_failed());"),
+    ("S1 SimFs: a failure never ends", SIM, "            self.fail_once_left = None;\n            return Err(Fault::DiskFailed);", "            self.fail_once_left = Some(0);\n            return Err(Fault::DiskFailed);"),
     ("S2 SimFs: the countdown never moves", SIM, "&mut self.fail_once_left {\n            *left -= 1;", "&mut self.fail_once_left {\n            let _ = left;"),
     ("S3 SimFs: the failure comes before a power cut due at the same call", SIM,
-     "        if self.ops_left == Some(0) {\n            self.down = true;\n            return Err(power_cut());\n        }\n        if self.fail_once_left == Some(0) {\n            self.fail_once_left = None;\n            return Err(disk_failed());\n        }\n",
-     "        if self.fail_once_left == Some(0) {\n            self.fail_once_left = None;\n            return Err(disk_failed());\n        }\n        if self.ops_left == Some(0) {\n            self.down = true;\n            return Err(power_cut());\n        }\n"),
-    ("S4 SimFs: the failed call is counted", SIM, "            self.fail_once_left = None;\n            return Err(disk_failed());", "            self.fail_once_left = None;\n            self.ops += 1;\n            return Err(disk_failed());"),
+     "        if self.ops_left == Some(0) {\n            self.down = true;\n            return Err(Fault::PowerCut);\n        }\n        if self.fail_once_left == Some(0) {\n            self.fail_once_left = None;\n            return Err(Fault::DiskFailed);\n        }\n",
+     "        if self.fail_once_left == Some(0) {\n            self.fail_once_left = None;\n            return Err(Fault::DiskFailed);\n        }\n        if self.ops_left == Some(0) {\n            self.down = true;\n            return Err(Fault::PowerCut);\n        }\n"),
+    ("S4 SimFs: the failed call is counted", SIM, "            self.fail_once_left = None;\n            return Err(Fault::DiskFailed);", "            self.fail_once_left = None;\n            self.ops += 1;\n            return Err(Fault::DiskFailed);"),
     # After the review of PR #57.
     ("S5 SimFs: a failure the power cut got ahead of carries over to the next boot (P4)", SIM, "        disk.fail_once_left = None;\n", ""),
     ("S6 SimFs: a failure gives no OS error code", SIM, "io::Error::from_raw_os_error(libc::EIO)", "io::Error::other(\"the disk failed\")"),
@@ -136,11 +139,47 @@ FAILURE_BUGS = [
 ]
 FAILURE_TESTS = CHECKPOINT_TESTS
 
+# Engine bugs of trusting the page cache when opening (#59), and SimFs
+# bugs of a failed sync that forgets, a torn sector that is garbled, and
+# renames (design 0014).
+SLOT_AGAIN = "            if wal_checkpoint.is_some_and(|after| after < slot.checkpoint) {\n                checkpoint::write_slot(&file, slot)?;\n            }\n"
+CACHE_BUGS = [
+    ("K1 open: the meta slot never written again", DB, SLOT_AGAIN, ""),
+    ("K2 open: the meta slot written again even when the WAL follows it", DB, "wal_checkpoint.is_some_and(|after| after < slot.checkpoint)", "wal_checkpoint.is_some_and(|after| after <= slot.checkpoint)"),
+    ("K3 open: the WAL written again over itself, not to a new file", WAL, [
+        ("    let file = fs.open(&new)?;", "    let file = fs.open(&dir.join(WAL_FILE))?;"),
+        ("    fs.rename(&new, &dir.join(WAL_FILE))?;\n", ""),
+    ]),
+    ("K4 open: the new WAL not synced before the rename", WAL, "    file.sync_data()?;\n    fs.rename(", "    fs.rename("),
+    ("K5 open: the directory not synced after the rename", WAL, "    fs.sync_dir(dir)?;\n    Ok(file)", "    Ok(file)"),
+    ("K6 open: the meta slot written again after the new WAL", DB, [
+        ("        if let Some(slot) = base {\n" + SLOT_AGAIN + "        }\n", ""),
+        ("        let mut wal = Wal::new(wal_file, tail, checkpoint, in_wal);\n", "        if let Some(slot) = base {\n" + SLOT_AGAIN + "        }\n        let mut wal = Wal::new(wal_file, tail, checkpoint, in_wal);\n"),
+    ]),
+    ("K7 open: a new WAL file left longer than what was written", WAL, "    file.set_len(len)?;\n", ""),
+    ("K8 SimFs: a sync saves what reads see", SIM, [
+        ("            for change in std::mem::take(&mut file.waiting) {", "            file.synced.clone_from(&file.now);\n            for change in std::mem::take(&mut file.waiting).into_iter().take(0) {"),
+    ]),
+    ("K9 SimFs: a failed sync never forgets", SIM, "                file.waiting.clear();", "                let _ = file;"),
+    ("K10 SimFs: a failed write forgets too", SIM, "            if access == Access::Sync {\n                disk.after_failed_sync", "            if access != Access::Read {\n                disk.after_failed_sync"),
+    ("K11 SimFs: a crash resets forgetting", SIM, "        disk.fail_once_left = None;\n", "        disk.fail_once_left = None;\n        disk.failed_sync = FailedSync::KeepsWaiting;\n"),
+    ("G1 SimFs: a disk that garbles keeps the old bytes", SIM, "                            garble(data, start..stop);", "                            let _ = (start, stop);"),
+    ("G2 SimFs: garbling covers the whole sector, not just the bytes written", SIM, "                            garble(data, start..stop);", "                            garble(data, start / SECTOR * SECTOR..(start / SECTOR + 1) * SECTOR);"),
+    ("G3 SimFs: garbling also hits sectors that landed", SIM, "                        if landed {\n                            let piece", "                        if landed && torn_sector == TornSector::KeepsOld {\n                            let piece"),
+    ("R1 SimFs: the newest renames land, not the oldest", SIM, "            landed: i < landed,", "            landed: i >= renames.len() - landed,"),
+    ("R2 SimFs: a directory sync leaves renames unsynced", SIM, "            disk.renames.drain(..=last);", "            let _ = last;"),
+    ("R3 SimFs: a rename that does not land loses the file it replaced", SIM, "        if let Some(replaced) = rename.replaced {\n            disk.files.insert(rename.to, replaced);\n        }\n", ""),
+    ("R4 SimFs: no rename ever lands before a sync", SIM, "    let landed = rng.below(renames.len() + 1);", "    let landed = rng.below(1);"),
+    ("R5 SimFs: a failed rename still renames", SIM, "        disk.change()?;\n        if from == to {", "        let _ = disk.change();\n        if from == to {"),
+]
+CACHE_TESTS = CHECKPOINT_TESTS + ["--test", "fs_contract", "--test", "single_page"]
+
 REAL_DISK = [a for t in ["single_page", "delete_and_overwrite", "split", "multi_level", "scan", "overflow", "checksum"] for a in ("--test", t)]
 
 
 def run(args):
-    r = subprocess.run(["cargo", "test", "-q"] + args, capture_output=True, text=True)
+    # Every test binary runs, so the list names every test that caught it.
+    r = subprocess.run(["cargo", "test", "-q", "--no-fail-fast"] + args, capture_output=True, text=True)
     out = r.stdout + r.stderr
     failed = sorted({l.strip() for l in out.splitlines() if l.startswith("    ") and re.fullmatch(r"[a-z_:]+", l.strip())})
     return ("caught" if r.returncode else "missed") + (f" {failed}" if failed else "")
@@ -171,6 +210,8 @@ def main():
         return engine(WAL_BUGS, WAL_TESTS, "WAL, crash and sim tests")
     if which == "checkpoint":
         return engine(CHECKPOINT_BUGS, CHECKPOINT_TESTS, "checkpoint, WAL, crash and sim tests")
+    if which == "cache":
+        return engine(CACHE_BUGS, CACHE_TESTS, "disk failure, checkpoint, WAL, crash and sim tests")
     if which == "failure":
         return engine(FAILURE_BUGS, FAILURE_TESTS, "disk failure, checkpoint, WAL, crash and sim tests")
     path, bugs = (SIM, SIM_BUGS) if which == "sim" else (DB, ENGINE_BUGS)
