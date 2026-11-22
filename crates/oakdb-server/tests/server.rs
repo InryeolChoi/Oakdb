@@ -138,7 +138,10 @@ fn a_failed_statement_returns_its_kind_and_the_connection_goes_on() {
         .unwrap();
     client.query("INSERT INTO t VALUES (1, 'a')").unwrap();
 
-    assert_eq!(server_error(client.query("SELEC 1")), code::SYNTAX);
+    assert_eq!(
+        server_error(client.query("INSERT INTO t VALUES (3, 'c'")),
+        code::SYNTAX
+    );
     assert_eq!(
         server_error(client.query("UPDATE t SET v = 'b'")),
         code::UNSUPPORTED
@@ -335,22 +338,19 @@ fn several_clients_write_at_the_same_time() {
         .map(|c| {
             thread::spawn(move || {
                 let mut client = connect(addr);
-                client
-                    .query(&format!(
-                        "CREATE TABLE t{c} (id INTEGER PRIMARY KEY, v INTEGER)"
-                    ))
-                    .or_else(|e| match e {
-                        // Two CREATE TABLEs write the table counter, so the
-                        // later one can lose (design 0017, section 6).
-                        ClientError::Server {
+                // Every CREATE TABLE writes the table counter, so of two at
+                // once the later loses (design 0017, section 6): retry.
+                let create = format!("CREATE TABLE t{c} (id INTEGER PRIMARY KEY, v INTEGER)");
+                loop {
+                    match client.query(&create) {
+                        Ok(_) => break,
+                        Err(ClientError::Server {
                             code: code::CONFLICT,
                             ..
-                        } => client.query(&format!(
-                            "CREATE TABLE t{c} (id INTEGER PRIMARY KEY, v INTEGER)"
-                        )),
-                        e => Err(e),
-                    })
-                    .unwrap();
+                        }) => continue,
+                        Err(e) => panic!("{e:?}"),
+                    }
+                }
                 for i in 0..20 {
                     client
                         .query(&format!("INSERT INTO t{c} VALUES ({i}, {})", i * c))
