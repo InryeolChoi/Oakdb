@@ -356,7 +356,11 @@ dependencies = [
 name = "oakdb-server"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "oakdb",
+ "oakdb-sql",
+ "proptest",
+ "tempfile",
 ]
 
 [[package]]
