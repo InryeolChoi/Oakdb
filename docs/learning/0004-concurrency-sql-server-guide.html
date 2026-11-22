@@ -832,6 +832,19 @@ input[type=range]{accent-color:var(--oak)}
     <tr><td>Java로 치면</td><td>전통적인 Tomcat (요청마다 스레드)</td><td>Netty, Spring WebFlux</td></tr>
   </table></div>
   <div class="term">이슈 #1 지도에도 "서버가 여러 접속을 처리하는 방식 (스레드 vs 비동기)"이 <b>아직 안 정한 것</b>으로 남아 있어요. 24·25번 설계 때 고르고 ADR로 남겨요. <span class="decide">설계 때 정할 것</span></div>
+  <div class="qa">
+    <div class="qh">❓ 내가 물어본 것 · 2026-11-22</div>
+    <div class="qq">손님 수백 명은 async나 멀티스레딩으로 하면 되지 않나?</div>
+    <p><b>맞아요. 그리고 ①번 "접속마다 스레드"가 바로 멀티스레딩이에요.</b> 손님 300명이면 스레드 300개가 동시에 돌아요. 진짜 갈림길은 "멀티스레딩이냐 아니냐"가 아니라 <b>스레드를 손님 수만큼 둘지, 몇 개만 두고 돌려 쓸지</b>예요.</p>
+    <div class="tablewrap"><table class="books">
+      <tr><th></th><th>① 접속마다 스레드</th><th>② 스레드 풀 (예: 16개)</th><th>③ async (tokio)</th></tr>
+      <tr><td>스레드 수</td><td>손님 수만큼 (300)</td><td>고정 16</td><td>CPU 코어 수 정도</td></tr>
+      <tr><td>300명이 각자 BEGIN 후 생각 중이면</td><td>✅ 300명 모두 자기 스레드에서 기다림</td><td>❌ 16명이 스레드를 붙잡고 나머지 284명은 줄 섬</td><td>✅ 기다리는 손님은 스레드를 안 붙잡음</td></tr>
+      <tr><td>잘 맞는 규모</td><td>수백~수천</td><td>짧은 요청만 오는 웹 서버</td><td>수만 이상</td></tr>
+      <tr><td>Oakdb에 드는 비용</td><td>거의 없음</td><td>접속별 트랜잭션(25번)과 안 맞음</td><td>sync를 따로 빼야 하고, <code>Txn&lt;'db&gt;</code> 때문에 엔진 API가 바뀔 수 있음</td></tr>
+    </table></div>
+    <p class="small">수백 명이 왜 ①로 충분할까요? 스레드 하나가 예약하는 2MB 스택은 <b>주소만 잡아 둔 것</b>이라, 실제 메모리는 쓰는 만큼(대개 수십 KB)만 들어요. 네트워크를 기다리는 스레드는 CPU도 거의 안 써요. 그래서 300개면 실제 메모리는 대략 수십 MB 정도예요. async가 꼭 필요해지는 건 "C10k 문제", 즉 손님이 <b>만 명</b> 단위가 될 때예요. 그리고 수백 명일 때 진짜 병목은 접속 처리가 아니라 <b>커밋 창구의 sync</b>예요(3-6). 그건 16번 그룹 커밋이 풀어요. 그래서 24번은 ①을 고르고, 300개 동시 접속 테스트로 "수백 명 감당"을 직접 증명해요. ADR 0010에는 "벤치마크(27번)에서 스레드 수가 병목으로 보이면 ③을 다시 본다"는 조건을 적어 둬요.</p>
+  </div>
 </section>
 
 <section class="ch reveal" id="c34">
