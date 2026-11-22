@@ -12,6 +12,10 @@
 //! Every page goes to the file with its checksum filled in, and every page
 //! read back is checked against it (`checksum.rs`).
 //!
+//! A transaction reads the tree committed when it began (its snapshot,
+//! issue #25), with its own writes on top, and commits its writes to the
+//! latest tree.
+//!
 //! A commit appends an image of every page it changed and a commit record
 //! with the new meta fields to the WAL (`wal.rs`, ADR 0007) and syncs it
 //! once before it answers. Creating a database is its first commit. Only
