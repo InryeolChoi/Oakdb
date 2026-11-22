@@ -7,7 +7,9 @@ Run from the repository root:
 
 `modes` is a comma-separated list of `commit_time` modes, by default
 `overwrite,grow`; `reopen` and `closed` time opening after the commits
-instead, without and with closing first.
+instead, without and with closing first; `begin_busy` times read-only
+transactions while another thread commits, and `threads` commits from 4
+threads at once (issue #27).
 
 Builds `ab_versions/commit_time.rs` as an example against each revision (in
 a temporary git worktree), then runs the two binaries in ABBA order, each
