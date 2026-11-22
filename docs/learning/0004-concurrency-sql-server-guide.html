@@ -845,6 +845,18 @@ input[type=range]{accent-color:var(--oak)}
     </table></div>
     <p class="small">수백 명이 왜 ①로 충분할까요? 스레드 하나가 예약하는 2MB 스택은 <b>주소만 잡아 둔 것</b>이라, 실제 메모리는 쓰는 만큼(대개 수십 KB)만 들어요. 네트워크를 기다리는 스레드는 CPU도 거의 안 써요. 그래서 300개면 실제 메모리는 대략 수십 MB 정도예요. async가 꼭 필요해지는 건 "C10k 문제", 즉 손님이 <b>만 명</b> 단위가 될 때예요. 그리고 수백 명일 때 진짜 병목은 접속 처리가 아니라 <b>커밋 창구의 sync</b>예요(3-6). 그건 16번 그룹 커밋이 풀어요. 그래서 24번은 ①을 고르고, 300개 동시 접속 테스트로 "수백 명 감당"을 직접 증명해요. ADR 0010에는 "벤치마크(27번)에서 스레드 수가 병목으로 보이면 ③을 다시 본다"는 조건을 적어 둬요.</p>
   </div>
+  <div class="qa">
+    <div class="qh">❓ 내가 물어본 것 · 2026-11-22</div>
+    <div class="qq">스레드 풀과 async를 섞을 수는 없나?</div>
+    <p><b>섞을 수 있어요. 사실 tokio가 바로 그 모양이에요.</b> tokio의 기본 런타임은 ⓐ <b>일꾼 스레드 풀</b>(CPU 코어 수만큼)이 수많은 async 작업을 번갈아 돌리고, 일이 몰린 일꾼의 작업을 한가한 일꾼이 가져가요(work stealing). 여기에 ⓑ <b>기다리는 일 전용 풀</b>(<code>spawn_blocking</code>)이 따로 있어서 디스크 sync 같은 오래 막히는 일은 그쪽으로 보내요. Java로 치면 Netty의 EventLoopGroup(스레드 몇 개)에 DB 호출용 Executor를 따로 붙이는 것, Spring WebFlux의 <code>boundedElastic</code> 스케줄러와 같아요.</p>
+    <div class="tablewrap"><table class="books">
+      <tr><th>Oakdb에 섞는다면</th><th>누가 맡나</th></tr>
+      <tr><td>접속 수천 개의 읽기·쓰기</td><td>async 작업 (일꾼 풀)</td></tr>
+      <tr><td>커밋</td><td>15번의 커밋 창구 스레드에 채널로 보내고 답장을 <code>await</code></td></tr>
+      <tr><td>BEGIN 뒤의 열린 트랜잭션</td><td>⚠️ 어려운 곳. <code>Txn&lt;'db&gt;</code>가 <code>Db</code>를 빌리고 있어서 <code>await</code> 너머로 들고 다닐 수 없어요. 엔진에 "소유하는 트랜잭션"을 새로 만들거나, 트랜잭션 중인 접속에만 스레드를 하나씩 붙여야 해요</td></tr>
+    </table></div>
+    <p class="small">그래서 섞는 건 가능하지만 비용이 있어요. tokio 의존성, 엔진 API 변경, 배울 것이 늘어나요. 얻는 것은 "손님 만 명"이고, v1의 목표는 수백 명이에요. 그래서 24번은 ①로 가고, 이 섞은 모양을 ADR 0010에 "다음에 갈 길"로 적어 둬요.</p>
+  </div>
 </section>
 
 <section class="ch reveal" id="c34">
