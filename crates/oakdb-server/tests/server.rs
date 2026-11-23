@@ -657,3 +657,30 @@ fn a_panic_on_a_connection_sends_0x7f_and_closes_it_and_the_server_goes_on() {
     // Other clients still get in.
     raw(addr);
 }
+
+#[test]
+fn a_statement_cut_off_by_ctrl_d_runs_from_a_script_but_not_from_a_person() {
+    let dir = tempfile::tempdir().unwrap();
+    let addr = start_on(dir.path());
+    let run = |input: &str, interactive: bool| {
+        let mut client = connect(addr);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = oakdb_server::cli::run(
+            &mut client,
+            input.as_bytes(),
+            &mut out,
+            &mut err,
+            interactive,
+        )
+        .unwrap();
+        (code, String::from_utf8(out).unwrap())
+    };
+
+    let (code, _) = run("CREATE TABLE typed (id INTEGER PRIMARY KEY)", true);
+    assert_eq!(code, 0);
+    let (code, _) = run("SELECT id FROM typed WHERE id = 1;", false);
+    assert_eq!(code, 1, "the half-typed CREATE ran");
+
+    let (code, out) = run("CREATE TABLE piped (id INTEGER PRIMARY KEY)", false);
+    assert_eq!((code, out.as_str()), (0, "OK\n"));
+}

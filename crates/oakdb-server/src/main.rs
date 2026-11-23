@@ -181,7 +181,7 @@ fn cli(args: &[String]) -> Result<ExitCode, Usage> {
         interactive,
     );
     match code {
-        Ok(code) => Ok(ExitCode::from(code as u8)),
+        Ok(code) => Ok(ExitCode::from(code)),
         Err(e) => fail(e),
     }
 }

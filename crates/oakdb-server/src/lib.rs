@@ -5,5 +5,6 @@ pub mod allow;
 pub mod cli;
 pub mod client;
 pub mod protocol;
+#[doc(hidden)]
 pub mod rlimit;
 pub mod server;
