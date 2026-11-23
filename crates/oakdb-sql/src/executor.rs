@@ -5,8 +5,10 @@ use oakdb::fs::Fs;
 use oakdb::{Db, Txn};
 
 use crate::catalog::{self, Column, Table};
-use crate::encoding::{decode_row, encode_row, row_key};
+use crate::encoding::{decode_row, encode_row, row_key, row_range};
+use crate::expr::{Expr, Truth};
 use crate::parser::{ColumnDef, Statement};
+use crate::planner;
 use crate::{Output, SqlError, Value};
 
 /// Runs `statement` in a transaction of its own, committing it if the
@@ -163,11 +165,14 @@ fn check_row(table: &Table, row: &[Value]) -> Result<(), SqlError> {
     Ok(())
 }
 
+/// Scans the primary keys the plan's range holds (design 0019) and keeps
+/// the rows its filter makes true. `WHERE pk = v` is a range of one key,
+/// so it runs the same way.
 fn select<F: Fs>(
     txn: &Txn<'_, F>,
     table: &str,
     columns: Option<Vec<String>>,
-    (filter_column, filter_value): (String, Value),
+    filter: Option<Expr>,
 ) -> Result<Output, SqlError> {
     let table = catalog::get(txn, table)?;
     let selected: Vec<usize> = match &columns {
@@ -177,42 +182,29 @@ fn select<F: Fs>(
             .map(|name| table.column(name).ok_or_else(|| table.no_such_column(name)))
             .collect::<Result<_, _>>()?,
     };
-    let filter = table
-        .column(&filter_column)
-        .ok_or_else(|| table.no_such_column(&filter_column))?;
-    if filter != table.primary_key {
-        return Err(SqlError::Unsupported(format!(
-            "WHERE on `{filter_column}`, which is not the primary key; \
-             only `<primary key> = <value>` is supported"
-        )));
-    }
-    let key_column = &table.columns[table.primary_key];
-    let rows = match filter_value.column_type() {
-        // `= NULL` is never true in SQL, so nothing matches.
-        None => Vec::new(),
-        Some(found) if found != key_column.column_type => {
-            return Err(SqlError::TypeMismatch {
-                column: key_column.name.clone(),
-                expected: key_column.column_type,
-                found: Some(found),
-            })
+    // Unknown columns and type errors fail here, before any row is read.
+    let plan = planner::plan(&table, filter)?;
+    let mut rows = Vec::new();
+    for entry in txn.scan(row_range(table.id, plan.range)) {
+        let (_, bytes) = entry?;
+        let row = decode_row(&bytes)?;
+        // The filter reads columns by position, so a short row would be
+        // read out of bounds.
+        if row.len() != table.columns.len() {
+            return Err(SqlError::Corrupt(format!(
+                "a row of {} holds {} values for {} columns",
+                table.name,
+                row.len(),
+                table.columns.len()
+            )));
         }
-        Some(_) => match txn.get(&row_key(table.id, &filter_value))? {
-            None => Vec::new(),
-            Some(bytes) => {
-                let row = decode_row(&bytes)?;
-                if row.len() != table.columns.len() {
-                    return Err(SqlError::Corrupt(format!(
-                        "a row of {} holds {} values for {} columns",
-                        table.name,
-                        row.len(),
-                        table.columns.len()
-                    )));
-                }
-                vec![selected.iter().map(|&i| row[i].clone()).collect()]
+        if let Some(filter) = &plan.filter {
+            if filter.eval(&row)? != Truth::True {
+                continue;
             }
-        },
-    };
+        }
+        rows.push(selected.iter().map(|&i| row[i].clone()).collect());
+    }
     Ok(Output::Rows {
         columns: selected
             .iter()

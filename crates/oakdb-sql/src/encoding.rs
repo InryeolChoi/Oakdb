@@ -6,6 +6,8 @@
 //! Row values never get compared, so they are encoded only to be read
 //! back (C6).
 
+use std::ops::Bound;
+
 use crate::{ColumnType, SqlError, Value};
 
 /// First byte of every catalog key: `[0x00]` alone holds the next table
@@ -36,7 +38,8 @@ pub(crate) fn encode_key(value: &Value, out: &mut Vec<u8>) {
         Value::Text(text) => escape(text.as_bytes(), out),
         Value::Blob(bytes) => escape(bytes, out),
         // The executor rejects a NULL primary key before it makes a key,
-        // and `WHERE pk = NULL` finds nothing without looking.
+        // and the planner never puts NULL in a range (design 0019,
+        // section 4).
         Value::Null => unreachable!("NULL is never a primary key"),
     }
 }
@@ -60,6 +63,38 @@ pub(crate) fn row_key(table_id: u32, key: &Value) -> Vec<u8> {
     let mut out = vec![ROW_PREFIX];
     out.extend_from_slice(&table_id.to_be_bytes());
     encode_key(key, &mut out);
+    out
+}
+
+/// The engine keys that hold the rows of table `table_id` whose primary
+/// keys lie in `range` (design 0019, section 5). An open end is the
+/// table's own end: from `[01][table id]`, which sorts before every row
+/// key of the table, up to but not including `[01][table id + 1]`, which
+/// sorts after all of them.
+pub(crate) fn row_range(
+    table_id: u32,
+    (start, end): (Bound<Value>, Bound<Value>),
+) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
+    let start = match start {
+        Bound::Unbounded => Bound::Included(table_prefix(table_id)),
+        bound => bound.map(|v| row_key(table_id, &v)),
+    };
+    let end = match end {
+        Bound::Unbounded => Bound::Excluded(match table_id.checked_add(1) {
+            Some(next) => table_prefix(next),
+            // The catalog never hands out the last id, but past it the
+            // row keys end anyway.
+            None => vec![ROW_PREFIX + 1],
+        }),
+        bound => bound.map(|v| row_key(table_id, &v)),
+    };
+    (start, end)
+}
+
+/// `[01][table id]`: what every row key of the table starts with.
+fn table_prefix(table_id: u32) -> Vec<u8> {
+    let mut out = vec![ROW_PREFIX];
+    out.extend_from_slice(&table_id.to_be_bytes());
     out
 }
 

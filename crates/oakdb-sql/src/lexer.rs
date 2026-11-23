@@ -20,9 +20,9 @@ pub(crate) enum Token {
     Text(String),
     /// A blob literal, `X'ab01'`, as its bytes.
     Blob(Vec<u8>),
-    /// Punctuation or an operator: `(`, `)`, `,`, `;`, `*`, `=`, `-`, and
-    /// the ones Oakdb does not support yet (`<`, `>=`, `.`, ...), so the
-    /// parser can name them in its error.
+    /// Punctuation or an operator: `(`, `)`, `,`, `;`, comparisons,
+    /// arithmetic, and `.`, which Oakdb does not support yet, so the
+    /// parser can name it in its error.
     Symbol(&'static str),
     /// The end of the statement.
     End,
@@ -146,8 +146,8 @@ fn hex(digits: &str, start: usize) -> Result<Vec<u8>, SqlError> {
 /// The symbol `rest` starts with, longest first, so `<=` is not read as
 /// `<` and `=`.
 fn symbol(rest: &[u8]) -> Option<&'static str> {
-    const SYMBOLS: [&str; 16] = [
-        "<=", ">=", "<>", "!=", "(", ")", ",", ";", "*", "=", "-", "<", ">", ".", "+", "/",
+    const SYMBOLS: [&str; 17] = [
+        "<=", ">=", "<>", "!=", "(", ")", ",", ";", "*", "=", "-", "<", ">", ".", "+", "/", "%",
     ];
     SYMBOLS
         .into_iter()
@@ -264,9 +264,9 @@ mod tests {
     }
 
     #[test]
-    fn operators_oakdb_does_not_support_still_come_out_as_symbols() {
+    fn operators_come_out_as_symbols() {
         assert_eq!(
-            tokens("< <= > >= <> != . +"),
+            tokens("< <= > >= <> != . + %"),
             vec![
                 Token::Symbol("<"),
                 Token::Symbol("<="),
@@ -276,6 +276,7 @@ mod tests {
                 Token::Symbol("!="),
                 Token::Symbol("."),
                 Token::Symbol("+"),
+                Token::Symbol("%"),
                 Token::End
             ]
         );
