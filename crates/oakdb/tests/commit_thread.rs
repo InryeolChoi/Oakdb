@@ -14,8 +14,8 @@ use std::thread;
 use std::time::Duration;
 
 use oakdb::fs::sim::{HeldSyncs, SimFs};
-use oakdb::fs::{Fs, StdFs};
-use oakdb::{Db, Error, Txn};
+use oakdb::fs::{Fs, FsFile, StdFs};
+use oakdb::{Db, Error, Txn, WAL_FILE};
 use proptest::prelude::*;
 
 /// How long work that must not wait for a held sync may take.
@@ -37,6 +37,22 @@ fn get<F: Fs>(db: &Db<F>, key: &[u8]) -> Option<Vec<u8>> {
 
 fn all<F: Fs>(db: &Db<F>) -> Vec<(Vec<u8>, Vec<u8>)> {
     db.begin().scan::<&[u8]>(..).map(Result::unwrap).collect()
+}
+
+/// What the WAL holds now, synced or not. Opening the file counts as one
+/// operation that changes the disk, as `SimFs::fail_after` counts them.
+fn wal_bytes(fs: &SimFs) -> Vec<u8> {
+    let file = fs
+        .open(&std::path::Path::new("/oak").join(WAL_FILE))
+        .unwrap();
+    let mut bytes = vec![0; usize::try_from(file.size().unwrap()).unwrap()];
+    file.read_exact_at(&mut bytes, 0).unwrap();
+    bytes
+}
+
+/// Where `needle` first shows in `haystack`.
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 /// Runs `work` on another thread and returns what it returns. Fails if it
@@ -263,6 +279,10 @@ fn a_checkpoint_runs_on_the_commit_thread() {
     assert_eq!(syncing.as_deref(), Some("oakdb-commit"));
 }
 
+/// Values that show where each commit is in the WAL.
+const FIRST: &[u8] = b"first-commit-value";
+const SECOND: &[u8] = b"second-commit-value";
+
 #[test]
 fn a_commit_waits_for_the_one_ahead_of_it() {
     let fs = SimFs::new();
@@ -270,10 +290,10 @@ fn a_commit_waits_for_the_one_ahead_of_it() {
     let held = fs.hold_syncs();
     thread::scope(|s| {
         let db = &db;
-        let first = commit_held(s, db, &held, b"a", b"1");
+        let first = commit_held(s, db, &held, b"a", FIRST);
         let (done, finished) = mpsc::channel();
         let second = s.spawn(move || {
-            put(db, b"b", b"2");
+            put(db, b"b", SECOND);
             let _ = done.send(());
         });
         // The second cannot finish while the first is held in its sync:
@@ -288,10 +308,65 @@ fn a_commit_waits_for_the_one_ahead_of_it() {
     assert_eq!(
         all(&db),
         vec![
-            (b"a".to_vec(), b"1".to_vec()),
-            (b"b".to_vec(), b"2".to_vec())
+            (b"a".to_vec(), FIRST.to_vec()),
+            (b"b".to_vec(), SECOND.to_vec())
         ]
     );
+    // And the WAL holds them in that order: the first commit's page image
+    // holds only its own value, the second's comes after it.
+    let wal = wal_bytes(&fs);
+    let first_at = find(&wal, FIRST).expect("the first commit is in the WAL");
+    let second_at = find(&wal, SECOND).expect("the second commit is in the WAL");
+    assert!(
+        first_at < second_at,
+        "the WAL holds the second commit first"
+    );
+}
+
+#[test]
+fn commits_waiting_behind_a_failed_commit_write_nothing() {
+    // The commit thread checks for a stop when it takes each request, not
+    // only the caller before sending it: a commit already waiting when the
+    // one ahead fails must not reach the WAL (design 0012).
+    let fs = SimFs::new();
+    let db = open(&fs);
+    let (failed, waiting, wal_before) = thread::scope(|s| {
+        let held = fs.hold_syncs();
+        let db = &db;
+        let first = commit_held(s, db, &held, b"a", b"1");
+        // The first commit's pages are written; it waits to sync.
+        let wal_before = wal_bytes(&fs).len();
+        let waiting: Vec<_> = [b"b", b"c"]
+            .into_iter()
+            .map(|key| {
+                s.spawn(move || {
+                    let mut txn = db.begin();
+                    txn.put(key, b"2").unwrap();
+                    txn.commit()
+                })
+            })
+            .collect();
+        // Long enough for both to be waiting behind the first; a correct
+        // engine passes however long it is.
+        thread::sleep(Duration::from_millis(100));
+        fs.fail_once_after(0);
+        held.release();
+        let failed = first.join().unwrap();
+        let waiting: Vec<_> = waiting.into_iter().map(|t| t.join().unwrap()).collect();
+        (failed, waiting, wal_before)
+    });
+    assert!(
+        matches!(failed, Err(Error::OutcomeUnknown(_))),
+        "{failed:?}"
+    );
+    for result in &waiting {
+        assert!(matches!(result, Err(Error::Stopped(_))), "{result:?}");
+    }
+    assert_eq!(wal_bytes(&fs).len(), wal_before, "a waiting commit wrote");
+    drop(db);
+    let db = open(&fs);
+    assert_eq!(get(&db, b"b"), None);
+    assert_eq!(get(&db, b"c"), None);
 }
 
 /// A key a thread tried to commit, and how it went.
