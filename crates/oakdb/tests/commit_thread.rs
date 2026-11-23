@@ -113,8 +113,11 @@ fn a_transaction_begins_reads_and_writes_while_another_commit_syncs() {
     let fs = SimFs::new();
     let db = open(&fs);
     put(&db, b"old", b"1");
-    let mut held = Some(fs.hold_syncs());
     thread::scope(|s| {
+        // Held inside the scope: if an assertion fails, unwinding drops it,
+        // letting the held commit go, before the scope waits for that
+        // commit's thread. The test fails instead of hanging.
+        let mut held = Some(fs.hold_syncs());
         let committer = commit_held(s, &db, held.as_ref().unwrap(), b"new", b"2");
         without_waiting(&mut held, || {
             let mut txn = db.begin();
@@ -145,8 +148,11 @@ fn a_transaction_ends_while_another_commit_syncs() {
         txn.put(b"other", b"x").unwrap();
         txn
     };
-    let mut held = Some(fs.hold_syncs());
     thread::scope(|s| {
+        // Held inside the scope: if an assertion fails, unwinding drops it,
+        // letting the held commit go, before the scope waits for that
+        // commit's thread. The test fails instead of hanging.
+        let mut held = Some(fs.hold_syncs());
         let db = &db;
         let committer = commit_held(s, db, held.as_ref().unwrap(), b"new", b"2");
         without_waiting(&mut held, move || {
@@ -166,8 +172,11 @@ fn the_page_count_is_read_while_another_commit_syncs() {
     let fs = SimFs::new();
     let db = open(&fs);
     let before = db.page_count();
-    let mut held = Some(fs.hold_syncs());
     thread::scope(|s| {
+        // Held inside the scope: if an assertion fails, unwinding drops it,
+        // letting the held commit go, before the scope waits for that
+        // commit's thread. The test fails instead of hanging.
+        let mut held = Some(fs.hold_syncs());
         let committer = commit_held(s, &db, held.as_ref().unwrap(), b"new", b"2");
         let during = without_waiting(&mut held, || db.page_count());
         assert_eq!(during, before);
@@ -180,8 +189,11 @@ fn the_page_count_is_read_while_another_commit_syncs() {
 fn a_commit_is_seen_only_once_it_is_synced() {
     let fs = SimFs::new();
     let db = open(&fs);
-    let mut held = Some(fs.hold_syncs());
     thread::scope(|s| {
+        // Held inside the scope: if an assertion fails, unwinding drops it,
+        // letting the held commit go, before the scope waits for that
+        // commit's thread. The test fails instead of hanging.
+        let mut held = Some(fs.hold_syncs());
         let committer = commit_held(s, &db, held.as_ref().unwrap(), b"new", b"2");
         let seen = without_waiting(&mut held, || get(&db, b"new"));
         assert_eq!(seen, None, "a commit still syncing was seen");
@@ -197,9 +209,12 @@ fn a_transaction_that_began_during_a_commit_conflicts_with_it() {
     // write: writing the same key must fail.
     let fs = SimFs::new();
     let db = open(&fs);
-    let mut held = Some(fs.hold_syncs());
     let mut late = None;
     thread::scope(|s| {
+        // Held inside the scope: if an assertion fails, unwinding drops it,
+        // letting the held commit go, before the scope waits for that
+        // commit's thread. The test fails instead of hanging.
+        let mut held = Some(fs.hold_syncs());
         let committer = commit_held(s, &db, held.as_ref().unwrap(), b"k", b"first");
         late = Some(without_waiting(&mut held, || db.begin()));
         held.take();
