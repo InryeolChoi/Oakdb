@@ -428,6 +428,35 @@ fn after_a_disk_failure_among_threads_only_one_commit_is_in_doubt() {
 }
 
 #[test]
+fn after_the_commit_thread_panics_requests_get_stopped() {
+    // A panic on the commit thread is a bug. The commit that hit it is in
+    // doubt, as after a disk failure, and every request after it is told
+    // the engine stopped, instead of panicking in its own thread.
+    let fs = SimFs::new();
+    let db = open(&fs);
+    put(&db, b"before", b"1");
+    let mut waiting = db.begin();
+    waiting.put(b"waiting", b"v").unwrap();
+    fs.panic_at_next_sync();
+    let mut txn = db.begin();
+    txn.put(b"k", b"v").unwrap();
+    match txn.commit() {
+        Err(Error::OutcomeUnknown(e)) => assert!(e.to_string().contains("panicked"), "{e}"),
+        other => panic!("expected OutcomeUnknown, got {other:?}"),
+    }
+    assert!(matches!(waiting.commit(), Err(Error::Stopped(_))));
+    let mut txn = db.begin();
+    assert!(matches!(txn.put(b"after", b"v"), Err(Error::Stopped(_))));
+    assert!(matches!(txn.get(b"before"), Err(Error::Stopped(_))));
+    assert!(matches!(db.checkpoint(), Err(Error::Stopped(_))));
+    drop(txn);
+    drop(db);
+    let db = open(&fs);
+    assert_eq!(get(&db, b"before"), Some(b"1".to_vec()));
+    assert_eq!(get(&db, b"waiting"), None);
+}
+
+#[test]
 fn dropping_the_database_lets_it_open_again_at_once() {
     // Dropping stops the commit thread, which holds the files, before it
     // returns: the lock on the data file is free.
