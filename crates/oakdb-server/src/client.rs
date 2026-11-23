@@ -114,7 +114,7 @@ impl Client {
             Err(FrameError::Io(e)) => return Err(ClientError::Io(e)),
             Err(e) => return Err(ClientError::Protocol(e.to_string())),
         };
-        Response::decode(&frame).map_err(|e| ClientError::Protocol(e.to_string()))
+        Response::decode(frame).map_err(|e| ClientError::Protocol(e.to_string()))
     }
 }
 

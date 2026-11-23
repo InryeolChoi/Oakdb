@@ -65,7 +65,7 @@ fn raw(addr: SocketAddr) -> TcpStream {
     write_frame(&mut stream, &Request::Hello { version: VERSION }.encode()).unwrap();
     let ready = read_frame(&mut stream).unwrap().unwrap();
     assert_eq!(
-        Response::decode(&ready).unwrap(),
+        Response::decode(ready).unwrap(),
         Response::Ready { version: VERSION }
     );
     stream
@@ -73,7 +73,7 @@ fn raw(addr: SocketAddr) -> TcpStream {
 
 fn read_response(stream: &mut TcpStream) -> Response {
     let frame = read_frame(stream).unwrap().expect("a response");
-    Response::decode(&frame).unwrap()
+    Response::decode(frame).unwrap()
 }
 
 fn error_code(response: Response) -> u8 {

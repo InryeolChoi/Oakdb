@@ -4,8 +4,8 @@
 //! decoder panic.
 
 use oakdb_server::protocol::{
-    code, command, read_frame, write_frame, DecodeError, Frame, FrameError, Request, Response,
-    MAX_FRAME_LEN, VERSION,
+    closes, code, command, read_frame, write_frame, DecodeError, Frame, FrameError, Request,
+    Response, MAX_FRAME_LEN, VERSION,
 };
 use oakdb_sql::{Output, Value};
 use proptest::prelude::*;
@@ -39,7 +39,7 @@ fn a_rows_frame_lists_the_columns_then_the_rows() {
         columns: vec!["name".into()],
         rows: vec![vec![Value::Text("kim".into())]],
     });
-    let bytes = bytes_of(&response.encode());
+    let bytes = bytes_of(&response.encode().unwrap());
     assert_eq!(
         bytes,
         [
@@ -54,15 +54,15 @@ fn a_rows_frame_lists_the_columns_then_the_rows() {
 #[test]
 fn the_other_responses_have_their_own_commands() {
     assert_eq!(
-        bytes_of(&Response::Affected(3).encode()),
+        bytes_of(&Response::Affected(3).encode().unwrap()),
         [0, 0, 0, 9, command::AFFECTED, 0, 0, 0, 0, 0, 0, 0, 3]
     );
     assert_eq!(
-        bytes_of(&Response::Done.encode()),
+        bytes_of(&Response::Done.encode().unwrap()),
         [0, 0, 0, 1, command::DONE]
     );
     assert_eq!(
-        bytes_of(&Response::Ready { version: 1 }.encode()),
+        bytes_of(&Response::Ready { version: 1 }.encode().unwrap()),
         [0, 0, 0, 3, command::READY, 0, 1]
     );
     assert_eq!(
@@ -72,6 +72,7 @@ fn the_other_responses_have_their_own_commands() {
                 message: "no".into()
             }
             .encode()
+            .unwrap()
         ),
         [0, 0, 0, 4, command::ERROR, 0x03, b'n', b'o']
     );
@@ -143,10 +144,7 @@ fn a_hello_with_another_magic_is_refused() {
         command: command::HELLO,
         payload: b"PGSQL\x00\x01".to_vec(),
     };
-    assert!(matches!(
-        Request::decode(&frame),
-        Err(DecodeError::BadMagic)
-    ));
+    assert!(matches!(Request::decode(frame), Err(DecodeError::BadMagic)));
 }
 
 #[test]
@@ -155,7 +153,7 @@ fn a_query_that_is_not_utf8_is_told_apart() {
         command: command::QUERY,
         payload: vec![0xff, 0xfe],
     };
-    assert!(matches!(Request::decode(&frame), Err(DecodeError::NotUtf8)));
+    assert!(matches!(Request::decode(frame), Err(DecodeError::NotUtf8)));
 }
 
 #[test]
@@ -165,11 +163,11 @@ fn an_unknown_command_is_refused() {
         payload: vec![],
     };
     assert!(matches!(
-        Request::decode(&frame),
+        Request::decode(frame.clone()),
         Err(DecodeError::UnknownCommand(0x7e))
     ));
     assert!(matches!(
-        Response::decode(&frame),
+        Response::decode(frame),
         Err(DecodeError::UnknownCommand(0x7e))
     ));
 }
@@ -183,7 +181,7 @@ fn rows_with_no_columns_cannot_claim_rows() {
         payload: vec![0, 0, 0xff, 0xff, 0xff, 0xff],
     };
     assert!(matches!(
-        Response::decode(&frame),
+        Response::decode(frame),
         Err(DecodeError::Malformed(_))
     ));
 }
@@ -220,9 +218,9 @@ fn response() -> impl Strategy<Value = Response> {
 proptest! {
     #[test]
     fn every_response_reads_back_as_written(response in response()) {
-        let bytes = bytes_of(&response.encode());
+        let bytes = bytes_of(&response.encode().unwrap());
         let frame = read_frame(&mut bytes.as_slice()).unwrap().unwrap();
-        prop_assert_eq!(Response::decode(&frame).unwrap(), response);
+        prop_assert_eq!(Response::decode(frame).unwrap(), response);
     }
 
     #[test]
@@ -230,7 +228,7 @@ proptest! {
         for request in [Request::Query(sql.clone()), Request::Hello { version }] {
             let bytes = bytes_of(&request.encode());
             let frame = read_frame(&mut bytes.as_slice()).unwrap().unwrap();
-            prop_assert_eq!(Request::decode(&frame).unwrap(), request);
+            prop_assert_eq!(Request::decode(frame).unwrap(), request);
         }
     }
 
@@ -241,8 +239,50 @@ proptest! {
                                Just(command::AFFECTED), Just(command::HELLO), any::<u8>()],
     ) {
         let frame = Frame { command, payload: bytes.clone() };
-        let _ = Response::decode(&frame);
-        let _ = Request::decode(&frame);
+        let _ = Response::decode(frame.clone());
+        let _ = Request::decode(frame);
         let _ = read_frame(&mut bytes.as_slice());
+    }
+}
+
+#[test]
+fn a_length_that_does_not_fit_its_field_is_an_error_not_a_cut() {
+    let response = Response::Rows {
+        columns: vec!["c".repeat(u16::MAX as usize + 1)],
+        rows: vec![],
+    };
+    let err = response.encode().unwrap_err();
+    assert!(err.message.contains("column name"), "{}", err.message);
+}
+
+#[test]
+fn a_response_over_the_frame_limit_is_an_error() {
+    let response = Response::Rows {
+        columns: vec!["data".into()],
+        rows: vec![vec![Value::Blob(vec![0; MAX_FRAME_LEN as usize])]],
+    };
+    assert!(response.encode().is_err());
+}
+
+#[test]
+fn only_codes_that_break_the_conversation_close_the_connection() {
+    for c in [
+        code::MALFORMED,
+        code::FRAME_TOO_LARGE,
+        code::HANDSHAKE,
+        code::TOO_MANY_CONNECTIONS,
+        code::NOT_ALLOWED,
+        code::INTERNAL,
+    ] {
+        assert!(closes(c), "0x{c:02x}");
+    }
+    for c in [
+        code::SYNTAX,
+        code::CONFLICT,
+        code::STOPPED,
+        code::NOT_UTF8,
+        code::RESULT_TOO_LARGE,
+    ] {
+        assert!(!closes(c), "0x{c:02x}");
     }
 }

@@ -97,7 +97,7 @@ fn a_claimed_length_does_not_reserve_memory_until_bytes_arrive() {
             write_frame(&mut s, &Request::Hello { version: VERSION }.encode()).unwrap();
             let ready = read_frame(&mut s).unwrap().unwrap();
             assert_eq!(
-                Response::decode(&ready).unwrap(),
+                Response::decode(ready).unwrap(),
                 Response::Ready { version: VERSION }
             );
             let mut claim = MAX_FRAME_LEN.to_be_bytes().to_vec();

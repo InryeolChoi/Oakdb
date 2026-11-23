@@ -45,9 +45,8 @@ pub mod command {
 
 /// Error codes of an `ERROR` frame (design 0020, section 4). `0x01–0x1F`:
 /// the statement is wrong; `0x20–0x3F`: the engine refused or stopped;
-/// `0x40–0x5F`: the conversation broke. The server closes the connection
-/// after `MALFORMED`, `FRAME_TOO_LARGE`, `HANDSHAKE`, `TOO_MANY_CONNECTIONS`,
-/// `NOT_ALLOWED` and `INTERNAL`, and keeps it after the rest.
+/// `0x40–0x5F`: the conversation broke. [`super::closes`] says after which
+/// the server closes the connection.
 pub mod code {
     /// The statement could not be read.
     pub const SYNTAX: u8 = 0x01;
@@ -326,8 +325,9 @@ impl Request {
         }
     }
 
-    /// The request `frame` carries.
-    pub fn decode(frame: &Frame) -> Result<Request, DecodeError> {
+    /// The request `frame` carries. Takes the frame, so a 16 MiB query is
+    /// not copied (review S9).
+    pub fn decode(frame: Frame) -> Result<Request, DecodeError> {
         match frame.command {
             command::HELLO => {
                 let mut r = Reader::new(&frame.payload);
@@ -338,7 +338,7 @@ impl Request {
                 r.end()?;
                 Ok(Request::Hello { version })
             }
-            command::QUERY => String::from_utf8(frame.payload.clone())
+            command::QUERY => String::from_utf8(frame.payload)
                 .map(Request::Query)
                 .map_err(|_| DecodeError::NotUtf8),
             other => Err(DecodeError::UnknownCommand(other)),
@@ -347,9 +347,10 @@ impl Request {
 }
 
 impl Response {
-    /// The frame that carries this response. It may be over the limit;
-    /// check with [`frame_len`] before sending.
-    pub fn encode(&self) -> Frame {
+    /// The frame that carries this response, or why it cannot be sent:
+    /// a length does not fit its field, or the frame is over
+    /// [`MAX_FRAME_LEN`]. Nothing is cut short to fit (review S7).
+    pub fn encode(&self) -> Result<Frame, EncodeError> {
         let mut p = Vec::new();
         let command = match self {
             Response::Ready { version } => {
@@ -357,15 +358,18 @@ impl Response {
                 command::READY
             }
             Response::Rows { columns, rows } => {
-                put_u16_len(&mut p, columns.len());
+                put_len::<u16>(&mut p, columns.len(), "column count")?;
                 for name in columns {
-                    put_u16_len(&mut p, name.len());
+                    put_len::<u16>(&mut p, name.len(), "column name")?;
                     p.extend_from_slice(name.as_bytes());
                 }
-                p.extend_from_slice(&u32::try_from(rows.len()).unwrap_or(u32::MAX).to_be_bytes());
+                put_len::<u32>(&mut p, rows.len(), "row count")?;
                 for row in rows {
                     for value in row {
-                        put_value(&mut p, value);
+                        put_value(&mut p, value)?;
+                    }
+                    if p.len() >= MAX_FRAME_LEN as usize {
+                        return Err(EncodeError::too_large(p.len()));
                     }
                 }
                 command::ROWS
@@ -381,14 +385,18 @@ impl Response {
                 command::ERROR
             }
         };
-        Frame {
+        let frame = Frame {
             command,
             payload: p,
+        };
+        match frame_len(&frame) {
+            Some(_) => Ok(frame),
+            None => Err(EncodeError::too_large(frame.payload.len())),
         }
     }
 
     /// The response `frame` carries.
-    pub fn decode(frame: &Frame) -> Result<Response, DecodeError> {
+    pub fn decode(frame: Frame) -> Result<Response, DecodeError> {
         let mut r = Reader::new(&frame.payload);
         let response = match frame.command {
             command::READY => Response::Ready { version: r.u16()? },
@@ -403,8 +411,10 @@ impl Response {
                 if width == 0 && count > 0 {
                     return Err(DecodeError::Malformed("rows without columns"));
                 }
-                // Every row takes at least a byte per column, so the count
-                // cannot claim more rows than the bytes left could hold.
+                // Nothing is reserved for `count`: every row takes at least
+                // a byte per column, so a count larger than the bytes left
+                // fails at the first missing value, having grown `rows` only
+                // as far as the bytes went (review S8).
                 let mut rows = Vec::new();
                 for _ in 0..count {
                     let mut row = Vec::with_capacity(width);
@@ -446,13 +456,36 @@ const INTEGER: u8 = 0x01;
 const TEXT: u8 = 0x02;
 const BLOB: u8 = 0x03;
 
-fn put_u16_len(p: &mut Vec<u8>, len: usize) {
-    // Column names are identifiers and there are few columns, so both fit;
-    // saturating keeps a broken caller from panicking the server.
-    p.extend_from_slice(&u16::try_from(len).unwrap_or(u16::MAX).to_be_bytes());
+/// Writes `len` as a big-endian `T`, or fails if it does not fit.
+fn put_len<T>(p: &mut Vec<u8>, len: usize, what: &'static str) -> Result<(), EncodeError>
+where
+    T: TryFrom<usize> + BeBytes,
+{
+    let field = T::try_from(len).map_err(|_| EncodeError {
+        message: format!("the {what} {len} does not fit its length field"),
+    })?;
+    field.put(p);
+    Ok(())
 }
 
-fn put_value(p: &mut Vec<u8>, value: &Value) {
+/// The length fields of the protocol: u16 and u32, big-endian.
+trait BeBytes {
+    fn put(self, p: &mut Vec<u8>);
+}
+
+impl BeBytes for u16 {
+    fn put(self, p: &mut Vec<u8>) {
+        p.extend_from_slice(&self.to_be_bytes());
+    }
+}
+
+impl BeBytes for u32 {
+    fn put(self, p: &mut Vec<u8>) {
+        p.extend_from_slice(&self.to_be_bytes());
+    }
+}
+
+fn put_value(p: &mut Vec<u8>, value: &Value) -> Result<(), EncodeError> {
     match value {
         Value::Null => p.push(NULL),
         Value::Integer(i) => {
@@ -461,20 +494,55 @@ fn put_value(p: &mut Vec<u8>, value: &Value) {
         }
         Value::Text(s) => {
             p.push(TEXT);
-            put_bytes(p, s.as_bytes());
+            put_len::<u32>(p, s.len(), "text length")?;
+            p.extend_from_slice(s.as_bytes());
         }
         Value::Blob(b) => {
             p.push(BLOB);
-            put_bytes(p, b);
+            put_len::<u32>(p, b.len(), "blob length")?;
+            p.extend_from_slice(b);
+        }
+    }
+    Ok(())
+}
+
+/// Why a response cannot be sent as a frame. The server sends
+/// [`code::RESULT_TOO_LARGE`] with this message instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodeError {
+    /// What does not fit.
+    pub message: String,
+}
+
+impl EncodeError {
+    fn too_large(payload: usize) -> Self {
+        EncodeError {
+            message: format!(
+                "the result is over {payload} bytes, past the {MAX_FRAME_LEN} byte frame limit"
+            ),
         }
     }
 }
 
-fn put_bytes(p: &mut Vec<u8>, bytes: &[u8]) {
-    // A value longer than u32::MAX cannot be stored (the engine's limit),
-    // and the frame limit catches long ones before they are sent.
-    p.extend_from_slice(&u32::try_from(bytes.len()).unwrap_or(u32::MAX).to_be_bytes());
-    p.extend_from_slice(bytes);
+impl fmt::Display for EncodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// Whether the server closes the connection after an `ERROR` with this
+/// code. The one place that says so (review S10); `docs/protocol.md`
+/// section 6 lists the same codes.
+pub fn closes(code: u8) -> bool {
+    matches!(
+        code,
+        code::MALFORMED
+            | code::FRAME_TOO_LARGE
+            | code::HANDSHAKE
+            | code::TOO_MANY_CONNECTIONS
+            | code::NOT_ALLOWED
+            | code::INTERNAL
+    )
 }
 
 /// Reads a payload front to back, checking every length against what is
