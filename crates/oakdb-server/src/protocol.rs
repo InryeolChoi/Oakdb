@@ -230,17 +230,31 @@ pub fn read_frame(r: &mut impl Read) -> Result<Option<Frame>, FrameError> {
     if len > MAX_FRAME_LEN {
         return Err(FrameError::TooLarge(len));
     }
-    let mut body = vec![0u8; len as usize];
-    r.read_exact(&mut body).map_err(|e| match e.kind() {
+    let mut command = [0u8; 1];
+    r.read_exact(&mut command).map_err(|e| match e.kind() {
         io::ErrorKind::UnexpectedEof => FrameError::Truncated,
         _ => FrameError::Io(e),
     })?;
-    let payload = body.split_off(1);
+    // The length is only a claim: memory grows with the bytes that really
+    // arrive, so connections that each claim 16 MiB and send nothing hold
+    // a few KiB each, not 16 MiB (review S2).
+    let want = len as usize - 1;
+    let mut payload = Vec::with_capacity(want.min(FIRST_READ));
+    r.take(want as u64)
+        .read_to_end(&mut payload)
+        .map_err(FrameError::Io)?;
+    if payload.len() < want {
+        return Err(FrameError::Truncated);
+    }
     Ok(Some(Frame {
-        command: body[0],
+        command: command[0],
         payload,
     }))
 }
+
+/// Room a frame's data gets before any of it arrives. Past this the
+/// buffer grows as bytes come.
+pub const FIRST_READ: usize = 64 * 1024;
 
 /// Writes one frame in a single write, so it leaves in as few packets as
 /// it can. Fails without writing if the frame is over the limit.
