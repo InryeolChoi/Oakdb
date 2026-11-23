@@ -441,51 +441,79 @@ impl<File: FsFile> Committer<File> {
     }
 
     /// Commits `writes` of a transaction that began after commit
-    /// `begun_after`: see [`Txn::commit`].
+    /// `begun_after`: see [`Txn::commit`]. In steps that group commit (#28)
+    /// will run for several commits at once, syncing once between
+    /// [`Committer::write`] and [`Committer::publish`].
     fn commit(&mut self, writes: Writes, begun_after: u64) -> Result<()> {
-        // Checked here, so a commit that came after a failure writes
-        // nothing.
+        // The check that matters: a commit that was waiting here when the
+        // one ahead of it failed writes nothing. The caller's check before
+        // sending only saves a trip.
         self.shared.check_running()?;
-        // First committer wins (ADR 0006): if a commit since this
-        // transaction began wrote one of its keys, it writes nothing. Only
-        // writes are compared, so reads never conflict (snapshot isolation;
-        // write skew is allowed). Only this thread records keys, so none
-        // can be recorded between this check and this commit's own record
-        // below, though the lock is let go.
+        self.check_conflict(&writes, begun_after)?;
+        let mut next = self.build(&writes);
+        self.write(&mut next)?;
+        self.publish(next, writes);
+        self.checkpoint_if_due();
+        Ok(())
+    }
+
+    /// First committer wins (ADR 0006): fails if a commit since the
+    /// transaction began after `begun_after` wrote one of its keys. Only
+    /// writes are compared, so reads never conflict (snapshot isolation;
+    /// write skew is allowed). Only this thread records keys, so none can
+    /// be recorded between this check and the commit's own record in
+    /// [`Committer::publish`], though the lock is let go.
+    fn check_conflict(&self, writes: &Writes, begun_after: u64) -> Result<()> {
         let conflict = self
             .shared
             .committed()
             .recent
             .conflict(begun_after, writes.keys().map(Vec::as_slice))
             .map(<[u8]>::to_vec);
-        if let Some(key) = conflict {
-            return Err(Error::Conflict { key });
+        match conflict {
+            Some(key) => Err(Error::Conflict { key }),
+            None => Ok(()),
         }
+    }
+
+    /// The latest tree with `writes` made.
+    fn build(&self, writes: &Writes) -> Tree {
         let mut next = Tree::clone(&self.tree);
-        // Take out every key this transaction writes before putting any
+        // Take out every key the transaction writes before putting any
         // back, so space freed by a delete or a shrinking value is there for
         // a put that sorts before it.
         for key in writes.keys() {
             next.delete(key);
         }
-        for (key, value) in &writes {
+        for (key, value) in writes {
             if let Some(value) = value {
                 next.put(key, value);
             }
         }
-        // No lock is held while the WAL is written and synced: transactions
-        // begin and end meanwhile, on the tree before this commit.
-        if next.has_dirty() || next.meta() != self.tree.meta() {
-            if let Err(e) = append(&mut self.wal, &mut next) {
-                // Appending only fails writing or syncing, so whatever it
-                // is, the outcome is unknown. The tree is not swapped and
-                // the WAL tail stays where it was, but neither is used
-                // again: the engine stops.
-                let e = Error::OutcomeUnknown(Arc::new(e));
-                self.shared.stop(&e);
-                return Err(e);
-            }
+        next
+    }
+
+    /// Writes the pages `next` changed and its meta fields to the WAL, and
+    /// syncs, if it changed anything. No lock is held meanwhile:
+    /// transactions begin and end on the tree before this commit.
+    fn write(&mut self, next: &mut Tree) -> Result<()> {
+        if !next.has_dirty() && next.meta() == self.tree.meta() {
+            return Ok(());
         }
+        append(&mut self.wal, next).map_err(|e| {
+            // Appending only fails writing or syncing, so whatever it is,
+            // the outcome is unknown. The tree is not swapped and the WAL
+            // tail stays where it was, but neither is used again: the
+            // engine stops.
+            let e = Error::OutcomeUnknown(Arc::new(e));
+            self.shared.stop(&e);
+            e
+        })
+    }
+
+    /// Makes `next`, now durable, the tree transactions begin on, and
+    /// records the keys `writes` wrote for later conflicts.
+    fn publish(&mut self, next: Tree, writes: Writes) {
         let next = Arc::new(next);
         {
             let mut committed = self.shared.committed();
@@ -500,14 +528,18 @@ impl<File: FsFile> Committer<File> {
             committed.tree = Arc::clone(&next);
         }
         self.tree = next;
+    }
+
+    /// Checkpoints if the WAL is longer than [`CHECKPOINT_AFTER`]. If that
+    /// fails, the engine stops, but the commit before it is in the WAL and
+    /// synced: it stays, and is answered `Ok`. The next request reports
+    /// the stop.
+    fn checkpoint_if_due(&mut self) {
         if self.wal.len() > CHECKPOINT_AFTER {
             if let Err(e) = checkpoint::run(&self.file, &mut self.wal, &self.tree) {
-                // The commit is in the WAL and synced: it stays, whatever
-                // the checkpoint did. The next request reports the stop.
                 self.shared.stop(&e);
             }
         }
-        Ok(())
     }
 
     /// See [`Db::checkpoint`].
@@ -649,6 +681,10 @@ impl<F: Fs> Txn<'_, F> {
     /// commit gets [`Error::OutcomeUnknown`] and the engine stops, as if
     /// the disk had failed.
     pub fn commit(mut self) -> Result<()> {
+        // Answers a commit with no writes, and saves a trip to the commit
+        // thread once the engine stopped. The commit thread checks again,
+        // and that check is the one that keeps writes from following a
+        // failure.
         self.db.check_running()?;
         if self.writes.is_empty() {
             return Ok(());
