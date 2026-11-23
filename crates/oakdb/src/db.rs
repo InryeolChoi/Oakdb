@@ -67,7 +67,9 @@ pub const DATA_FILE: &str = "oakdb.data";
 /// become a setting of the database.
 pub const CHECKPOINT_AFTER: u64 = 4 * 1024 * 1024;
 
-/// The name of the thread that commits (design 0018).
+/// The name of the thread that commits and checkpoints (design 0018). It
+/// is public so that tests and tools can tell that thread apart, in a
+/// debugger, `top -H`, or a test that checks which thread syncs.
 pub const COMMIT_THREAD: &str = "oakdb-commit";
 
 /// An open database. Threads can share it: it is `Send` and `Sync`.
