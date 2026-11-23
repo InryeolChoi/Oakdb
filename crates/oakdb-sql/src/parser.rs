@@ -7,6 +7,7 @@
 //! is broken (a missing parenthesis) it says [`SqlError::Syntax`] and
 //! where.
 
+use crate::expr::{ArithOp, CompareOp, Expr};
 use crate::lexer::{syntax, tokenize, Spanned, Token};
 use crate::{ColumnType, SqlError, Value};
 
@@ -25,13 +26,13 @@ pub(crate) enum Statement {
         columns: Option<Vec<String>>,
         rows: Vec<Vec<Value>>,
     },
-    /// `SELECT * | column, ... FROM table WHERE column = value`.
+    /// `SELECT * | column, ... FROM table [WHERE condition]`.
     Select {
         table: String,
         /// The selected columns, or `None` for `*`.
         columns: Option<Vec<String>>,
-        /// The column and value of the WHERE clause.
-        filter: (String, Value),
+        /// The WHERE condition, or `None` for every row.
+        filter: Option<Expr>,
     },
 }
 
@@ -56,13 +57,19 @@ pub(crate) fn parse(sql: &str) -> Result<Statement, SqlError> {
 
 /// Words that shape the grammar, so they cannot name a table or column.
 /// Type names are not among them: `text TEXT` is a fine column.
-const RESERVED: [&str; 11] = [
+/// `BETWEEN`, `IN` and `LIKE` are not among them: they are only read where
+/// an operator stands, so they can still name a column (design 0019, Q1).
+const RESERVED: [&str; 15] = [
     "CREATE", "TABLE", "INSERT", "INTO", "VALUES", "SELECT", "FROM", "WHERE", "PRIMARY", "KEY",
-    "NULL",
+    "NULL", "AND", "OR", "NOT", "IS",
 ];
 
-/// What every WHERE error says Oakdb supports.
-const WHERE_SUPPORTED: &str = "only `<primary key> = <value>` is supported";
+/// Operators of real SQL that Oakdb does not support, where an operator
+/// stands in WHERE.
+const UNSUPPORTED_OPERATORS: [&str; 4] = ["LIKE", "GLOB", "REGEXP", "MATCH"];
+
+/// What an unsupported operator's error says Oakdb supports.
+const OPERATORS_SUPPORTED: &str = "only comparisons, IS [NOT] NULL, BETWEEN and IN are supported";
 
 struct Parser {
     /// The tokens, ending with [`Token::End`], which [`Parser::next`]
@@ -331,7 +338,7 @@ impl Parser {
         }
     }
 
-    /// select := SELECT ("*" | name ("," name)*) FROM name WHERE name "=" literal
+    /// select := SELECT ("*" | name ("," name)*) FROM name [WHERE expr]
     fn select(&mut self) -> Result<Statement, SqlError> {
         self.expect_keyword("SELECT")?;
         let columns = if self.at_symbol("*") {
@@ -347,37 +354,253 @@ impl Parser {
         };
         self.expect_keyword("FROM")?;
         let table = self.name()?;
-        if matches!(self.peek().token, Token::End | Token::Symbol(";")) {
-            return Err(SqlError::Unsupported(format!(
-                "SELECT without WHERE; {WHERE_SUPPORTED}"
-            )));
-        }
-        self.expect_keyword_or_unsupported("WHERE", |word| {
-            format!("`{word}` in SELECT; only WHERE is supported after FROM")
-        })?;
-        let column = self.name()?;
-        match &self.peek().token {
-            Token::Symbol("=") => {}
-            Token::Symbol(op) => {
+        let filter = match &self.peek().token {
+            Token::End | Token::Symbol(";") => None,
+            Token::Word(word) if word.eq_ignore_ascii_case("WHERE") => {
+                self.next();
+                Some(self.expr()?)
+            }
+            Token::Word(word) => {
                 return Err(SqlError::Unsupported(format!(
-                    "operator `{op}` in WHERE; {WHERE_SUPPORTED}"
+                    "`{word}` in SELECT; only WHERE is supported after FROM"
                 )))
             }
-            Token::Word(op) => {
-                return Err(SqlError::Unsupported(format!(
-                    "operator `{op}` in WHERE; {WHERE_SUPPORTED}"
-                )))
-            }
-            _ => return Err(self.expected("`=`")),
-        }
-        self.next();
-        let value = self.literal()?;
+            _ => return Err(self.expected("`WHERE`")),
+        };
         Ok(Statement::Select {
             table,
             columns,
-            filter: (column, value),
+            filter,
         })
     }
+
+    /// expr := and_expr (OR and_expr)*
+    fn expr(&mut self) -> Result<Expr, SqlError> {
+        let mut left = self.and_expr()?;
+        while self.at_keyword("OR") {
+            self.next();
+            left = Expr::Or(Box::new(left), Box::new(self.and_expr()?));
+        }
+        Ok(left)
+    }
+
+    /// and_expr := not_expr (AND not_expr)*
+    fn and_expr(&mut self) -> Result<Expr, SqlError> {
+        let mut left = self.not_expr()?;
+        while self.at_keyword("AND") {
+            self.next();
+            left = Expr::And(Box::new(left), Box::new(self.not_expr()?));
+        }
+        Ok(left)
+    }
+
+    /// not_expr := NOT not_expr | predicate
+    fn not_expr(&mut self) -> Result<Expr, SqlError> {
+        if self.at_keyword("NOT") {
+            self.next();
+            return Ok(Expr::Not(Box::new(self.not_expr()?)));
+        }
+        self.predicate()
+    }
+
+    /// predicate := sum [ compare_op sum
+    ///                  | IS [NOT] NULL
+    ///                  | [NOT] BETWEEN sum AND sum
+    ///                  | [NOT] IN "(" expr ("," expr)* ")" ]
+    ///
+    /// The ends of BETWEEN are sums, so the AND between them is never read
+    /// as a logical AND. A comparison cannot be followed by another
+    /// (`a < b < c`): that is unsupported rather than read as comparing a
+    /// condition.
+    fn predicate(&mut self) -> Result<Expr, SqlError> {
+        let left = Box::new(self.sum()?);
+        let predicate = match self.peek().token.clone() {
+            Token::Symbol(symbol) => match compare_op(symbol) {
+                Some(op) => {
+                    self.next();
+                    Expr::Compare {
+                        op,
+                        left,
+                        right: Box::new(self.sum()?),
+                    }
+                }
+                None => return Ok(*left),
+            },
+            Token::Word(word) if word.eq_ignore_ascii_case("IS") => {
+                self.next();
+                let negated = self.at_keyword("NOT");
+                if negated {
+                    self.next();
+                }
+                if !self.at_keyword("NULL") {
+                    return Err(SqlError::Unsupported(format!(
+                        "`IS` before {}; only IS NULL and IS NOT NULL are supported",
+                        describe(&self.peek().token)
+                    )));
+                }
+                self.next();
+                Expr::IsNull {
+                    operand: left,
+                    negated,
+                }
+            }
+            Token::Word(word)
+                if ["NOT", "BETWEEN", "IN"]
+                    .iter()
+                    .any(|k| word.eq_ignore_ascii_case(k)) =>
+            {
+                let negated = word.eq_ignore_ascii_case("NOT");
+                if negated {
+                    self.next();
+                }
+                if self.at_keyword("BETWEEN") {
+                    self.next();
+                    let low = Box::new(self.sum()?);
+                    self.expect_keyword("AND")?;
+                    let high = Box::new(self.sum()?);
+                    Expr::Between {
+                        operand: left,
+                        low,
+                        high,
+                        negated,
+                    }
+                } else if self.at_keyword("IN") {
+                    self.next();
+                    self.expect_symbol("(")?;
+                    let mut list = vec![self.expr()?];
+                    while self.comma_or_close(false)? {
+                        list.push(self.expr()?);
+                    }
+                    Expr::In {
+                        operand: left,
+                        list,
+                        negated,
+                    }
+                } else {
+                    self.unsupported_operator()?;
+                    return Err(self.expected("`BETWEEN` or `IN` after `NOT`"));
+                }
+            }
+            Token::Word(_) => {
+                self.unsupported_operator()?;
+                return Ok(*left);
+            }
+            _ => return Ok(*left),
+        };
+        if let Token::Symbol(symbol) = self.peek().token {
+            if compare_op(symbol).is_some() {
+                return Err(SqlError::Unsupported(format!(
+                    "`{symbol}` after a comparison; comparisons cannot be chained"
+                )));
+            }
+        }
+        Ok(predicate)
+    }
+
+    /// Fails as unsupported if the next token is an operator of real SQL
+    /// that Oakdb does not support, such as LIKE.
+    fn unsupported_operator(&self) -> Result<(), SqlError> {
+        match &self.peek().token {
+            Token::Word(word)
+                if UNSUPPORTED_OPERATORS
+                    .iter()
+                    .any(|k| word.eq_ignore_ascii_case(k)) =>
+            {
+                Err(SqlError::Unsupported(format!(
+                    "operator `{}`; {OPERATORS_SUPPORTED}",
+                    word.to_ascii_uppercase()
+                )))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// sum := product (("+" | "-") product)*
+    fn sum(&mut self) -> Result<Expr, SqlError> {
+        let mut left = self.product()?;
+        loop {
+            let op = match self.peek().token {
+                Token::Symbol("+") => ArithOp::Add,
+                Token::Symbol("-") => ArithOp::Sub,
+                _ => return Ok(left),
+            };
+            self.next();
+            left = Expr::Arith {
+                op,
+                left: Box::new(left),
+                right: Box::new(self.product()?),
+            };
+        }
+    }
+
+    /// product := unary (("*" | "/" | "%") unary)*
+    fn product(&mut self) -> Result<Expr, SqlError> {
+        let mut left = self.unary()?;
+        loop {
+            let op = match self.peek().token {
+                Token::Symbol("*") => ArithOp::Mul,
+                Token::Symbol("/") => ArithOp::Div,
+                Token::Symbol("%") => ArithOp::Rem,
+                _ => return Ok(left),
+            };
+            self.next();
+            left = Expr::Arith {
+                op,
+                left: Box::new(left),
+                right: Box::new(self.unary()?),
+            };
+        }
+    }
+
+    /// unary := "-" unary | primary
+    ///
+    /// A `-` right before digits is a negative literal, as in INSERT, so
+    /// `-9223372036854775808` is i64::MIN rather than the negation of a
+    /// number too big for 64 bits.
+    fn unary(&mut self) -> Result<Expr, SqlError> {
+        if !self.at_symbol("-") {
+            return self.primary();
+        }
+        let minus = self.next();
+        if let Token::Integer(digits) = self.peek().token.clone() {
+            self.next();
+            return Ok(Expr::Literal(integer(&digits, true, minus.position)?));
+        }
+        Ok(Expr::Neg(Box::new(self.unary()?)))
+    }
+
+    /// primary := literal | name | "(" expr ")"
+    fn primary(&mut self) -> Result<Expr, SqlError> {
+        match &self.peek().token {
+            Token::Symbol("(") => {
+                self.next();
+                let inner = self.expr()?;
+                self.expect_symbol(")")?;
+                Ok(inner)
+            }
+            Token::Word(word) if word.eq_ignore_ascii_case("NULL") => {
+                Ok(Expr::Literal(self.literal()?))
+            }
+            Token::Word(_) => Ok(Expr::Column(self.name()?)),
+            Token::Integer(_) | Token::Text(_) | Token::Blob(_) => {
+                Ok(Expr::Literal(self.literal()?))
+            }
+            _ => Err(self.expected("an expression")),
+        }
+    }
+}
+
+/// The comparison operator `symbol` stands for, if any.
+fn compare_op(symbol: &str) -> Option<CompareOp> {
+    Some(match symbol {
+        "=" => CompareOp::Eq,
+        "!=" | "<>" => CompareOp::Ne,
+        "<" => CompareOp::Lt,
+        "<=" => CompareOp::Le,
+        ">" => CompareOp::Gt,
+        ">=" => CompareOp::Ge,
+        _ => return None,
+    })
 }
 
 /// The integer that `digits` spell, negated if `negative`, or a syntax
@@ -402,5 +625,138 @@ fn describe(token: &Token) -> String {
         Token::Blob(_) => "a blob value".into(),
         Token::Symbol(symbol) => format!("`{symbol}`"),
         Token::End => "the end of the statement".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The WHERE clause of `SELECT * FROM t WHERE <condition>`.
+    fn filter(condition: &str) -> Expr {
+        match parse(&format!("SELECT * FROM t WHERE {condition}")).unwrap() {
+            Statement::Select {
+                filter: Some(filter),
+                ..
+            } => filter,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn col(name: &str) -> Box<Expr> {
+        Box::new(Expr::Column(name.into()))
+    }
+
+    fn int(i: i64) -> Box<Expr> {
+        Box::new(Expr::Literal(Value::Integer(i)))
+    }
+
+    fn cmp(op: CompareOp, left: Box<Expr>, right: Box<Expr>) -> Box<Expr> {
+        Box::new(Expr::Compare { op, left, right })
+    }
+
+    fn arith(op: ArithOp, left: Box<Expr>, right: Box<Expr>) -> Box<Expr> {
+        Box::new(Expr::Arith { op, left, right })
+    }
+
+    #[test]
+    fn and_binds_tighter_than_or_and_not_tighter_than_and() {
+        let eq = |name: &str, i| cmp(CompareOp::Eq, col(name), int(i));
+        assert_eq!(
+            filter("a = 1 OR b = 2 AND c = 3"),
+            Expr::Or(eq("a", 1), Box::new(Expr::And(eq("b", 2), eq("c", 3))))
+        );
+        assert_eq!(
+            filter("NOT a = 1 AND b = 2"),
+            Expr::And(Box::new(Expr::Not(eq("a", 1))), eq("b", 2))
+        );
+        assert_eq!(
+            filter("(a = 1 OR b = 2) AND c = 3"),
+            Expr::And(Box::new(Expr::Or(eq("a", 1), eq("b", 2))), eq("c", 3))
+        );
+    }
+
+    #[test]
+    fn arithmetic_binds_tighter_than_comparison_and_is_left_associative() {
+        assert_eq!(
+            filter("a + 2 * 3 = 7"),
+            *cmp(
+                CompareOp::Eq,
+                arith(ArithOp::Add, col("a"), arith(ArithOp::Mul, int(2), int(3))),
+                int(7)
+            )
+        );
+        assert_eq!(
+            filter("10 - a - 2 < 0"),
+            *cmp(
+                CompareOp::Lt,
+                arith(ArithOp::Sub, arith(ArithOp::Sub, int(10), col("a")), int(2)),
+                int(0)
+            )
+        );
+        assert_eq!(
+            filter("-a % 2 >= -1"),
+            *cmp(
+                CompareOp::Ge,
+                arith(ArithOp::Rem, Box::new(Expr::Neg(col("a"))), int(2)),
+                int(-1)
+            )
+        );
+    }
+
+    #[test]
+    fn the_and_of_between_is_not_a_logical_and() {
+        assert_eq!(
+            filter("a NOT BETWEEN 1 AND 5 AND b <> 2"),
+            Expr::And(
+                Box::new(Expr::Between {
+                    operand: col("a"),
+                    low: int(1),
+                    high: int(5),
+                    negated: true,
+                }),
+                cmp(CompareOp::Ne, col("b"), int(2))
+            )
+        );
+    }
+
+    #[test]
+    fn in_and_is_null_read_their_operands() {
+        assert_eq!(
+            filter("a NOT IN (1, b + 1)"),
+            Expr::In {
+                operand: col("a"),
+                list: vec![*int(1), *arith(ArithOp::Add, col("b"), int(1))],
+                negated: true,
+            }
+        );
+        assert_eq!(
+            filter("a IS NOT NULL"),
+            Expr::IsNull {
+                operand: col("a"),
+                negated: true
+            }
+        );
+        assert_eq!(filter("a != 1"), filter("a <> 1"));
+    }
+
+    #[test]
+    fn a_minus_before_digits_is_a_literal_and_otherwise_a_negation() {
+        assert_eq!(
+            filter("a = -9223372036854775808"),
+            *cmp(CompareOp::Eq, col("a"), int(i64::MIN))
+        );
+        assert_eq!(
+            filter("a = - -4"),
+            *cmp(CompareOp::Eq, col("a"), Box::new(Expr::Neg(int(-4))))
+        );
+    }
+
+    #[test]
+    fn a_select_without_where_has_no_filter() {
+        assert!(matches!(
+            parse("SELECT * FROM t;").unwrap(),
+            Statement::Select { filter: None, .. }
+        ));
     }
 }

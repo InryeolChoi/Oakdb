@@ -1,8 +1,11 @@
-//! The SQL layer of Oakdb (issue #31, design 0017).
+//! The SQL layer of Oakdb (issue #31, design 0017; WHERE: issue #32,
+//! design 0019).
 //!
 //! It turns a SQL string into calls on the key-value engine: the lexer cuts
 //! the string into tokens, the parser turns the tokens into a statement,
-//! and the executor runs the statement as one engine transaction. The
+//! the planner turns a WHERE clause into a range of primary keys and a
+//! condition, and the executor runs the statement as one engine
+//! transaction. The
 //! engine knows nothing about SQL; everything about tables, columns and
 //! rows lives here, stored in the engine as keys and values that sort in
 //! the right order (design 0017, sections 1 and 2).
@@ -28,8 +31,10 @@ mod catalog;
 mod encoding;
 mod error;
 mod executor;
+mod expr;
 mod lexer;
 mod parser;
+mod planner;
 
 use std::fmt;
 

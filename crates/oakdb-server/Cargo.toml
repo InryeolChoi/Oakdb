@@ -1,11 +1,23 @@
 [package]
 name = "oakdb-server"
 version = "0.1.0"
-description = "Network server for Oakdb"
+description = "Network server for Oakdb: the wire protocol, the server and the CLI client"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[[bin]]
+name = "oakdb"
+path = "src/main.rs"
+# The engine's library is called oakdb too; its docs are the ones to keep.
+doc = false
+
 [dependencies]
 oakdb = { path = "../oakdb" }
+oakdb-sql = { path = "../oakdb-sql" }
+libc = "0.2"
+
+[dev-dependencies]
+proptest = "1"
+tempfile = "3"
