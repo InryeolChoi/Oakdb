@@ -5,12 +5,13 @@
 use std::io::Read;
 use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use oakdb::fs::sim::SimFs;
-use oakdb::fs::Fs;
+use oakdb::fs::{Fs, FsFile};
 use oakdb::Db;
 use oakdb_server::allow::Allowlist;
 use oakdb_server::client::{Client, ClientError};
@@ -521,19 +522,138 @@ fn a_dropped_connection_frees_its_thread_without_harm() {
             ..config()
         },
     );
-    for _ in 0..10 {
+    for i in 0..10 {
         // Half a frame, then gone.
         let mut stream = raw(addr);
         std::io::Write::write_all(&mut stream, &[0, 0, 0, 9, command::QUERY]).unwrap();
         drop(stream);
-        let mut client = Client::connect(addr)
-            .or_else(|_| {
-                thread::sleep(Duration::from_millis(200));
-                Client::connect(addr)
-            })
-            .unwrap();
-        client
-            .query("CREATE TABLE IF_NOT_A_TABLE (id INTEGER PRIMARY KEY)")
-            .ok();
+        // The seat comes back once the server sees the end; until then the
+        // limit of two may turn a client away.
+        let deadline = Instant::now() + TIMEOUT;
+        let mut client = loop {
+            match Client::connect(addr) {
+                Ok(client) => break client,
+                Err(ClientError::Server {
+                    code: code::TOO_MANY_CONNECTIONS,
+                    ..
+                }) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+                Err(e) => panic!("{e:?}"),
+            }
+        };
+        assert_eq!(
+            client
+                .query(&format!("CREATE TABLE t{i} (id INTEGER PRIMARY KEY)"))
+                .unwrap(),
+            Output::Done
+        );
     }
+}
+
+#[test]
+fn refused_clients_read_their_error_every_time() {
+    // The refusal must arrive before the close, never as a reset (review
+    // P3), however the client's HELLO and the close cross.
+    let dir = tempfile::tempdir().unwrap();
+    let addr = start(
+        Db::open(dir.path()).unwrap(),
+        Config {
+            max_connections: 1,
+            ..config()
+        },
+    );
+    let _seated = connect(addr);
+    for _ in 0..100 {
+        match Client::connect(addr) {
+            Err(ClientError::Server {
+                code: code::TOO_MANY_CONNECTIONS,
+                ..
+            }) => {}
+            other => panic!("expected 0x45, got {other:?}"),
+        }
+    }
+}
+
+/// A disk that panics on the next write once armed: a bug inside the
+/// server, as seen from a connection thread.
+#[derive(Clone)]
+struct PanickingFs {
+    inner: SimFs,
+    armed: Arc<AtomicBool>,
+}
+
+struct PanickingFile {
+    inner: <SimFs as Fs>::File,
+    armed: Arc<AtomicBool>,
+}
+
+impl Fs for PanickingFs {
+    type File = PanickingFile;
+
+    fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
+        self.inner.create_dir_all(path)
+    }
+
+    fn open(&self, path: &Path) -> std::io::Result<PanickingFile> {
+        Ok(PanickingFile {
+            inner: self.inner.open(path)?,
+            armed: Arc::clone(&self.armed),
+        })
+    }
+
+    fn sync_dir(&self, dir: &Path) -> std::io::Result<()> {
+        self.inner.sync_dir(dir)
+    }
+
+    fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        self.inner.rename(from, to)
+    }
+}
+
+impl FsFile for PanickingFile {
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+        self.inner.read_exact_at(buf, offset)
+    }
+
+    fn write_all_at(&self, buf: &[u8], offset: u64) -> std::io::Result<()> {
+        if self.armed.swap(false, Ordering::SeqCst) {
+            panic!("a bug in the server (planted by the test)");
+        }
+        self.inner.write_all_at(buf, offset)
+    }
+
+    fn size(&self) -> std::io::Result<u64> {
+        self.inner.size()
+    }
+
+    fn set_len(&self, len: u64) -> std::io::Result<()> {
+        self.inner.set_len(len)
+    }
+
+    fn try_lock(&self) -> std::io::Result<()> {
+        self.inner.try_lock()
+    }
+
+    fn sync_data(&self) -> std::io::Result<()> {
+        self.inner.sync_data()
+    }
+}
+
+#[test]
+fn a_panic_on_a_connection_sends_0x7f_and_closes_it_and_the_server_goes_on() {
+    let fs = PanickingFs {
+        inner: SimFs::new(),
+        armed: Arc::new(AtomicBool::new(false)),
+    };
+    let armed = Arc::clone(&fs.armed);
+    let addr = start(Db::open_with(fs, "/db").unwrap(), config());
+
+    let mut stream = raw(addr);
+    armed.store(true, Ordering::SeqCst);
+    let create = Request::Query("CREATE TABLE t (id INTEGER PRIMARY KEY)".into());
+    write_frame(&mut stream, &create.encode()).unwrap();
+    assert_eq!(error_code(read_response(&mut stream)), code::INTERNAL);
+    assert_closed(&mut stream);
+
+    // Other clients still get in.
+    raw(addr);
 }

@@ -2,9 +2,16 @@
 //! and `oakdb cli` run as child processes, plus how the CLI cuts input into
 //! statements and prints results.
 
+use std::io::{BufRead, BufReader};
+use std::net::TcpStream;
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Output as ProcessOutput, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use oakdb_server::cli::{format_output, Splitter};
+use oakdb_server::protocol::{read_frame, write_frame, Request, Response, VERSION};
 
 mod common;
 use common::{first_line, output_within};
@@ -137,16 +144,20 @@ fn serve(data: &std::path::Path) -> ServerProcess {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let line = first_line(&mut child);
-    // "oakdb 0.1.0 listening on 127.0.0.1:54321, data ..."
+    let port = port_of(&first_line(&mut child));
+    ServerProcess { child, port }
+}
+
+/// The port in the server's first line,
+/// "oakdb 0.1.0 listening on 127.0.0.1:54321, data ...".
+fn port_of(line: &str) -> u16 {
     let addr = line
         .split("listening on ")
         .nth(1)
         .and_then(|rest| rest.split(',').next())
         .unwrap_or_else(|| panic!("unexpected first line: {line:?}"));
     assert!(addr.starts_with("127.0.0.1:"), "{line}");
-    let port = addr.rsplit(':').next().unwrap().parse().unwrap();
-    ServerProcess { child, port }
+    addr.rsplit(':').next().unwrap().parse().unwrap()
 }
 
 fn cli(port: u16, input: &str) -> ProcessOutput {
@@ -285,4 +296,132 @@ fn help_after_a_subcommand_prints_the_usage_and_succeeds() {
         let usage = text(&out.stdout);
         assert!(usage.contains("NOT AUTHENTICATION"), "{args:?}: {usage}");
     }
+}
+
+#[test]
+fn the_server_logs_each_connection_opening_and_closing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut child = oakdb()
+        .args(["serve", "--port", "0", "--data"])
+        .arg(dir.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let server = ServerProcess {
+        port: port_of(&first_line(&mut child)),
+        child,
+    };
+    let mut server = server;
+    let (tx, rx) = mpsc::channel();
+    let stderr = BufReader::new(server.child.stderr.take().unwrap());
+    thread::spawn(move || {
+        for line in stderr.lines().map_while(Result::ok) {
+            tx.send(line).ok();
+        }
+    });
+
+    let out = cli(server.port, "CREATE TABLE t (id INTEGER PRIMARY KEY);");
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let deadline = Instant::now() + common::DEADLINE;
+    let mut seen = Vec::new();
+    while !seen.iter().any(|l: &String| l.ends_with(" disconnected")) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left) {
+            Ok(line) => seen.push(line),
+            Err(_) => panic!("no closing line within the deadline: {seen:?}"),
+        }
+    }
+    let opened = seen.iter().find(|l| l.ends_with(" connected"));
+    let opened = opened.unwrap_or_else(|| panic!("no opening line: {seen:?}"));
+    assert!(opened.starts_with("oakdb: 127.0.0.1:"), "{opened}");
+}
+
+/// Runs `command` with its soft limit on open files set to `soft` (and the
+/// hard limit to `hard`, if given), as a shell's `ulimit -n` would.
+fn with_fd_limit(command: &mut Command, soft: u64, hard: Option<u64>) -> &mut Command {
+    // SAFETY: the closure runs in the child between fork and exec and only
+    // calls getrlimit and setrlimit, which are async-signal-safe.
+    unsafe {
+        command.pre_exec(move || {
+            let mut limit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            limit.rlim_cur = soft as libc::rlim_t;
+            if let Some(hard) = hard {
+                limit.rlim_max = hard as libc::rlim_t;
+            }
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        })
+    }
+}
+
+#[test]
+fn a_server_started_with_a_soft_limit_of_256_files_takes_300_clients() {
+    // macOS starts processes at 256; the server must raise it itself
+    // (review S14: on a machine with a high default, nothing else checks
+    // this).
+    oakdb_server::rlimit::raise_fd_limit(2048).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut child = with_fd_limit(
+        oakdb()
+            .args(["serve", "--port", "0", "--data"])
+            .arg(dir.path()),
+        256,
+        None,
+    )
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
+    .spawn()
+    .unwrap();
+    let server = ServerProcess {
+        port: port_of(&first_line(&mut child)),
+        child,
+    };
+
+    let streams: Vec<TcpStream> = (0..300)
+        .map(|i| {
+            let mut s = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+            s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            write_frame(&mut s, &Request::Hello { version: VERSION }.encode()).unwrap();
+            let ready = read_frame(&mut s)
+                .unwrap_or_else(|e| panic!("client {i}: {e}"))
+                .unwrap_or_else(|| panic!("client {i}: closed"));
+            assert_eq!(
+                Response::decode(ready).unwrap(),
+                Response::Ready { version: VERSION },
+                "client {i}"
+            );
+            s
+        })
+        .collect();
+    assert_eq!(streams.len(), 300);
+}
+
+#[test]
+fn a_server_whose_hard_limit_is_too_low_refuses_to_start_and_says_what_to_do() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = output_within(
+        with_fd_limit(
+            oakdb()
+                .args(["serve", "--port", "0", "--data"])
+                .arg(dir.path()),
+            300,
+            Some(300),
+        ),
+        "",
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let err = text(&out.stderr);
+    assert!(
+        err.contains("ulimit -n") && err.contains("--max-connections"),
+        "{err}"
+    );
 }
