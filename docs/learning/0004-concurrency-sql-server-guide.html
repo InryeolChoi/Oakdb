@@ -1,0 +1,1281 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DB 그림책 2권</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#f7f5f0; --surface:#ffffff; --surface2:#f0ede6; --ink:#1d1b18; --muted:#6b665d; --line:#ddd7cc;
+  --oak:#8a5a2b; --oak-soft:#f3e7d8; --leaf:#2f7d4f; --leaf-soft:#e2f1e7; --inner:#3b5ea8; --inner-soft:#e3eaf8;
+  --warn:#b8461f; --warn-soft:#fbe6dc; --ok:#2f7d4f; --hl:#e0a21a; --hl-soft:#fdf1d2; --hole:#c9c2b4; --violet:#7a4fb0; --violet-soft:#efe6f8;
+  --shadow:0 1px 2px rgba(0,0,0,.05),0 4px 16px rgba(0,0,0,.05);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#151412; --surface:#1f1d1a; --surface2:#2a2723; --ink:#eeeae2; --muted:#a39d92; --line:#3a3631;
+    --oak:#d9a066; --oak-soft:#3a2c1e; --leaf:#6fcf97; --leaf-soft:#1d3527; --inner:#8fb0f0; --inner-soft:#1f2a42;
+    --warn:#f08a65; --warn-soft:#3f2219; --ok:#6fcf97; --hl:#f2c14e; --hl-soft:#3d3218; --hole:#5a544b; --violet:#c3a1ef; --violet-soft:#2e2340;
+    --shadow:0 1px 2px rgba(0,0,0,.3),0 4px 16px rgba(0,0,0,.25);
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#151412; --surface:#1f1d1a; --surface2:#2a2723; --ink:#eeeae2; --muted:#a39d92; --line:#3a3631;
+  --oak:#d9a066; --oak-soft:#3a2c1e; --leaf:#6fcf97; --leaf-soft:#1d3527; --inner:#8fb0f0; --inner-soft:#1f2a42;
+  --warn:#f08a65; --warn-soft:#3f2219; --ok:#6fcf97; --hl:#f2c14e; --hl-soft:#3d3218; --hole:#5a544b; --violet:#c3a1ef; --violet-soft:#2e2340;
+  --shadow:0 1px 2px rgba(0,0,0,.3),0 4px 16px rgba(0,0,0,.25);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:"Noto Sans KR",system-ui,sans-serif;line-height:1.75;font-size:16px}
+code,.mono{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:.88em}
+code{background:var(--surface2);padding:1px 6px;border-radius:5px}
+.wrap{max-width:1000px;margin:0 auto;padding:0 16px}
+a{color:var(--oak)}
+.hero{padding:64px 0 36px;position:relative;overflow:hidden}
+.hero h1{font-size:clamp(32px,5.4vw,54px);line-height:1.15;margin:10px 0 14px;font-weight:900;letter-spacing:-.02em}
+.hero .lead{font-size:18px;color:var(--muted);max-width:700px}
+.eyebrow{color:var(--oak);font-weight:700;letter-spacing:.08em;font-size:13px}
+.parts{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:26px}
+@media (max-width:760px){.parts{grid-template-columns:1fr 1fr}}
+.parts a{display:block;text-decoration:none;color:inherit;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px;transition:transform .2s,border-color .2s}
+.parts a:hover{transform:translateY(-3px);border-color:var(--oak)}
+.parts .pn{font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--oak);font-weight:600}
+.parts .pt{font-weight:700;font-size:16px}
+.parts .pd{font-size:13px;color:var(--muted);line-height:1.5}
+nav.toc{position:sticky;top:0;z-index:30;background:color-mix(in srgb,var(--bg) 90%,transparent);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+nav.toc .wrap{display:flex;gap:6px;overflow-x:auto;padding-top:9px;padding-bottom:9px;scrollbar-width:none}
+nav.toc a{flex:none;text-decoration:none;color:var(--muted);font-size:13px;padding:3px 10px;border-radius:99px;border:1px solid var(--line);background:var(--surface)}
+nav.toc a.part{color:var(--oak);font-weight:700;border-color:var(--oak)}
+.partbanner{padding:70px 0 20px;text-align:left}
+.partbanner .num{font-family:"JetBrains Mono",monospace;color:var(--oak);font-weight:600;font-size:14px}
+.partbanner h2{font-size:clamp(28px,4.5vw,42px);margin:4px 0;font-weight:900;letter-spacing:-.01em}
+.partbanner p{color:var(--muted);max-width:720px}
+section.ch{padding:34px 0 40px;border-bottom:1px dashed var(--line)}
+.ch h3{font-size:clamp(21px,3vw,27px);margin:0 0 6px;line-height:1.35}
+.chno{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:12px;font-weight:600;padding:2px 9px;border-radius:99px;background:var(--oak-soft);color:var(--oak);margin-bottom:8px}
+h4{font-size:17px;margin:22px 0 6px}
+p{margin:8px 0}
+.small{font-size:13px;color:var(--muted)}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:18px;box-shadow:var(--shadow);margin:16px 0}
+.analogy{border-left:4px solid var(--oak);background:var(--oak-soft);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+.analogy b:first-child{color:var(--oak)}
+.term{border-left:4px solid var(--inner);background:var(--inner-soft);padding:10px 16px;border-radius:0 10px 10px 0;margin:14px 0;font-size:15px}
+.term b:first-child{color:var(--inner)}
+.warnbox{border-left:4px solid var(--warn);background:var(--warn-soft);padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+@media (max-width:760px){.grid2,.grid3{grid-template-columns:1fr}}
+button{font:inherit;font-size:14px;border:1px solid var(--line);background:var(--surface);color:var(--ink);padding:6px 13px;border-radius:9px;cursor:pointer;transition:border-color .15s,background .15s}
+button:hover{border-color:var(--oak)}
+button.primary{background:var(--oak);color:#fff;border-color:var(--oak)}
+:root[data-theme="dark"] button.primary{color:#1a120a}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]) button.primary{color:#1a120a}}
+button.danger{background:var(--warn);border-color:var(--warn);color:#fff}
+button:disabled{opacity:.4;cursor:default}
+.segctl{display:inline-flex;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.segctl button{border:none;border-radius:0;border-right:1px solid var(--line)}
+.segctl button:last-child{border-right:none}
+.segctl button.on{background:var(--ink);color:var(--bg)}
+input,select{font:inherit;font-size:14px;padding:5px 8px;border-radius:8px;border:1px solid var(--line);background:var(--surface);color:var(--ink)}
+input[type=number]{width:72px}
+input[type=range]{accent-color:var(--oak)}
+.controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:10px 0}
+table{border-collapse:collapse;width:100%;font-size:14px;margin:10px 0}
+th,td{border-bottom:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
+th{color:var(--muted);font-weight:500;font-size:13px}
+.tablewrap{overflow-x:auto}
+.log{font-size:14px;min-height:26px;margin-top:10px;padding:9px 13px;border-radius:9px;background:var(--surface2);transition:background .3s}
+.log.err{background:var(--warn-soft);color:var(--warn)}
+.log.good{background:var(--leaf-soft);color:var(--leaf)}
+.theme-toggle{position:fixed;right:14px;bottom:14px;z-index:40;border-radius:99px;box-shadow:var(--shadow)}
+.badge{display:inline-block;font-size:11px;font-weight:700;padding:1px 8px;border-radius:99px;white-space:nowrap}
+.b-done{background:var(--leaf-soft);color:var(--leaf)}
+.b-part{background:var(--hl-soft);color:var(--oak)}
+.b-todo{background:var(--surface2);color:var(--muted)}
+.reveal{opacity:0;transform:translateY(18px);transition:opacity .6s,transform .6s}
+.reveal.in{opacity:1;transform:none}
+@media (prefers-reduced-motion: reduce){.reveal{opacity:1;transform:none}}
+
+/* hero animation */
+.hero-tree{position:absolute;right:-20px;top:30px;width:340px;opacity:.9;pointer-events:none}
+@media (max-width:900px){.hero-tree{display:none}}
+.hero-tree .n{animation:pop .6s backwards}
+@keyframes pop{from{opacity:0;transform:scale(.6)}}
+
+/* 1-1 transfer */
+.accts{display:flex;gap:16px;align-items:center;justify-content:center;flex-wrap:wrap;margin:14px 0}
+.acct{width:150px;border-radius:14px;border:2px solid var(--line);background:var(--surface);padding:12px;text-align:center;transition:all .3s}
+.acct .nm{font-size:13px;color:var(--muted)}
+.acct .v{font-size:30px;font-weight:900;font-family:"JetBrains Mono",monospace}
+.acct.flash{border-color:var(--hl);box-shadow:0 0 0 4px var(--hl-soft)}
+.arrowmoney{font-size:26px;color:var(--muted)}
+.memo{min-width:180px;min-height:84px;border:2px dashed var(--violet);border-radius:12px;padding:8px 12px;background:var(--violet-soft);font-size:13px;font-family:"JetBrains Mono",monospace;color:var(--violet)}
+.memo .t{font-family:"Noto Sans KR",sans-serif;font-weight:700;font-size:12px}
+.total{font-size:14px;text-align:center}
+.acid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:10px}
+@media (max-width:760px){.acid{grid-template-columns:1fr 1fr}}
+.acid div{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px;transition:transform .2s}
+.acid div:hover{transform:translateY(-3px)}
+.acid .L{font-size:26px;font-weight:900;color:var(--oak);font-family:"JetBrains Mono",monospace;line-height:1}
+.acid .n{font-weight:700;font-size:14px;margin-top:4px}
+.acid .d{font-size:12.5px;color:var(--muted);line-height:1.5}
+
+/* 1-2 layers */
+.stackwrap{display:grid;grid-template-columns:1.1fr 1fr;gap:16px}
+@media (max-width:760px){.stackwrap{grid-template-columns:1fr}}
+.stack{position:relative;display:flex;flex-direction:column;gap:6px}
+.lay{position:relative;border:1.5px solid var(--line);border-radius:10px;padding:9px 12px 9px 40px;background:var(--surface);transition:all .3s;font-size:14px}
+.lay .ln{font-weight:700}
+.lay .ld{font-size:12px;color:var(--muted)}
+.lay .badge{position:absolute;right:10px;top:10px}
+.lay.on{border-color:var(--oak);background:var(--oak-soft);transform:translateX(6px)}
+.lay .ic{position:absolute;left:11px;top:10px;font-size:16px}
+.token{position:absolute;left:-12px;width:18px;height:18px;border-radius:50%;background:var(--hl);box-shadow:0 0 0 4px var(--hl-soft),0 0 14px var(--hl);transition:top .55s cubic-bezier(.5,0,.3,1);z-index:3}
+.trace{font-size:13.5px;display:flex;flex-direction:column;gap:6px;max-height:430px;overflow:auto}
+.trace div{background:var(--surface2);border-radius:8px;padding:7px 10px;animation:slidein .35s}
+.trace div b{color:var(--oak)}
+@keyframes slidein{from{opacity:0;transform:translateX(12px)}}
+
+/* 1-3 latency */
+.lat{display:flex;flex-direction:column;gap:12px}
+.latrow{display:grid;grid-template-columns:190px 1fr 140px;gap:10px;align-items:center;font-size:14px}
+.latrow .track{height:24px;background:var(--surface2);border-radius:6px;overflow:hidden;position:relative}
+.latrow .fill{height:100%;width:0;border-radius:6px;transition:width 1.4s cubic-bezier(.3,.7,.3,1)}
+.latrow .hum{font-weight:700;font-size:13px}
+@media (max-width:620px){.latrow{grid-template-columns:110px 1fr 90px;font-size:12px}}
+.blocks{display:grid;grid-template-columns:repeat(8,1fr);gap:6px;margin-top:10px}
+.blk{display:grid;grid-template-columns:repeat(4,1fr);gap:2px;padding:4px;border-radius:7px;border:1.5px solid var(--line);transition:all .3s}
+.blk.on{border-color:var(--oak);background:var(--oak-soft);transform:scale(1.06)}
+.blk i{display:block;aspect-ratio:1;border-radius:2px;background:var(--surface2);cursor:pointer}
+.blk i:hover{background:var(--hl)}
+.blk i.pick{background:var(--warn)}
+@media (max-width:620px){.blocks{grid-template-columns:repeat(4,1fr)}}
+
+/* 1-4 search */
+.arr{display:grid;grid-template-columns:repeat(16,1fr);gap:3px;margin:12px 0}
+.arr .c{font-family:"JetBrains Mono",monospace;font-size:11px;text-align:center;padding:5px 0;border-radius:5px;background:var(--surface2);transition:background .15s,transform .15s;color:var(--muted)}
+.arr .c.seen{background:var(--hole);color:var(--ink)}
+.arr .c.range{background:var(--inner-soft);color:var(--inner)}
+.arr .c.found{background:var(--leaf);color:#fff;transform:scale(1.15)}
+.arr .c.now{background:var(--hl);color:#3a2a00}
+@media (max-width:620px){.arr{grid-template-columns:repeat(8,1fr)}}
+.bigcount{display:flex;gap:16px;flex-wrap:wrap}
+.bigcount div{flex:1;min-width:170px;background:var(--surface2);border-radius:12px;padding:12px}
+.bigcount .v{font-size:28px;font-weight:900;font-family:"JetBrains Mono",monospace}
+.bigcount .k{font-size:13px;color:var(--muted)}
+
+/* 1-5 btree vs lsm */
+.pagesgrid{display:grid;grid-template-columns:repeat(6,1fr);gap:5px}
+.pagesgrid div{height:34px;border-radius:6px;background:var(--leaf-soft);border:1.5px solid var(--leaf);font-size:10px;display:flex;align-items:center;justify-content:center;font-family:"JetBrains Mono",monospace;color:var(--leaf);transition:all .25s}
+.pagesgrid div.hit{background:var(--hl);border-color:var(--hl);color:#3a2a00;transform:scale(1.1)}
+.lsm .lvl{display:flex;gap:5px;align-items:center;min-height:38px;margin:5px 0;flex-wrap:wrap}
+.lsm .lvl .lb{width:58px;font-size:12px;color:var(--muted)}
+.lsm .file{font-family:"JetBrains Mono",monospace;font-size:10.5px;padding:4px 7px;border-radius:6px;background:var(--inner-soft);border:1.5px solid var(--inner);color:var(--inner);animation:pop .4s}
+.lsm .mem{background:var(--violet-soft);border-color:var(--violet);color:var(--violet)}
+.lsm .file.merge{background:var(--hl);border-color:var(--hl);color:#3a2a00}
+
+/* timeline lanes */
+.lanes{display:grid;grid-template-columns:1fr 120px 1fr;gap:6px 10px;align-items:center}
+.lanes .hd{font-weight:700;text-align:center;font-size:14px}
+.lanes .ev{font-size:13.5px;padding:7px 10px;border-radius:9px;background:var(--surface2);animation:slidein .35s}
+.lanes .ev.bad{background:var(--warn-soft);color:var(--warn)}
+.lanes .ev.good{background:var(--leaf-soft);color:var(--leaf)}
+.lanes .ev.wait{background:repeating-linear-gradient(45deg,var(--surface2),var(--surface2) 6px,transparent 6px,transparent 12px);color:var(--muted)}
+.lanes .mid{text-align:center;font-family:"JetBrains Mono",monospace;font-size:13px;font-weight:700;padding:6px;border-radius:9px;border:1.5px solid var(--line);background:var(--surface)}
+.lanes .empty{min-height:1px}
+@media (max-width:620px){.lanes{grid-template-columns:1fr 70px 1fr}.lanes .ev{font-size:12px}}
+
+/* WAL */
+.walgrid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
+@media (max-width:760px){.walgrid{grid-template-columns:1fr}}
+.box{border:1.5px solid var(--line);border-radius:12px;padding:10px 12px;background:var(--surface);min-height:130px;transition:all .3s}
+.box .bt{font-size:12px;font-weight:700;color:var(--muted);margin-bottom:6px}
+.box.ram{border-style:dashed}
+.rec{font-family:"JetBrains Mono",monospace;font-size:12px;padding:4px 8px;border-radius:6px;margin:3px 0;background:var(--inner-soft);color:var(--inner);animation:pop .35s;transition:all .3s}
+.rec.commit{background:var(--leaf-soft);color:var(--leaf);font-weight:700}
+.rec.volatile{border:1.5px dashed currentColor;opacity:.75}
+.rec.gone{text-decoration:line-through;opacity:.3}
+.rec.replay{background:var(--hl);color:#3a2a00}
+.rec.meta{background:var(--violet-soft);color:var(--violet)}
+.rec.torn{background:var(--warn-soft);color:var(--warn)}
+.stamp{display:inline-block;font-weight:900;color:var(--warn);border:3px solid var(--warn);border-radius:8px;padding:0 8px;transform:rotate(-8deg);animation:stamp .4s}
+@keyframes stamp{from{transform:scale(2.4) rotate(-8deg);opacity:0}}
+.stepdots{display:flex;gap:5px;flex-wrap:wrap;margin:8px 0}
+.stepdots span{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-family:"JetBrains Mono",monospace;background:var(--surface2);color:var(--muted);transition:all .3s}
+.stepdots span.on{background:var(--oak);color:#fff}
+
+/* flip cards */
+.flips{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px}
+.flip{perspective:1000px;height:250px;cursor:pointer}
+.flip .in{position:relative;width:100%;height:100%;transition:transform .6s;transform-style:preserve-3d}
+.flip.on .in{transform:rotateY(180deg)}
+.flip .fr,.flip .bk{position:absolute;inset:0;backface-visibility:hidden;-webkit-backface-visibility:hidden;border-radius:14px;padding:14px 16px;border:1px solid var(--line);overflow:auto}
+.flip .fr{background:var(--surface);display:flex;flex-direction:column;justify-content:space-between}
+.flip .fr .q{font-size:17px;font-weight:700;line-height:1.45}
+.flip .fr .src{font-size:12px;color:var(--oak);font-family:"JetBrains Mono",monospace}
+.flip .fr .hint{font-size:12px;color:var(--muted)}
+.flip .fr .ico{font-size:30px}
+.flip .bk{transform:rotateY(180deg);background:var(--oak-soft);font-size:13.5px;line-height:1.6}
+.flip .bk .a{font-weight:900;font-size:16px;color:var(--oak);margin-bottom:4px}
+.flip .bk .no{color:var(--muted);font-size:12.5px;margin-top:6px}
+
+/* page sim */
+.pagebar{position:relative;height:64px;border-radius:8px;overflow:hidden;border:1px solid var(--line);background:var(--surface2);display:flex}
+.seg{height:100%;display:flex;align-items:center;justify-content:center;font-size:11px;overflow:hidden;white-space:nowrap;border-right:1px solid rgba(0,0,0,.12);transition:all .35s}
+.seg.hdr{background:var(--ink);color:var(--bg)}
+.seg.slots{background:var(--inner);color:#fff}
+.seg.free{background:repeating-linear-gradient(90deg,var(--surface),var(--surface) 6px,var(--surface2) 6px,var(--surface2) 12px);color:var(--muted)}
+.seg.cell{background:var(--leaf);color:#fff}
+.seg.cell.new{background:var(--hl);color:#3a2a00}
+.seg.hole{background:repeating-linear-gradient(45deg,var(--hole),var(--hole) 4px,transparent 4px,transparent 8px);color:var(--muted)}
+.pagescale{display:flex;justify-content:space-between;font-size:11px;color:var(--muted);font-family:"JetBrains Mono",monospace;margin-top:3px}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-top:6px}
+.legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:4px;vertical-align:-2px;border:1.5px solid}
+.stats{display:flex;flex-wrap:wrap;gap:16px;margin-top:8px;font-size:13px}
+.stats b{font-family:"JetBrains Mono",monospace}
+
+/* tree */
+.treebox{position:relative;overflow-x:auto;overflow-y:hidden;border:1px solid var(--line);border-radius:12px;background:var(--surface2);padding:20px 16px 16px;min-height:150px}
+.treecanvas{position:relative}
+.treecanvas svg{position:absolute;left:0;top:0;pointer-events:none;overflow:visible}
+.node{position:absolute;display:flex;border-radius:7px;overflow:hidden;border:1.5px solid;font-family:"JetBrains Mono",monospace;font-size:12px;height:30px;transition:left .35s,top .35s,box-shadow .2s}
+.node.lf{border-color:var(--leaf);background:var(--leaf-soft)}
+.node.in{border-color:var(--inner);background:var(--inner-soft)}
+.node .k{width:30px;display:flex;align-items:center;justify-content:center;border-right:1px solid color-mix(in srgb,currentColor 18%,transparent)}
+.node .k:last-child{border-right:none}
+.node.lf .k{color:var(--leaf)}.node.in .k{color:var(--inner)}
+.node .k.empty{color:var(--muted);width:40px;font-size:11px}
+.node.fresh{box-shadow:0 0 0 3px var(--hl)}
+.node.visit{box-shadow:0 0 0 3px var(--oak)}
+.node .k.hit{background:var(--hl);color:#3a2a00 !important;font-weight:600}
+.node .k.cur{background:var(--oak);color:#fff !important}
+.events{font-size:13.5px;margin-top:10px;max-height:170px;overflow-y:auto;border:1px solid var(--line);border-radius:10px;background:var(--surface)}
+.events div{padding:6px 12px;border-bottom:1px solid var(--line)}
+.events div:first-child{background:var(--hl-soft)}
+.events .grow{color:var(--inner);font-weight:700}.events .shrink{color:var(--warn);font-weight:700}
+.scanout{display:flex;gap:4px;flex-wrap:wrap;margin-top:8px;min-height:30px}
+.scanout span{font-family:"JetBrains Mono",monospace;font-size:13px;padding:2px 8px;border-radius:5px;background:var(--hl-soft);border:1px solid var(--hl);animation:pop .3s}
+
+/* model test */
+.mt{font-family:"JetBrains Mono",monospace;font-size:12.5px}
+.mt tr{animation:slidein .3s}
+.mt td.ok{color:var(--leaf);font-weight:700}.mt td.bad{color:var(--warn);font-weight:700}
+.mt tr.badrow{background:var(--warn-soft)}
+
+/* gantt */
+.gantt{display:flex;flex-direction:column;gap:5px;position:relative}
+.grow2{display:grid;grid-template-columns:70px 1fr;gap:8px;align-items:center}
+.grow2 .lb{font-size:12px;color:var(--muted);text-align:right}
+.gtrack{position:relative;height:22px;background:var(--surface2);border-radius:5px;overflow:hidden}
+.gseg{position:absolute;top:0;height:100%;font-size:10px;display:flex;align-items:center;justify-content:center;color:#fff;overflow:hidden;white-space:nowrap}
+.gseg.think{background:var(--inner)}
+.gseg.wait{background:repeating-linear-gradient(45deg,var(--hole),var(--hole) 4px,transparent 4px,transparent 8px)}
+.gseg.sync{background:var(--oak)}
+.gseg.sync.b1{background:var(--oak)}.gseg.sync.b2{background:var(--violet)}.gseg.sync.b3{background:var(--warn)}.gseg.sync.b0{background:var(--leaf)}
+.curtain{position:absolute;top:0;right:0;bottom:0;background:var(--surface);transition:width 2.6s linear;z-index:2}
+.gtitle{display:flex;justify-content:space-between;align-items:baseline;margin:14px 0 6px;flex-wrap:wrap;gap:6px}
+.gtitle b{font-size:15px}
+.gtime{font-family:"JetBrains Mono",monospace;font-weight:700;font-size:15px}
+.gaxis{display:grid;grid-template-columns:70px 1fr;gap:8px;font-size:11px;color:var(--muted);font-family:"JetBrains Mono",monospace}
+
+/* frame bytes */
+.bytes{display:flex;flex-wrap:wrap;gap:3px;margin-top:10px}
+.byte{display:flex;flex-direction:column;align-items:center;font-family:"JetBrains Mono",monospace;font-size:11.5px;padding:3px 4px;border-radius:5px;min-width:30px;animation:pop .25s backwards}
+.byte small{font-size:10px;opacity:.75}
+.byte.len{background:var(--inner-soft);color:var(--inner)}
+.byte.cmd{background:var(--hl-soft);color:var(--oak)}
+.byte.dat{background:var(--leaf-soft);color:var(--leaf)}
+
+/* roadmap */
+.roadtrack{position:relative;margin:20px 0 10px;padding:30px 0 10px;overflow-x:auto}
+.rail{position:relative;min-width:720px;height:150px}
+.rail .line{position:absolute;left:30px;right:30px;top:40px;height:6px;border-radius:3px;background:var(--surface2)}
+.rail .done{position:absolute;left:30px;top:40px;height:6px;border-radius:3px;background:var(--leaf);width:0;transition:width 2s cubic-bezier(.3,.7,.3,1)}
+.station{position:absolute;top:24px;width:150px;margin-left:-75px;text-align:center;cursor:pointer}
+.station .dot{width:38px;height:38px;border-radius:50%;margin:0 auto;border:4px solid var(--surface2);background:var(--surface);display:flex;align-items:center;justify-content:center;font-size:17px;transition:all .3s}
+.station.past .dot{border-color:var(--leaf)}
+.station.on .dot{border-color:var(--oak);transform:scale(1.18);box-shadow:0 0 0 5px var(--oak-soft)}
+.station .nm{font-weight:700;font-size:14px;margin-top:6px}
+.station .rg{font-size:11px;color:var(--muted);font-family:"JetBrains Mono",monospace}
+.train{position:absolute;top:-4px;font-size:26px;margin-left:-14px;transition:left 2s cubic-bezier(.3,.7,.3,1)}
+
+/* canvas */
+canvas{width:100%;display:block;border-radius:12px;background:var(--surface2)}
+.counter{display:flex;gap:16px;flex-wrap:wrap;margin-top:8px}
+.counter div{background:var(--surface2);border-radius:10px;padding:8px 12px;min-width:140px}
+.counter .v{font-family:"JetBrains Mono",monospace;font-size:22px;font-weight:900}
+.counter .k{font-size:12px;color:var(--muted)}
+
+/* key encode */
+.keyrows{display:flex;flex-direction:column;gap:4px;font-family:"JetBrains Mono",monospace;font-size:12.5px}
+.keyrows div{display:flex;gap:8px;align-items:center;padding:4px 8px;border-radius:6px;background:var(--surface2);animation:slidein .3s}
+.keyrows .tb{color:var(--violet);font-weight:700}
+.keyrows .pk{color:var(--leaf)}
+.keyrows .bad{background:var(--warn-soft)}
+.keyrows .lbl{margin-left:auto;font-family:"Noto Sans KR",sans-serif;font-size:12px;color:var(--muted)}
+
+/* 2-5 overflow file strip */
+.offile{display:flex;flex-wrap:wrap;gap:4px;margin:6px 0;min-height:52px}
+.ofp{width:52px;height:52px;border-radius:8px;border:2px solid var(--line);display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:11px;font-family:"JetBrains Mono",monospace;transition:all .3s;line-height:1.2}
+.ofp small{font-size:9px;opacity:.75}
+.ofp.meta{background:var(--violet-soft);border-color:var(--violet);color:var(--violet)}
+.ofp.leaf{background:var(--leaf-soft);border-color:var(--leaf);color:var(--leaf)}
+.ofp.vA{background:#e8775a;border-color:#e8775a;color:#fff}
+.ofp.vB{background:#3b8fd0;border-color:#3b8fd0;color:#fff}
+.ofp.vC{background:#c28a12;border-color:#c28a12;color:#fff}
+.ofp.free{background:repeating-linear-gradient(45deg,var(--surface2),var(--surface2) 5px,transparent 5px,transparent 10px);color:var(--muted);border-style:dashed}
+.ofp.flash{transform:scale(1.15);box-shadow:0 0 0 3px var(--hl)}
+.ofp.new{animation:pop .4s}
+
+/* 2-8 crash experiment */
+.cxbar{display:flex;height:34px;border-radius:8px;overflow:hidden;margin:8px 0;font-size:12px;font-weight:700;color:#fff}
+.cxbar div{display:flex;align-items:center;justify-content:center;white-space:nowrap;overflow:hidden;cursor:pointer;transition:filter .2s}
+.cxbar div:hover{filter:brightness(1.1)}
+.cxcards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin:10px 0}
+.cxcard{border:2px solid var(--line);border-radius:10px;padding:8px 10px;cursor:pointer;background:var(--surface);font-size:13px}
+.cxcard.on{border-color:var(--oak);box-shadow:0 0 0 3px var(--hl)}
+.cxcard b{display:block;font-size:14px}
+.cxpages{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}
+.waltape{display:flex;flex-wrap:wrap;gap:4px;min-height:44px;padding:8px;border:1px dashed var(--line);border-radius:10px;margin:8px 0;background:var(--surface2)}
+.waltape span{padding:5px 8px;border-radius:7px;font-family:"JetBrains Mono",monospace;font-size:12px;background:var(--leaf-soft);color:var(--leaf)}
+.waltape span.stamp{background:var(--oak);color:#fff;font-weight:700}
+.waltape span.junk{background:#fbe3d6;color:#b4552d;text-decoration:line-through}
+.waltape span.cut{opacity:.35}
+.cxpages span{padding:6px 10px;border-radius:8px;font-family:"JetBrains Mono",monospace;font-size:12px}
+.cxpages .kept{background:var(--leaf-soft);color:var(--leaf)}
+.cxpages .lost{background:var(--surface2);color:var(--muted);text-decoration:line-through}
+.cxpages .torn{background:#fbe3d6;color:#b4552d}
+.cxpages .none{background:var(--surface2);color:var(--muted)}
+
+/* 2-7 simulated disk */
+.sdrow{display:grid;grid-template-columns:110px repeat(4,1fr);gap:8px;align-items:center;margin:6px 0}
+@media (max-width:620px){.sdrow{grid-template-columns:70px repeat(4,1fr)}}
+.sdlbl{font-size:13px;font-weight:700;color:var(--muted)}
+.sdpg{border:2px solid var(--line);border-radius:8px;padding:4px;background:var(--surface);cursor:default}
+.sdpg.click{cursor:pointer}.sdpg.click:hover{border-color:var(--oak)}
+.sdpg .t{font-size:11px;color:var(--muted);text-align:center}
+.sdsec{display:grid;grid-template-columns:repeat(8,1fr);gap:2px;margin-top:3px}
+.sdsec i{display:block;height:18px;border-radius:2px;background:var(--surface2);transition:background .3s}
+.sdsec i.v1{background:#e8775a}.sdsec i.v2{background:#3b8fd0}.sdsec i.v3{background:#c28a12}.sdsec i.v4{background:#4a9b5f}.sdsec i.v5{background:#9a5fc2}
+.sdgone{opacity:.25;filter:grayscale(1)}
+.sdwait{display:flex;flex-wrap:wrap;gap:6px;min-height:28px;margin:6px 0}
+.sdwait span{font-size:12px;padding:3px 8px;border-radius:999px;background:var(--surface2)}
+.sdwait span.kept{background:var(--leaf-soft);color:var(--leaf)}
+.sdwait span.lost{background:var(--surface2);text-decoration:line-through;color:var(--muted)}
+.sdwait span.torn{background:#fbe3d6;color:#b4552d}
+
+/* 2-6 checksum */
+.ckpage{border:2px solid var(--line);border-radius:12px;padding:10px;background:var(--surface)}
+.ckhead{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:6px 10px;border-radius:8px;background:var(--violet-soft);color:var(--violet);font-size:13px;margin-bottom:8px}
+.ckhead b{font-size:15px}
+.ckbytes{display:grid;grid-template-columns:repeat(16,1fr);gap:3px}
+@media (max-width:620px){.ckbytes{grid-template-columns:repeat(8,1fr)}}
+.ckb{font-family:"JetBrains Mono",monospace;font-size:12px;text-align:center;padding:6px 0;border-radius:5px;background:var(--leaf-soft);color:var(--leaf);cursor:pointer;transition:all .2s;border:1.5px solid transparent}
+.ckb:hover{border-color:var(--oak)}
+.ckb.flip{background:var(--warn);color:#fff;transform:scale(1.1)}
+.ckcalc{display:grid;grid-template-columns:1fr auto 1fr;gap:10px;align-items:center;margin-top:10px;font-size:14px}
+.ckcalc .v{font-family:"JetBrains Mono",monospace;font-size:20px;font-weight:900}
+.ckcalc .eq{font-size:26px;font-weight:900;text-align:center}
+.ckcalc .box{min-height:auto}
+
+/* reader questions: add one .qa box per question asked, inside the matching chapter */
+.qa{border:2px dashed var(--violet);background:var(--violet-soft);border-radius:14px;padding:14px 18px;margin:20px 0}
+.qa .qh{font-size:12px;font-weight:700;color:var(--violet);letter-spacing:.03em}
+.qa .qq{font-size:18px;font-weight:700;margin:2px 0 8px}
+.ssdpath{display:flex;align-items:stretch;gap:6px;flex-wrap:wrap;margin:10px 0}
+.ssdpath .sa{align-self:center;color:var(--muted)}
+.sp{flex:1;min-width:120px;border:2px solid var(--line);border-radius:10px;padding:8px 10px;background:var(--surface);transition:all .35s;text-align:center}
+.sp .spn{font-weight:700;font-size:14px}.sp .spd{font-size:11.5px;color:var(--muted)}
+.sp.safe{border-style:solid}
+.sp.has{border-color:var(--hl);background:var(--hl-soft);box-shadow:0 0 0 3px var(--hl-soft)}
+.sp.lost{border-color:var(--warn);background:var(--warn-soft);opacity:.6}
+.sp.kept{border-color:var(--leaf);background:var(--leaf-soft)}
+.gloss{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:10px}
+.gloss div{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:10px 14px;font-size:14px}
+.gloss b{color:var(--oak)}
+footer{padding:50px 0 90px;color:var(--muted);font-size:13px}
+svg text{font-family:"Noto Sans KR",sans-serif}
+
+/* ===== 2권 전용 ===== */
+.hero2{padding:56px 0 30px}
+.parts3{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:24px}
+.parts3 a{display:block;text-decoration:none;color:inherit;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px 16px;box-shadow:var(--shadow);transition:transform .2s}
+.parts3 a:hover{transform:translateY(-2px)}
+.parts3 .pn{font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--oak);font-weight:700}
+.parts3 .pt{font-weight:900;font-size:18px}
+.parts3 .pd{font-size:13px;color:var(--muted)}
+@media (max-width:760px){.parts3{grid-template-columns:1fr}}
+.thr{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.thr .tc{border:1.5px solid var(--line);border-radius:12px;padding:10px 14px;background:var(--surface)}
+.thr .tc.wait{opacity:.55}
+.thr .tc h4{margin:0 0 6px;font-size:15px}
+.thr ol{margin:0;padding-left:20px;font-size:14px}
+.thr li.done{color:var(--muted);text-decoration:line-through}
+.thr li.next{font-weight:700;color:var(--oak)}
+.shared{display:flex;gap:14px;align-items:center;justify-content:center;margin:12px 0;font-size:15px}
+.shared .v{font-family:"JetBrains Mono",monospace;font-size:30px;font-weight:900;padding:4px 18px;border-radius:12px;background:var(--hl-soft);color:var(--oak);transition:transform .2s}
+.shared .v.bump{transform:scale(1.25)}
+.lockchip{font-size:13px;padding:3px 10px;border-radius:99px;background:var(--surface2)}
+.lockchip.held{background:var(--warn-soft);color:var(--warn);font-weight:700}
+.workers{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.wk{border:1.5px solid var(--line);border-radius:12px;padding:8px 10px;background:var(--surface);font-size:13px;text-align:center}
+.wk b{display:block;font-size:15px}
+.wk select{font:inherit;margin:4px 0;padding:2px 6px;border-radius:6px;border:1px solid var(--line);background:var(--surface2);color:var(--ink)}
+.wk .st{font-size:12px;min-height:18px;margin-top:4px}
+.wk.queued{border-color:var(--hl)}
+.wk.ok{border-color:var(--leaf)}
+.wk.bad{border-color:var(--warn)}
+@media (max-width:620px){.workers{grid-template-columns:1fr 1fr}}
+.pipe{display:grid;grid-template-columns:1fr 150px;gap:10px;margin-top:12px;align-items:stretch}
+.queue{min-height:56px;border:2px dashed var(--line);border-radius:12px;padding:8px;display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.letter{font-family:"JetBrains Mono",monospace;font-size:12.5px;padding:5px 9px;border-radius:8px;background:var(--hl-soft);color:var(--oak);animation:pop .25s}
+.letter.ok{background:var(--leaf-soft);color:var(--leaf)}
+.letter.bad{background:var(--warn-soft);color:var(--warn);text-decoration:line-through}
+.desk{border:2px solid var(--oak);border-radius:12px;padding:8px;text-align:center;font-size:13px;background:var(--oak-soft)}
+.desk .dn{font-weight:900}
+.desk .ds{font-family:"JetBrains Mono",monospace;font-size:12px;min-height:36px;margin-top:4px}
+@media (max-width:620px){.pipe{grid-template-columns:1fr}}
+.ilv{width:100%;border-collapse:collapse;font-size:14px}
+.ilv td,.ilv th{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left}
+.ilv td.mono{white-space:nowrap}
+.ilv tr.bad td{background:var(--warn-soft)}
+.ilv tr.good td{background:var(--leaf-soft)}
+.ilv tr.off td{opacity:.35}
+.ilv tr.now td{outline:2px solid var(--hl)}
+.op{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:12px;padding:1px 7px;border-radius:6px;margin:1px}
+.op.t1{background:var(--inner-soft);color:var(--inner)}
+.op.t2{background:var(--violet-soft);color:var(--violet)}
+input[type=text],input.txt{font:inherit;font-family:"JetBrains Mono",monospace;font-size:14px;padding:7px 10px;border-radius:9px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);width:100%}
+.toks{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}
+.tk{font-family:"JetBrains Mono",monospace;font-size:12.5px;padding:3px 8px;border-radius:7px;display:flex;flex-direction:column;align-items:center;animation:pop .25s backwards}
+.tk small{font-size:9.5px;opacity:.75;font-family:"Noto Sans KR",sans-serif}
+.tk.kw{background:var(--oak-soft);color:var(--oak);font-weight:600}
+.tk.id{background:var(--inner-soft);color:var(--inner)}
+.tk.num,.tk.str{background:var(--leaf-soft);color:var(--leaf)}
+.tk.sym{background:var(--surface2);color:var(--ink)}
+.tree{margin:6px 0 0;padding-left:0;font-size:13.5px}
+.tree ul{list-style:none;margin:0;padding-left:22px;border-left:1.5px dashed var(--line)}
+.tree>ul{border-left:none;padding-left:0}
+.tree li{margin:4px 0;position:relative}
+.tree ul ul li::before{content:"";position:absolute;left:-22px;top:13px;width:16px;border-top:1.5px dashed var(--line)}
+.nd{display:inline-block;padding:2px 9px;border-radius:8px;font-family:"JetBrains Mono",monospace;font-size:12.5px;border:1.5px solid var(--line);background:var(--surface)}
+.nd.st{border-color:var(--oak);color:var(--oak);font-weight:700}
+.nd.lg{border-color:var(--violet);color:var(--violet);font-weight:700}
+.nd.cmp{border-color:var(--inner);color:var(--inner)}
+.nd.lit{border-color:var(--leaf);color:var(--leaf)}
+.nd .r{font-family:"Noto Sans KR",sans-serif;font-size:11px;color:var(--muted);margin-left:6px}
+.rowsgrid{display:grid;grid-template-columns:repeat(12,1fr);gap:4px;margin-top:10px}
+.rowsgrid div{border-radius:7px;padding:4px 2px;text-align:center;font-family:"JetBrains Mono",monospace;font-size:11px;background:var(--surface2);color:var(--muted);border:1.5px solid transparent;transition:all .3s;line-height:1.35}
+.rowsgrid div small{display:block;font-size:9.5px}
+.rowsgrid div.scan{border-color:var(--inner);color:var(--ink);background:var(--surface)}
+.rowsgrid div.hit{background:var(--leaf);color:#fff;border-color:var(--leaf)}
+@media (max-width:620px){.rowsgrid{grid-template-columns:repeat(6,1fr)}}
+.tt{border-collapse:collapse;font-size:14px;margin:6px auto}
+.tt td,.tt th{border:1px solid var(--line);padding:5px 10px;text-align:center;min-width:56px}
+.tt th{background:var(--surface2)}
+.tt td.on{outline:3px solid var(--hl);outline-offset:-3px;font-weight:900}
+.v-t{color:var(--leaf);font-weight:700}.v-f{color:var(--warn);font-weight:700}.v-n{color:var(--violet);font-weight:700}
+.leafrow{display:flex;gap:6px;flex-wrap:wrap;margin:12px 0;min-height:44px;align-items:center}
+.leafrow span{font-family:"JetBrains Mono",monospace;font-size:14px;padding:6px 12px;border-radius:8px;background:var(--leaf-soft);color:var(--leaf);border:2px solid transparent;transition:all .25s}
+.leafrow span.cur{border-color:var(--hl);background:var(--hl-soft);color:var(--oak)}
+.leafrow span.newk{animation:pop .3s}
+.sess{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.sess .box{border:1.5px solid var(--line);border-radius:12px;padding:10px 14px;background:var(--surface)}
+.sess .box h4{margin:0 0 4px;font-size:15px}
+.sess .mode{font-size:13px;padding:2px 10px;border-radius:99px;display:inline-block}
+.sess .mode.auto{background:var(--surface2);color:var(--muted)}
+.sess .mode.tx{background:var(--hl-soft);color:var(--oak);font-weight:700}
+.sess .mode.dead{background:var(--warn-soft);color:var(--warn);font-weight:700}
+@media (max-width:620px){.sess{grid-template-columns:1fr}}
+.stream{display:flex;flex-wrap:wrap;gap:2px;margin:8px 0;font-family:"JetBrains Mono",monospace;font-size:12.5px}
+.stream span{padding:3px 4px;border-radius:4px;min-width:14px;text-align:center}
+.stream span.c0{background:var(--inner-soft);color:var(--inner)}
+.stream span.c1{background:var(--violet-soft);color:var(--violet)}
+.stream span.ln{font-weight:900;outline:1.5px solid currentColor}
+.stream span.cut{margin-right:10px}
+.outmsg{font-family:"JetBrains Mono",monospace;font-size:13px;padding:5px 10px;border-radius:8px;margin:4px 0;animation:slidein .3s}
+.outmsg.good{background:var(--leaf-soft);color:var(--leaf)}
+.outmsg.bad{background:var(--warn-soft);color:var(--warn)}
+.clients{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px}
+.cl{border:1.5px solid var(--line);border-radius:12px;padding:8px 10px;font-size:13px;background:var(--surface);transition:all .3s}
+.cl b{display:block}
+.cl .s{font-size:12px;margin-top:4px;min-height:36px}
+.cl.good{border-color:var(--leaf);background:var(--leaf-soft)}
+.cl.bad{border-color:var(--warn);background:var(--warn-soft)}
+.cl.busy{border-color:var(--hl);background:var(--hl-soft)}
+@media (max-width:620px){.clients{grid-template-columns:1fr 1fr}}
+.bars{display:grid;grid-template-columns:120px 1fr 110px;gap:6px 10px;align-items:center;font-size:13.5px;margin-top:10px}
+.bars .tr{height:22px;border-radius:6px;background:var(--surface2);overflow:hidden}
+.bars .fl{height:100%;border-radius:6px;transition:width .4s}
+.bars .n{font-family:"JetBrains Mono",monospace;font-size:13px;text-align:right}
+.books{width:100%;border-collapse:collapse;font-size:14px}
+.books td,.books th{border-bottom:1px solid var(--line);padding:7px 8px;text-align:left;vertical-align:top}
+.books th{font-size:13px;color:var(--muted)}
+.decide{display:inline-block;font-size:11px;font-weight:700;padding:1px 8px;border-radius:99px;background:var(--violet-soft);color:var(--violet);margin-left:4px;vertical-align:middle}
+input[type=range]{accent-color:var(--oak)}
+</style>
+</head>
+<body>
+<button class="theme-toggle" id="themeBtn">🌓 테마</button>
+
+<header class="hero hero2 wrap">
+  <div class="eyebrow">OAKDB · 그림책 2권 · 15번 티켓 들어가기 전에</div>
+  <h1>여러 명이 동시에,<br>말로, 멀리서</h1>
+  <p class="lead">1권(<a href="0003-db-guide.html">DB 그림책</a>)에서는 디스크에 안전하게 저장하는 법을 봤어요. 남은 길은 셋이에요. <b>여러 일꾼이 동시에 일하기</b>(동시성), <b>사람 말(SQL)을 알아듣기</b>(파서), <b>멀리 있는 손님 받기</b>(네트워크 서버). 각 장에는 직접 움직여 보는 그림이 있고, 아직 정하지 않은 것에는 <span class="decide">설계 때 정할 것</span> 표시를 붙였어요.</p>
+  <div class="parts3">
+    <a href="#p1"><div class="pn">PART 1 · 티켓 15~18</div><div class="pt">🔀 동시성</div><div class="pd">스레드, 잠금, 커밋 창구, 그룹 커밋, 동시성 버그 찾기, 벤치마크 읽는 법</div></a>
+    <a href="#p2"><div class="pn">PART 2 · 티켓 19~23</div><div class="pt">🗣️ SQL</div><div class="pd">렉서·파서, 우선순위, WHERE 계획, NULL, UPDATE의 함정, 오류 종류, BEGIN/COMMIT</div></a>
+    <a href="#p3"><div class="pn">PART 3 · 티켓 24~27</div><div class="pt">🌐 네트워크 서버</div><div class="pd">TCP와 길이 머리말, 여러 손님 받기, 끊긴 접속, 정상 종료, 왕복 시간</div></a>
+  </div>
+</header>
+
+<nav class="toc"><div class="wrap">
+  <a class="part" href="#p1">1 동시성</a><a href="#c11">경쟁</a><a href="#c12">RwLock</a><a href="#c13">커밋 창구</a><a href="#c14">OK의 순서</a><a href="#c15">순서 전부 돌리기</a><a href="#c16">이력 검사기</a><a href="#c17">A/B 읽기</a>
+  <a class="part" href="#p2">2 SQL</a><a href="#c21">렉서·파서</a><a href="#c22">우선순위</a><a href="#c23">WHERE 계획</a><a href="#c24">NULL</a><a href="#c25">UPDATE 함정</a><a href="#c26">오류 종류</a><a href="#c27">BEGIN/COMMIT</a>
+  <a class="part" href="#p3">3 서버</a><a href="#c31">TCP</a><a href="#c32">통신 규칙</a><a href="#c33">여러 손님</a><a href="#c34">끊긴 접속</a><a href="#c35">정상 종료</a><a href="#c36">왕복 시간</a>
+  <a class="part" href="#ap">부록</a><a href="#books">읽을 곳</a><a href="#gl">용어</a>
+</div></nav>
+
+<div class="wrap">
+
+<!-- ================= PART 1 ================= -->
+<div class="partbanner" id="p1"><div class="num">PART 1 · 티켓 15~18</div><h2>🔀 동시성: 여러 일꾼, 장부 하나</h2><p>지금 Oakdb는 일꾼이 사실상 한 명이에요. 이제 일꾼(스레드)을 여럿 두되, <b>각자 일은 동시에 하고 장부에 적는 창구만 한 줄</b>로 세워요(ADR 0006). 그러려면 "동시에 하면 왜 틀리는지"부터 눈으로 봐야 해요.</p></div>
+
+<section class="ch reveal" id="c11">
+  <span class="chno">1-1 · 바탕 개념</span>
+  <h3>두 일꾼이 같은 숫자에 1을 더하면, 2가 안 될 수 있다</h3>
+  <div class="analogy"><b>비유</b> 칠판에 적힌 숫자에 1을 더하라고 두 사람에게 시켰어요. 둘 다 칠판을 보고(0), 머릿속으로 더하고(1), 칠판에 써요(1). 두 번 더했는데 칠판에는 1이에요. 한 사람의 일이 <b>사라졌어요</b>.</div>
+  <p><code>count += 1</code>은 한 줄이지만 CPU에게는 <b>읽기 → 더하기 → 쓰기</b> 세 걸음이에요. 아래에서 어느 일꾼이 한 걸음씩 갈지 직접 골라 보세요. 그다음 🔒 잠금을 켜고 다시 해 보세요.</p>
+  <div class="card">
+    <div class="controls">
+      <span class="segctl" id="rcMode"><button data-m="none" class="on">잠금 없음</button><button data-m="lock">🔒 Mutex</button></span>
+      <button class="primary" id="rcT1">T1 한 걸음</button><button class="primary" id="rcT2">T2 한 걸음</button>
+      <button id="rcBad">나쁜 순서 자동 재생</button><button id="rcReset">다시</button>
+    </div>
+    <div class="shared">칠판(공유 변수) <span class="v" id="rcVal">0</span> <span class="lockchip" id="rcLock">🔓 잠금 비어 있음</span></div>
+    <div class="thr" id="rcThr"></div>
+    <div class="log" id="rcLog"></div>
+  </div>
+  <div class="term"><b>경쟁 상태(race condition)</b>: 결과가 일꾼들의 실행 순서에 따라 달라지는 버그예요. <b>Mutex</b>는 "이 칠판은 한 번에 한 명만" 규칙이에요. Java의 <code>synchronized</code> 블록과 같아요. Rust는 여기서 한 걸음 더 가요. 잠금 없이 여러 스레드가 같은 값을 고치는 코드는 <b>컴파일이 안 돼요</b>(<code>Send</code>·<code>Sync</code> 규칙). 그래서 Oakdb의 공유 상태는 <code>Arc&lt;Mutex&lt;…&gt;&gt;</code>처럼 "여럿이 가리키는 상자(Arc) 안의 잠긴 칸(Mutex)" 모양이 돼요.</div>
+</section>
+
+<section class="ch reveal" id="c12">
+  <span class="chno">1-2 · 티켓 15</span>
+  <h3>읽기는 여럿, 쓰기는 혼자: RwLock</h3>
+  <div class="analogy"><b>비유</b> 도서관 열람실이에요. 책을 <b>읽는</b> 사람은 몇 명이 함께 들어가도 괜찮아요. 하지만 책을 <b>고치는</b> 사람이 들어가 있는 동안에는 아무도 들어오면 안 돼요. 읽는 도중에 페이지가 바뀌면 안 되니까요.</div>
+  <p>Mutex는 읽는 사람도 한 명씩만 들여보내요. <b>RwLock</b>(읽기-쓰기 잠금)은 읽는 사람을 함께 들여보내요. 같은 손님(읽기 R, 쓰기 W)이 왔을 때 둘의 대기 시간을 비교해 보세요.</p>
+  <div class="card">
+    <div class="controls">
+      잠금 <span class="segctl" id="rwMode"><button data-m="mutex">Mutex</button><button data-m="rw" class="on">RwLock</button></span>
+      손님 <span class="segctl" id="rwScen"><button data-s="read" class="on">읽기가 많음</button><button data-s="write">쓰기가 많음</button></span>
+    </div>
+    <svg id="rwSvg" viewBox="0 0 760 250" width="100%"></svg>
+    <div class="log" id="rwLog"></div>
+  </div>
+  <p class="small">그림의 규칙: 줄 맨 앞 손님부터 들어가요. 쓰기 손님이 기다리고 있으면 뒤에 온 읽기 손님은 그 뒤에 서요(쓰는 사람이 영영 못 들어가는 일을 막는 규칙). 실제 Rust의 <code>std::sync::RwLock</code>이 누구를 먼저 들여보낼지는 OS마다 달라요.</p>
+  <div class="term"><b>Oakdb에서는</b>: ADR 0006대로 트리 전체를 <code>RwLock</code> 하나로 지켜요. 트랜잭션이 읽을 때는 읽기 잠금, 커밋 담당이 새 트리를 끼울 때만 쓰기 잠금이에요. 그런데 13번(스냅샷 읽기)에서 트랜잭션이 이미 <b>자기 사진(<code>Arc&lt;Tree&gt;</code>)</b>을 들고 있게 됐어요. 그래서 읽는 동안에는 잠금이 거의 필요 없어요. 15번 설계에서 "RwLock이 정말 필요한가, 아니면 사진 바꿔 끼우는 순간만 잠그면 되나"를 다시 볼 거예요. <span class="decide">설계 때 정할 것</span></div>
+</section>
+
+<section class="ch reveal" id="c13">
+  <span class="chno">1-3 · 티켓 15·16</span>
+  <h3>커밋 창구와 그룹 커밋: 편지를 모아 한 번에 부친다</h3>
+  <div class="analogy"><b>비유</b> 은행 창구예요. 손님(트랜잭션)은 각자 자리에서 서류를 <b>동시에</b> 써요. 다 쓰면 창구 앞 바구니에 넣고 기다려요. 창구 직원(커밋 담당 스레드)은 바구니에서 서류를 꺼내 ① 충돌을 검사하고 ② 금고(WAL)에 넣고 ③ 금고 문을 잠가요(sync, 약 3ms). 그다음에야 손님에게 "처리됐어요"라고 말해요.</div>
+  <p>지금 Oakdb의 <code>commit()</code>은 잠금 하나(<code>committed</code>)를 잡은 채로 검사, WAL 쓰기, sync를 모두 해요. 결과는 맞지만 <b>sync 3ms 동안 다른 커밋은 전부 줄을 서요</b>. 15번은 이걸 바구니(대기열)와 창구 직원으로 나누고, 16번은 직원이 <b>바구니에 모인 서류를 한꺼번에</b> 금고에 넣게 해요.</p>
+  <div class="card">
+    <div class="controls">
+      창구 방식 <span class="segctl" id="cqMode"><button data-m="one">한 장씩 (15번)</button><button data-m="group" class="on">모아서 한 번에 (16번 그룹 커밋)</button></span>
+      <button class="primary" id="cqAll">👥 네 명 모두 커밋 요청</button><button id="cqReset">다시</button>
+    </div>
+    <div class="workers" id="cqWorkers"></div>
+    <div class="pipe">
+      <div><div class="small">📥 바구니 (커밋 대기열)</div><div class="queue" id="cqQueue"></div></div>
+      <div class="desk"><div class="dn">🧑‍💼 창구 직원</div><div class="small">커밋 담당 스레드</div><div class="ds" id="cqDesk">쉬는 중</div></div>
+    </div>
+    <div class="counter">
+      <div><div class="k">성공한 커밋</div><div class="v" id="cqOk">0</div></div>
+      <div><div class="k">충돌로 실패</div><div class="v" id="cqBad" style="color:var(--warn)">0</div></div>
+      <div><div class="k">sync 횟수 (금고 잠금)</div><div class="v" id="cqSync">0</div></div>
+      <div><div class="k">커밋 번호 (버전)</div><div class="v" id="cqVer">0</div></div>
+    </div>
+    <div class="log" id="cqLog"></div>
+  </div>
+  <p class="small">각 손님의 키를 바꿔 보세요. 처음에는 T1과 T3가 둘 다 <code>x</code>를 고쳐요. 둘 다 버전 0의 사진에서 출발했으니, 나중에 처리되는 쪽은 충돌로 실패해요(14번에서 만든 first-committer-wins). <b>같은 묶음 안에서도</b> 앞 서류부터 차례로 검사해야 해요. 이게 16번에서 놓치기 쉬운 점이에요.</p>
+  <div class="term"><b>채널(channel)</b>: 스레드 사이의 바구니예요. Rust의 <code>std::sync::mpsc</code>는 "여럿이 넣고(multi-producer) 하나가 꺼내는(single-consumer)" 바구니예요. 손님은 서류와 함께 <b>답장 봉투</b>(한 번만 쓰는 작은 채널)를 넣고 그 봉투만 쳐다보며 기다려요. Java라면 <code>BlockingQueue</code>에 <code>CompletableFuture</code>를 함께 넣는 모양이에요.</div>
+</section>
+
+<section class="ch reveal" id="c14">
+  <span class="chno">1-4 · 티켓 16</span>
+  <h3>"처리됐어요"는 금고를 잠근 다음에만</h3>
+  <p>그룹 커밋은 sync 횟수를 줄여서 빨라요. 하지만 순서는 절대 못 바꿔요. 손님에게 OK를 먼저 보내고 sync를 나중에 하면 어떻게 될까요? 진행 중에 💥 정전을 눌러 보세요.</p>
+  <div class="card">
+    <div class="controls">
+      순서 <span class="segctl" id="okOrd"><button data-o="safe" class="on">기록 → sync → OK (우리 약속)</button><button data-o="fast">기록 → OK → sync (빠르지만…)</button></span>
+      <button class="primary" id="okRun">▶ 커밋</button><button id="okCrash" disabled>💥 정전</button>
+    </div>
+    <div class="stepdots" id="okDots"></div>
+    <div class="log" id="okLog">▶을 누르고, 진행 중에 💥를 눌러 보세요.</div>
+  </div>
+  <div class="term"><b>지속성(durability)의 약속</b>: "OK를 받은 커밋은 정전에도 남는다"(이슈 #2). 그룹 커밋은 이 약속을 지키면서 sync 한 번에 여러 커밋을 싣는 기술이에요. 그래서 16번의 완료 조건에 "응답한 커밋은 정전 실험에서 항상 살아남는다"가 있어요. 1권 2-7의 가짜 디스크로 확인해요.</div>
+</section>
+
+<section class="ch reveal" id="c15">
+  <span class="chno">1-5 · 티켓 17</span>
+  <h3>가능한 순서를 전부 돌려 보기: loom</h3>
+  <div class="analogy"><b>비유</b> 동시성 버그는 "가끔" 나요. 테스트를 백 번 돌려도 운 좋게 안 걸릴 수 있어요. 그래서 운에 맡기지 말고 <b>일어날 수 있는 실행 순서를 하나도 빼지 않고</b> 다 돌려 보는 도구가 있어요. Rust의 <b>loom</b>이에요.</div>
+  <p>1-1의 두 일꾼(T1: 읽기 R1 → 쓰기 W1, T2: R2 → W2)이 섞일 수 있는 순서는 6가지예요. 전부 돌려 보세요.</p>
+  <div class="card">
+    <div class="controls">
+      <span class="segctl" id="lmMode"><button data-m="none" class="on">잠금 없음</button><button data-m="lock">🔒 Mutex</button></span>
+      <button class="primary" id="lmRun">▶ 가능한 순서 전부 돌리기</button>
+    </div>
+    <div class="tablewrap"><table class="ilv" id="lmTab"></table></div>
+    <div class="log" id="lmLog"></div>
+    <div class="controls" style="margin-top:14px">일꾼마다 걸음 수 <input type="range" id="lmSteps" min="1" max="8" value="2"> <b id="lmStepsV" class="mono"></b> · 일꾼 수 <input type="range" id="lmThreads" min="2" max="4" value="2"> <b id="lmThreadsV" class="mono"></b></div>
+    <div class="log" id="lmCount"></div>
+  </div>
+  <div class="term"><b>loom</b>: Mutex, 채널, 원자 변수를 loom의 가짜 버전으로 바꿔 끼우고, 스레드가 번갈아 갈 수 있는 모든 순서를 실제로 실행해요. 순서 수가 폭발하니까 "결과가 같은 순서는 한 번만"처럼 영리하게 줄여요. 17번에서는 <b>커밋 대기열</b>(1-3의 바구니)만 작게 떼어 loom으로 검사해요. 1권 2-7의 가짜 디스크가 "정전 순간을 전부 돌려 보기"였다면, loom은 "스레드 순서를 전부 돌려 보기"예요.</div>
+</section>
+
+<section class="ch reveal" id="c16">
+  <span class="chno">1-6 · 티켓 17</span>
+  <h3>이력 검사기: 기록을 보고 규칙 위반을 찾는다</h3>
+  <p>loom은 작은 부품용이에요. 엔진 전체는 <b>많은 트랜잭션을 마구 돌리고, 누가 무엇을 읽고 썼는지 기록(이력)</b>한 다음, 그 기록이 스냅샷 격리 규칙에 맞는지 검사해요. 17번의 완료 조건은 "일부러 넣은 버그를 검사기가 찾아낸다"예요. 버그를 골라 넣어 보세요.</p>
+  <div class="card">
+    <div class="controls">
+      엔진 상태 <span class="segctl" id="hcBug"><button data-b="ok" class="on">정상</button><button data-b="noconf">버그: 충돌 검사 끔</button><button data-b="latest">버그: 사진 대신 최신 트리 읽기</button></span>
+    </div>
+    <div class="lanes" id="hcLanes"></div>
+    <div class="log" id="hcLog"></div>
+  </div>
+  <div class="term"><b>잃어버린 업데이트(lost update)</b>: 두 트랜잭션이 같은 값을 읽고 둘 다 고쳐 썼는데 하나만 남는 것(1-1과 같은 병). <b>반복 불가능한 읽기(non-repeatable read)</b>: 한 트랜잭션 안에서 같은 것을 두 번 읽었는데 값이 다른 것. 스냅샷 격리는 둘 다 막아요. 반대로 <b>write skew</b>는 스냅샷 격리가 허용하는 구멍이라 검사기가 "위반"이라고 하면 안 돼요(1권 3-4). 이런 검사기의 원조는 Jepsen의 <b>Elle</b>예요.</div>
+</section>
+
+<section class="ch reveal" id="c17">
+  <span class="chno">1-7 · 티켓 18·27</span>
+  <h3>벤치마크 숫자를 믿어도 될까: A/A와 A/B</h3>
+  <div class="analogy"><b>비유</b> 같은 사람이 같은 운동장을 두 번 뛰어도 기록은 조금 달라요. 신발을 바꿨더니 0.1초 빨라졌다면, 그게 신발 덕인지 그냥 흔들림인지 어떻게 알까요? <b>같은 신발로 두 번 뛰어서(A/A)</b> 흔들림이 얼마인지 먼저 재면 돼요.</div>
+  <div class="card">
+    <div class="controls">
+      진짜 개선 <input type="range" id="abDiff" min="0" max="20" value="3"> <b id="abDiffV" class="mono"></b>
+      흔들림 <input type="range" id="abNoise" min="1" max="20" value="6"> <b id="abNoiseV" class="mono"></b>
+      반복 <input type="range" id="abN" min="3" max="40" value="5"> <b id="abNV" class="mono"></b>
+    </div>
+    <div class="controls"><button class="primary" id="abRun">▶ A/B 측정</button><button id="abAA">A/A 대조군 (같은 코드 두 번)</button></div>
+    <svg id="abSvg" viewBox="0 0 760 170" width="100%"></svg>
+    <div class="log" id="abLog"></div>
+  </div>
+  <p class="small">판정은 평균 차이의 95% 신뢰구간이 0을 포함하는지로 해요. 흔들림이 크고 반복이 적으면 진짜 3% 개선도 "구분 못 함"이 돼요. A/A가 "차이 있음"으로 나오면 측정 환경이 믿을 수 없다는 신호예요. 18번은 쓰는 스레드 수 1~N에 따른 처리량을 이렇게 재요.</div>
+  <div class="term"><b>처리량(throughput)</b>: 초당 몇 건을 끝내나. <b>지연(latency)</b>: 한 건이 얼마나 걸리나. 그룹 커밋은 처리량을 올리지만 한 건의 지연은 버스를 기다리는 만큼 조금 늘 수 있어요. 그래서 평균만 보지 않고 <b>p99</b>(100건 중 가장 느린 1건 언저리)도 함께 봐요.</div>
+</section>
+
+<!-- ================= PART 2 ================= -->
+<div class="partbanner" id="p2"><div class="num">PART 2 · 티켓 19~23</div><h2>🗣️ SQL: 사람 말을 창고 번호표로</h2><p>19번에서 SQL 접수 창구의 첫 줄을 만들었어요(<code>CREATE TABLE</code>, <code>INSERT</code>, 기본 키로 찾는 <code>SELECT</code>). 이제 WHERE, UPDATE·DELETE, 오류, 트랜잭션 명령을 붙여요. 이 장의 파서는 그림책용 축소판이에요. 20~23번에서 만들 문법까지 미리 넣었어요.</p></div>
+
+<section class="ch reveal" id="c21">
+  <span class="chno">2-1 · 티켓 19 (만듦) · 20·21</span>
+  <h3>문장 → 낱말 → 나무: 렉서와 파서</h3>
+  <div class="analogy"><b>비유</b> 받아쓰기 시험을 채점한다고 해 봐요. 먼저 띄어쓰기 단위로 <b>낱말</b>을 끊고(렉서), 그다음 "주어는 뭐고 목적어는 뭐지" <b>문장 구조</b>를 그려요(파서). 구조가 잡혀야 무슨 일을 할지(실행기) 알 수 있어요.</div>
+  <div class="card">
+    <input type="text" id="psIn" value="SELECT name FROM users WHERE id >= 10 AND (age < 30 OR name = 'kim')">
+    <div class="controls" id="psEx"></div>
+    <div class="small" style="margin-top:6px"><b>① 렉서</b>: 글자를 낱말(토큰)로</div>
+    <div class="toks" id="psToks"></div>
+    <div class="small" style="margin-top:12px"><b>② 파서</b>: 낱말을 문장 나무(AST)로</div>
+    <div class="tree" id="psTree"></div>
+    <div class="log" id="psLog"></div>
+  </div>
+  <div class="term"><b>재귀 하강 파서</b>: 문법 규칙 하나마다 함수 하나를 두고, 함수가 서로를 부르며 나무를 만들어요(<code>parse_select</code>가 <code>parse_expr</code>를 부르는 식). 19번에서 파서 생성기 없이 손으로 이렇게 짰어요(설계 0017 C2). Rust의 <code>enum</code>이 나무 모양을 표현하기에 딱 좋아요. Java로 치면 sealed interface와 record들이에요.</div>
+</section>
+
+<section class="ch reveal" id="c22">
+  <span class="chno">2-2 · 티켓 20</span>
+  <h3>AND가 OR보다 먼저: 우선순위</h3>
+  <p>수학에서 <code>1 + 2 × 3</code>은 곱셈을 먼저 해서 7이에요. SQL에서도 <b>AND가 OR보다 먼저</b> 묶여요. 괄호 하나로 뜻이 완전히 바뀌어요. 두 문장의 나무를 비교해 보세요.</p>
+  <div class="grid2">
+    <div class="card" style="margin:0"><input type="text" id="prA" value="a = 1 OR b = 2 AND c = 3"><div class="tree" id="prTA"></div></div>
+    <div class="card" style="margin:0"><input type="text" id="prB" value="(a = 1 OR b = 2) AND c = 3"><div class="tree" id="prTB"></div></div>
+  </div>
+  <div class="term"><b>우선순위(precedence)</b>를 재귀 하강으로 만드는 법: 약한 연산자 함수가 강한 연산자 함수를 불러요. <code>or()</code> → <code>and()</code> → <code>not()</code> → <code>비교()</code> → <code>값()</code>. 아래 층에 있을수록 먼저(강하게) 묶여요. 1권의 B+Tree처럼 "층"으로 생각하면 쉬워요.</div>
+</section>
+
+<section class="ch reveal" id="c23">
+  <span class="chno">2-3 · 티켓 20</span>
+  <h3>WHERE를 어떻게 실행할까: 범위만 훑기 vs 전부 훑고 거르기</h3>
+  <p>표 <code>users(id PK, name, age)</code>에 24행이 있어요. 엔진은 키(id) 순서로 정렬돼 있으니 <b>id 조건</b>은 1권 2-3의 범위 조회로 필요한 부분만 읽을 수 있어요. 다른 열 조건은 전부 읽고 하나씩 걸러야 해요. 조건을 바꿔 보세요. 파란 테두리가 읽은 행, 초록이 결과예요.</p>
+  <div class="card">
+    <div class="controls"><span class="mono small" style="white-space:nowrap">SELECT * FROM users WHERE</span><input type="text" id="wpIn" value="id >= 5 AND id < 12 AND age > 25"></div>
+    <div class="controls" id="wpEx"></div>
+    <div class="rowsgrid" id="wpGrid"></div>
+    <div class="counter">
+      <div><div class="k">실행 계획</div><div class="v" id="wpPlan" style="font-size:15px">-</div></div>
+      <div><div class="k">읽은 행</div><div class="v" id="wpRead">0</div></div>
+      <div><div class="k">결과 행</div><div class="v" id="wpHit" style="color:var(--leaf)">0</div></div>
+    </div>
+    <div class="log" id="wpLog"></div>
+  </div>
+  <div class="term"><b>실행 계획(query plan)</b>: 같은 SQL을 어떤 순서·방법으로 실행할지 정한 것. 그림의 규칙은 "맨 위가 AND로만 이어진 id 조건만 범위로 바꾼다"예요. <code>id = 3 OR id = 20</code>처럼 OR이 끼면 범위 두 개로 나눌 수도 있지만, 그림에서는 전체 훑기로 물러나요. 20번에서 어디까지 똑똑하게 할지 정해요. <span class="decide">설계 때 정할 것</span> Oakdb는 보조 인덱스가 범위 밖이라(스펙) <code>age</code> 조건은 언제나 거르기예요.</div>
+</section>
+
+<section class="ch reveal" id="c24">
+  <span class="chno">2-4 · 티켓 20·22</span>
+  <h3>NULL은 "모름": 참·거짓·모름의 세 값 논리</h3>
+  <div class="analogy"><b>비유</b> 설문지에서 나이 칸이 비어 있는 사람이 있어요. "이 사람은 30살인가?"라는 질문에 <b>참도 거짓도 아니고 "모름"</b>이에요. "이 사람의 나이는 빈칸과 같은가?"도 모름이에요. 모르는 두 값이 같은지도 모르니까요.</div>
+  <div class="card">
+    <div class="controls">
+      A <span class="segctl" id="nlA"><button data-v="T" class="on">참</button><button data-v="F">거짓</button><button data-v="N">모름(NULL)</button></span>
+      B <span class="segctl" id="nlB"><button data-v="T">참</button><button data-v="F">거짓</button><button data-v="N" class="on">모름(NULL)</button></span>
+    </div>
+    <div class="grid3" id="nlTabs"></div>
+    <div class="log" id="nlLog"></div>
+  </div>
+  <div class="warnbox"><b>함정</b>: <code>WHERE age = NULL</code>은 어떤 행도 돌려주지 않아요. 모든 행에서 "모름"이고, WHERE는 <b>참인 행만</b> 통과시키거든요. 빈칸을 찾으려면 <code>age IS NULL</code>을 써야 해요. 2-3의 표에서 <code>age</code>가 <code>∅</code>인 행으로 직접 확인해 보세요.</div>
+</section>
+
+<section class="ch reveal" id="c25">
+  <span class="chno">2-5 · 티켓 21</span>
+  <h3>UPDATE의 함정: 고친 행을 또 만난다 (할로윈 문제)</h3>
+  <p><code>UPDATE t SET id = id + 10 WHERE id &lt; 30</code>을 실행해요. 기대: 1~5가 한 번씩 고쳐져 11~15가 돼요. 그런데 <b>정렬된 나뭇잎을 앞에서부터 훑으면서 그 자리에서 바로 고치면</b>, 고친 행(11)이 커서 <b>앞쪽</b>으로 옮겨가서 또 만나요.</p>
+  <div class="card">
+    <div class="controls">
+      방식 <span class="segctl" id="hwMode"><button data-m="live" class="on">훑으면서 바로 고치기</button><button data-m="collect">대상 키를 먼저 다 모으고 고치기</button></span>
+      <button class="primary" id="hwRun">▶ 실행</button>
+    </div>
+    <div class="leafrow" id="hwLeaf"></div>
+    <div class="counter"><div><div class="k">고친 횟수</div><div class="v" id="hwCnt">0</div></div><div><div class="k">기대한 횟수</div><div class="v">5</div></div></div>
+    <div class="log" id="hwLog"></div>
+  </div>
+  <div class="term"><b>할로윈 문제(Halloween problem)</b>: 1976년 핼러윈 즈음 IBM에서 "급여 10% 인상"을 돌렸더니 모두의 급여가 한도까지 오른 데서 붙은 이름이에요. <b>Oakdb와의 연결</b>: 13번에서 트랜잭션의 <code>scan</code>은 "사진 + 내 쓰기"를 보여 줘요. 그래서 UPDATE가 자기 트랜잭션 안에서 훑으면서 고치면 바로 이 문제가 생길 수 있어요. 21번에서 "먼저 모으기"로 갈지, "사진만 훑기"로 갈지 정해요. 영향받은 행 수(완료 조건)도 이 선택에 따라 맞거나 틀려요. <span class="decide">설계 때 정할 것</span></div>
+</section>
+
+<section class="ch reveal" id="c26">
+  <span class="chno">2-6 · 티켓 22·23</span>
+  <h3>오류에도 종류가 있다: 다시 해 볼 만한가?</h3>
+  <p>클라이언트에게 오류의 <b>종류</b>가 중요한 이유는 하나예요. <b>다시 시도하면 될 수도 있는가?</b> 카드를 눌러 종류와 답을 보세요.</p>
+  <div class="flips" id="erFlips"></div>
+  <div class="term">22번은 문법·타입·미지원·제약 위반을 구분하고(19번에서 이미 열거형 <code>SqlError</code>로 시작함), 23번은 엔진의 충돌 오류를 SQL 오류로 전달해요. 서버(25번)는 이 종류를 통신 규칙의 오류 코드로 실어 보내요.</div>
+</section>
+
+<section class="ch reveal" id="c27">
+  <span class="chno">2-7 · 티켓 23</span>
+  <h3>BEGIN · COMMIT · ROLLBACK, 그리고 자동 커밋</h3>
+  <div class="analogy"><b>비유</b> 장바구니예요. 그냥 "이거 살게요"라고 하면 바로 계산돼요(자동 커밋). "<b>BEGIN</b>"이라고 하면 장바구니를 들고 담기 시작해요. <b>COMMIT</b>에 한꺼번에 계산하고, <b>ROLLBACK</b>이면 바구니를 통째로 내려놔요.</div>
+  <p>좌석 A1을 예약하는 상황이에요. 버튼을 눌러 명령을 보내 보세요. "다른 손님이 먼저 가져감"을 섞으면 충돌이 어떻게 SQL 오류로 오는지 볼 수 있어요.</p>
+  <div class="card">
+    <div class="controls">
+      <button id="txBegin">BEGIN</button><button id="txUpd">UPDATE seats SET owner='나' WHERE id='A1'</button><button id="txSel">SELECT * FROM seats</button><button class="primary" id="txCommit">COMMIT</button><button id="txRb">ROLLBACK</button>
+    </div>
+    <div class="controls"><button id="txOther">👤 다른 손님이 A1을 가져가고 커밋</button><button id="txReset">처음부터</button></div>
+    <div class="sess">
+      <div class="box"><h4>내 접속</h4><span class="mode auto" id="txMode">자동 커밋</span><div class="small" id="txPend" style="margin-top:6px"></div></div>
+      <div class="box"><h4>DB에 커밋된 것</h4><div class="mono" id="txDb"></div></div>
+    </div>
+    <div class="log" id="txLog"></div>
+  </div>
+  <div class="term">정해야 할 작은 것들: 트랜잭션 밖에서 <code>COMMIT</code>을 보내면? 트랜잭션 안에서 또 <code>BEGIN</code>이면? SQLite는 둘 다 오류, PostgreSQL은 경고만 하고 넘어가요. 그림은 SQLite처럼 오류로 했어요. 충돌 뒤에는 트랜잭션이 끝난 상태가 되니 <code>BEGIN</code>부터 다시 해야 해요. <span class="decide">설계 때 정할 것</span></div>
+</section>
+
+<!-- ================= PART 3 ================= -->
+<div class="partbanner" id="p3"><div class="num">PART 3 · 티켓 24~27</div><h2>🌐 네트워크 서버: 멀리 있는 손님 받기</h2><p>지금까지 Oakdb는 같은 프로그램 안에서 함수로 부르는 라이브러리였어요(SQLite처럼). 이제 서버 프로세스가 포트를 열고, 여러 손님(클라이언트)이 네트워크로 SQL을 보내요. ADR 0005의 두 번째 차별점이에요.</p></div>
+
+<section class="ch reveal" id="c31">
+  <span class="chno">3-1 · 티켓 24</span>
+  <h3>TCP는 편지가 아니라 수도관이다</h3>
+  <div class="analogy"><b>비유</b> 편지는 한 통이 한 통으로 도착해요. TCP는 <b>수도관</b>이에요. 물(바이트)은 순서대로 빠짐없이 오지만, 한 번에 받는 양은 그때그때 달라요. 두 문장을 보냈는데 한 번에 1.5문장이 올 수도, 반 문장만 올 수도 있어요.</div>
+  <p>세 문장을 보내요. 네트워크가 바이트 흐름을 아무 데서나 잘라서 배달해요(색이 바뀌는 곳이 한 번에 받은 덩어리). 받는 쪽 방식을 바꿔 보세요.</p>
+  <div class="card">
+    <div class="controls">
+      받는 쪽 <span class="segctl" id="tcMode"><button data-m="naive">받은 덩어리 = 문장 하나</button><button data-m="len" class="on">길이를 먼저 읽기</button></span>
+      <button class="primary" id="tcSend">▶ 보내기 (매번 다르게 잘림)</button>
+    </div>
+    <div class="small">수도관 속 바이트 (굵은 칸 = 길이 머리말)</div>
+    <div class="stream" id="tcStream"></div>
+    <div class="small">받는 쪽이 알아들은 문장</div>
+    <div id="tcOut"></div>
+  </div>
+  <div class="term"><b>프레이밍(framing)</b>: 바이트 흐름에서 메시지 경계를 되찾는 규칙. 방법은 끝 표시(줄바꿈 등)와 <b>길이 머리말</b>이 있어요. Oakdb는 길이 머리말로 정했어요(스펙: 길이 + 명령 + 데이터). Rust에서는 <code>read_exact</code>로 "정확히 이만큼 올 때까지 기다려"를 해요. 그냥 <code>read</code>는 덩어리만큼만 돌려줘요.</div>
+</section>
+
+<section class="ch reveal" id="c32">
+  <span class="chno">3-2 · 티켓 24</span>
+  <h3>우리 통신 규칙: 길이 + 명령 + 데이터</h3>
+  <p>SQL을 바꿔 보면 실제로 선을 타고 갈 바이트가 보여요. 아래의 바이트 크기와 명령 번호는 그림을 위한 예시예요. 24번 설계에서 확정하고 <code>docs</code>에 문서로 남겨요. <span class="decide">설계 때 정할 것</span></p>
+  <div class="card">
+    <div class="controls">명령 <span class="segctl" id="frCmd"><button data-c="1" class="on">0x01 SQL 실행</button><button data-c="2">0x02 접속 끝</button></span></div>
+    <input type="text" id="frIn" value="SELECT * FROM users WHERE id = 7">
+    <div class="bytes" id="frBytes"></div>
+    <div class="log" id="frLog"></div>
+    <div class="small" style="margin-top:12px"><b>서버의 답</b>도 같은 모양이에요. 명령 자리에 답의 종류가 들어가요.</div>
+    <div class="tablewrap"><table class="books"><tr><th>종류(예시)</th><th>데이터</th></tr>
+      <tr><td><code>0x10</code> 행들</td><td>열 이름 목록 + 행 목록 (값마다 타입 바이트 + 내용, 19번의 행 인코딩과 비슷)</td></tr>
+      <tr><td><code>0x11</code> 바뀐 행 수</td><td>8바이트 정수</td></tr>
+      <tr><td><code>0x1F</code> 오류</td><td>오류 종류 코드(2-6의 카드들) + 사람이 읽을 메시지</td></tr>
+    </table></div>
+  </div>
+</section>
+
+<section class="ch reveal" id="c33">
+  <span class="chno">3-3 · 티켓 24·25</span>
+  <h3>여러 손님 받기: 테이블마다 웨이터 vs 한 웨이터가 돌아다니기</h3>
+  <div class="analogy"><b>비유</b> 식당 방식 둘. ① <b>테이블마다 전담 웨이터</b>(접속마다 스레드): 단순해요. 손님이 메뉴를 고민하는 동안 웨이터도 서서 기다려요. 손님 1만 명이면 웨이터도 1만 명. ② <b>웨이터 몇 명이 돌아다니며</b> "주문 준비된 테이블?"을 확인(비동기, async): 웨이터가 적어도 되지만 일하는 방식이 복잡해요.</div>
+  <div class="card">
+    <div class="controls">동시에 붙은 손님 <input type="range" id="tmN" min="0" max="100" value="30"> <b id="tmNV" class="mono"></b></div>
+    <div class="bars" id="tmBars"></div>
+    <p class="small">어림셈이에요. Rust 스레드는 스택을 기본 2MB <b>예약</b>해요(실제로 쓰는 메모리는 훨씬 적어요). async 작업 하나는 보통 수 KB예요. 손님 수가 수백 정도면 ①로도 충분하고, 수만이면 ②가 필요해져요.</p>
+  </div>
+  <div class="tablewrap"><table class="books">
+    <tr><th></th><th>① 접속마다 스레드</th><th>② 비동기 (tokio)</th></tr>
+    <tr><td>코드</td><td>평범한 순서대로 코드. 지금 엔진과 그대로 맞음</td><td><code>async</code>/<code>await</code>. 새 의존성(tokio)</td></tr>
+    <tr><td>디스크 sync</td><td>그냥 기다리면 됨</td><td>sync는 막는(blocking) 호출이라 별도 스레드로 빼야 함 (<code>spawn_blocking</code>)</td></tr>
+    <tr><td>손님 수 한계</td><td>수백~수천</td><td>수만 이상</td></tr>
+    <tr><td>Java로 치면</td><td>전통적인 Tomcat (요청마다 스레드)</td><td>Netty, Spring WebFlux</td></tr>
+  </table></div>
+  <div class="term">이슈 #1 지도에도 "서버가 여러 접속을 처리하는 방식 (스레드 vs 비동기)"이 <b>아직 안 정한 것</b>으로 남아 있어요. 24·25번 설계 때 고르고 ADR로 남겨요. <span class="decide">설계 때 정할 것</span></div>
+</section>
+
+<section class="ch reveal" id="c34">
+  <span class="chno">3-4 · 티켓 25</span>
+  <h3>접속 하나 = 트랜잭션 하나, 선이 뽑히면 롤백</h3>
+  <p>접속마다 자기 트랜잭션 상태를 따로 가져요. A가 커밋하기 전의 변경은 B에게 안 보여요(13번의 스냅샷). A의 선이 갑자기 뽑히면 서버는 A의 트랜잭션을 <b>자동으로 롤백</b>해야 해요.</p>
+  <div class="card">
+    <div class="controls"><b>A</b> <button id="cnABegin">BEGIN</button><button id="cnAIns">INSERT id=7</button><button id="cnACommit">COMMIT</button><button id="cnAPull">🔌 선 뽑기</button><button id="cnAConn">다시 접속</button></div>
+    <div class="controls"><b>B</b> <button id="cnBSel">SELECT id=7</button><button id="cnReset">처음부터</button></div>
+    <div class="sess">
+      <div class="box"><h4>서버가 보는 접속 A</h4><span class="mode auto" id="cnAMode">자동 커밋</span><div class="small" id="cnAPend" style="margin-top:6px"></div></div>
+      <div class="box"><h4>DB에 커밋된 것</h4><div class="mono" id="cnDb"></div></div>
+    </div>
+    <div class="log" id="cnLog"></div>
+  </div>
+  <div class="term"><b>Drop으로 롤백</b>: Oakdb의 <code>Txn</code>은 커밋 없이 버려지면(Drop) 쓰기를 버려요(13번에서 테스트함). 접속을 맡은 코드가 끝나면서 <code>Txn</code>이 함께 버려지니 롤백이 저절로 돼요. Java의 try-with-resources가 <code>close()</code>를 불러 주는 것과 같아요. 단, 선이 뽑혀도 서버가 <b>모를 수</b> 있어요(다음 읽기에서야 알게 됨). 그래서 오래 조용한 접속을 끊는 <b>타임아웃</b>도 필요해요.</div>
+</section>
+
+<section class="ch reveal" id="c35">
+  <span class="chno">3-5 · 티켓 26</span>
+  <h3>정상 종료: 가게 문 닫는 순서</h3>
+  <div class="analogy"><b>비유</b> 마감 시간이에요. ① 문에 "영업 끝" 팻말을 걸어 새 손님을 안 받고 ② 계산대 앞 손님은 계산을 끝내 주고 ③ 아직 고르는 중인 손님에게는 정중히 "마감입니다" ④ 불을 끄고 문을 잠가요. 손님이 계산했다고 믿었는데 영수증이 없는 일은 없어야 해요.</div>
+  <div class="card">
+    <div class="controls"><button class="primary" id="sdGo">🛑 종료 신호 (Ctrl+C / SIGTERM)</button><button id="sdReset">처음부터</button></div>
+    <div class="clients" id="sdCl"></div>
+    <div class="stepdots" id="sdDots"></div>
+    <div class="log" id="sdLog"></div>
+  </div>
+  <div class="term">26번의 완료 조건 그대로예요. 새 접속 거절, 진행 중인 커밋은 <b>끝나거나 명확한 오류</b>, 다시 띄우면 데이터 온전. 정할 것: 트랜잭션 중인 손님을 얼마나 기다려 줄지(바로 롤백 vs 몇 초 유예), 종료 전에 체크포인트를 할지. <span class="decide">설계 때 정할 것</span></div>
+</section>
+
+<section class="ch reveal" id="c36">
+  <span class="chno">3-6 · 티켓 27</span>
+  <h3>왕복 시간: 손님이 적을 땐 거리가, 많을 땐 창구가 천장</h3>
+  <p>네트워크 너머 손님은 문장 하나마다 <b>왕복 시간(RTT)</b>을 내요. 손님 한 명은 답을 받아야 다음 문장을 보내니까(닫힌 고리), 손님이 적으면 왕복 시간이 처리량을 묶어요. 손님이 많아지면 결국 커밋 창구(sync)가 천장이에요. 그룹 커밋은 그 천장을 올려요.</p>
+  <div class="card">
+    <div class="controls">
+      왕복 시간 <input type="range" id="nbRtt" min="0" max="40" value="10"> <b id="nbRttV" class="mono"></b>
+      <label class="small"><input type="checkbox" id="nbGc" checked> 그룹 커밋</label>
+    </div>
+    <svg id="nbSvg" viewBox="0 0 760 280" width="100%"></svg>
+    <div class="log" id="nbLog"></div>
+  </div>
+  <p class="small">⚠️ 측정이 아니라 <b>단순한 모델</b>이에요. 커밋 한 건에 처리 0.2ms + sync 3ms, 그룹 커밋은 sync 한 번에 최대 64건을 싣는다고 가정했어요. 실제 숫자는 18·27번에서 재고, 모델과 다르면 그대로 기록해요.</p>
+</section>
+
+<!-- ================= 부록 ================= -->
+<div class="partbanner" id="ap"><div class="num">부록</div><h2>읽을 곳과 용어</h2><p>만들어 보고, 해당 책의 한 절만 훑어보는 방식 그대로예요.</p></div>
+
+<section class="ch reveal" id="books">
+  <span class="chno">부록 1</span>
+  <h3>티켓마다 펼쳐 볼 한 절</h3>
+  <div class="tablewrap"><table class="books">
+    <tr><th>티켓</th><th>개념</th><th>읽을 곳</th></tr>
+    <tr><td>15~17</td><td>트랜잭션, 직렬 가능성, 스냅샷 격리</td><td>돛단배 책(Silberschatz, <i>Database System Concepts</i> 7판) 17장 Transactions, 18장 Concurrency Control의 Snapshot Isolation 절</td></tr>
+    <tr><td>15</td><td>Mutex, RwLock, 채널</td><td><i>The Rust Programming Language</i> 16장 Fearless Concurrency · 읽었던 OS 책의 동기화(세마포어, 읽기-쓰기 문제) 장</td></tr>
+    <tr><td>17</td><td>loom, 이력 검사</td><td>loom 저장소 README · Jepsen의 Elle 논문 앞부분</td></tr>
+    <tr><td>19~21</td><td>렉서, 재귀 하강 파서, 우선순위</td><td>Robert Nystrom, <i>Crafting Interpreters</i> 4장 Scanning, 6장 Parsing Expressions (웹에서 무료)</td></tr>
+    <tr><td>20</td><td>실행 계획, 선택 연산</td><td>돛단배 책 15장 Query Processing의 선택(Selection) 절</td></tr>
+    <tr><td>24~26</td><td>소켓, TCP 스트림</td><td>OS 책의 네트워크·소켓 절 · <i>The Rust Programming Language</i> 21장 웹 서버 만들기 (스레드 풀 + 정상 종료까지 그대로 나와요)</td></tr>
+  </table></div>
+</section>
+
+<section class="ch reveal" id="gl">
+  <span class="chno">부록 2</span>
+  <h3>용어 사전</h3>
+  <div class="gloss">
+    <div><b>스레드</b> · 한 프로그램 안에서 동시에 도는 일꾼</div>
+    <div><b>경쟁 상태</b> · 실행 순서에 따라 결과가 달라지는 버그</div>
+    <div><b>Mutex</b> · 한 번에 한 명만 들어가는 잠금</div>
+    <div><b>RwLock</b> · 읽기는 여럿, 쓰기는 혼자인 잠금</div>
+    <div><b>Arc</b> · 여러 스레드가 함께 가리키는 상자 (참조 개수를 셈)</div>
+    <div><b>채널</b> · 스레드 사이의 바구니. 넣는 쪽과 꺼내는 쪽</div>
+    <div><b>커밋 창구</b> · 커밋을 한 줄로 처리하는 담당 스레드 (ADR 0006)</div>
+    <div><b>그룹 커밋</b> · 모인 커밋들을 sync 한 번에 처리</div>
+    <div><b>loom</b> · 가능한 스레드 순서를 전부 실행해 보는 Rust 검사 도구</div>
+    <div><b>이력 검사기</b> · 읽기·쓰기 기록을 보고 격리 위반을 찾는 도구</div>
+    <div><b>잃어버린 업데이트</b> · 두 쓰기 중 하나가 흔적 없이 사라짐</div>
+    <div><b>A/A 대조군</b> · 같은 코드를 두 번 재서 측정의 흔들림을 보는 것</div>
+    <div><b>p99</b> · 100건 중 99번째로 빠른 것 (느린 꼬리)</div>
+    <div><b>렉서</b> · 글자를 낱말(토큰)로 자르는 단계</div>
+    <div><b>파서</b> · 낱말을 문장 나무(AST)로 만드는 단계</div>
+    <div><b>재귀 하강</b> · 문법 규칙마다 함수 하나, 서로 불러 가며 파싱</div>
+    <div><b>우선순위</b> · 무엇이 먼저 묶이나 (AND가 OR보다 먼저)</div>
+    <div><b>실행 계획</b> · SQL을 어떤 방법으로 실행할지 정한 것</div>
+    <div><b>3값 논리</b> · 참·거짓·모름(NULL)</div>
+    <div><b>할로윈 문제</b> · UPDATE가 자기가 고친 행을 또 고치는 것</div>
+    <div><b>자동 커밋</b> · BEGIN 없는 문장은 그 자체로 트랜잭션 하나</div>
+    <div><b>TCP</b> · 순서대로 빠짐없이 오는 바이트 흐름 (경계 없음)</div>
+    <div><b>프레이밍</b> · 바이트 흐름에서 메시지 경계를 되찾는 규칙</div>
+    <div><b>비동기(async)</b> · 기다리는 동안 다른 일을 하는 방식</div>
+    <div><b>정상 종료</b> · 새 손님은 막고 하던 일은 끝내고 끄기</div>
+    <div><b>RTT</b> · 요청이 갔다가 답이 돌아오는 시간</div>
+  </div>
+</section>
+
+<p class="small" style="text-align:center;margin:40px 0 60px">Oakdb 그림책 2권 · 2026-11-22 · 15번 티켓 시작 전 · <a href="0003-db-guide.html">1권으로</a></p>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const css=v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+function segctl(id,cb){const el=$(id);el.querySelectorAll('button').forEach(b=>b.onclick=()=>{el.querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));cb(b.dataset);});}
+function segval(id,key){return $(id).querySelector('button.on').dataset[key];}
+function log(id,m,c){const l=$(id);l.className='log'+(c?' '+c:'');l.innerHTML=m;}
+const redraws=[];
+
+/* theme */
+(function(){const root=document.documentElement;try{const t=localStorage.getItem('oak-theme');if(t)root.dataset.theme=t;}catch(e){}
+$('themeBtn').onclick=()=>{const dark=root.dataset.theme?root.dataset.theme==='dark':matchMedia('(prefers-color-scheme: dark)').matches;root.dataset.theme=dark?'light':'dark';try{localStorage.setItem('oak-theme',root.dataset.theme);}catch(e){}redraws.forEach(f=>f());};})();
+/* reveal */
+(function(){const io=new IntersectionObserver(es=>es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target);}}),{threshold:.05});document.querySelectorAll('.reveal').forEach(s=>io.observe(s));})();
+
+/* ===== 1-1 race ===== */
+const RC={};
+const RC_STEPS=['읽기: 칠판 값을 머릿속에','더하기: 머릿속 값 + 1','쓰기: 머릿속 값을 칠판에'];
+function rcReset(){RC.val=0;RC.lock=null;RC.t=[{pc:0,reg:null},{pc:0,reg:null}];RC.tok=(RC.tok||0)+1;rcRender();log('rcLog','T1, T2 버튼으로 한 걸음씩 진행해 보세요. 둘 다 끝나면 칠판은 2여야 해요.');}
+function rcCan(i){const t=RC.t[i];if(t.pc>=3)return false;if(segval('rcMode','m')==='lock'&&t.pc===0&&RC.lock!==null&&RC.lock!==i)return false;return true;}
+function rcRender(){$('rcVal').textContent=RC.val;const lk=RC.lock;$('rcLock').className='lockchip'+(lk!==null?' held':'');$('rcLock').textContent=segval('rcMode','m')==='lock'?(lk!==null?`🔒 T${lk+1}이(가) 잡고 있음`:'🔓 잠금 비어 있음'):'잠금 안 씀';
+  $('rcThr').innerHTML=RC.t.map((t,i)=>{const waiting=!rcCan(i)&&t.pc<3;return `<div class="tc${waiting?' wait':''}"><h4>T${i+1} ${t.pc>=3?'✅ 끝':waiting?'⏳ 잠금 기다림':''}</h4><ol>${RC_STEPS.map((s,k)=>`<li class="${k<t.pc?'done':k===t.pc?'next':''}">${s}</li>`).join('')}</ol><div class="small">머릿속 값: <b class="mono">${t.reg===null?'-':t.reg}</b></div></div>`;}).join('');
+  $('rcT1').disabled=!rcCan(0);$('rcT2').disabled=!rcCan(1);}
+function rcStep(i){if(!rcCan(i))return;const t=RC.t[i];const lockMode=segval('rcMode','m')==='lock';
+  if(t.pc===0){if(lockMode)RC.lock=i;t.reg=RC.val;}else if(t.pc===1){t.reg+=1;}else{RC.val=t.reg;const v=$('rcVal');v.classList.add('bump');setTimeout(()=>v.classList.remove('bump'),200);if(lockMode)RC.lock=null;}
+  t.pc++;rcRender();
+  if(RC.t.every(x=>x.pc>=3)){RC.val===2?log('rcLog','✅ 칠판은 2. 두 일 모두 남았어요.','good'):log('rcLog','❌ 칠판은 1! 두 번 더했는데 한 번이 <b>사라졌어요</b>. 둘 다 0을 읽고 각자 1을 썼거든요. 이게 <b>잃어버린 업데이트</b>예요. 🔒 Mutex를 켜고 같은 순서를 시도해 보세요.','err');}
+  else log('rcLog',`T${i+1}: ${RC_STEPS[t.pc-1]} → 칠판 ${RC.val}, T${i+1} 머릿속 ${t.reg}`);}
+segctl('rcMode',rcReset);$('rcReset').onclick=rcReset;$('rcT1').onclick=()=>rcStep(0);$('rcT2').onclick=()=>rcStep(1);
+$('rcBad').onclick=async()=>{rcReset();const tok=RC.tok;for(const i of [0,1,0,1,0,1]){await sleep(650);if(tok!==RC.tok)return;if(rcCan(i))rcStep(i);else{const o=1-i;if(rcCan(o))rcStep(o);}}
+  while(RC.t.some(x=>x.pc<3)){await sleep(650);if(tok!==RC.tok)return;const i=rcCan(0)?0:1;rcStep(i);}};
+rcReset();
+
+/* ===== 1-2 RwLock gantt ===== */
+const RW_SC={read:[['R1',0,4,'r'],['R2',1,4,'r'],['R3',2,4,'r'],['W1',3,3,'w'],['R4',4,4,'r'],['R5',5,3,'r']],
+             write:[['W1',0,3,'w'],['R1',1,4,'r'],['W2',2,3,'w'],['R2',3,3,'r'],['W3',4,3,'w'],['R3',5,3,'r']]};
+function rwSim(sc,mode){const q=sc.map(([n,a,d,k])=>({n,a,d,k,s:null}));const run=[];let t=0;let waiting=[];const done=[];
+  for(let guard=0;guard<500&&done.length<q.length;guard++){
+    q.filter(x=>x.a===t).forEach(x=>waiting.push(x));
+    for(let i=run.length-1;i>=0;i--)if(run[i].s+run[i].d<=t){done.push(run[i]);run.splice(i,1);}
+    let moved=true;while(moved&&waiting.length){moved=false;const h=waiting[0];
+      if(mode==='mutex'){if(!run.length){h.s=t;run.push(h);waiting.shift();moved=true;}}
+      else{if(h.k==='r'&&!run.some(x=>x.k==='w')){h.s=t;run.push(h);waiting.shift();moved=true;}else if(h.k==='w'&&!run.length){h.s=t;run.push(h);waiting.shift();moved=true;}}}
+    t++;}
+  return q;}
+function rwDraw(){const sc=RW_SC[segval('rwScen','s')];const mode=segval('rwMode','m');const r=rwSim(sc,mode);const end=Math.max(...r.map(x=>x.s+x.d));
+  const X=t=>70+t*(660/Math.max(end,22));let s=`<defs><pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="6" stroke="${css('--hole')}" stroke-width="2"/></pattern></defs>`;
+  for(let t=0;t<=Math.max(end,22);t+=2)s+=`<line x1="${X(t)}" y1="10" x2="${X(t)}" y2="225" stroke="${css('--line')}" stroke-width="1"/><text x="${X(t)}" y="242" font-size="11" text-anchor="middle" fill="${css('--muted')}">${t}</text>`;
+  r.forEach((x,i)=>{const y=14+i*35;const col=x.k==='w'?css('--warn'):css('--inner');
+    s+=`<text x="10" y="${y+19}" font-size="13" font-weight="700" fill="${col}">${x.n} ${x.k==='w'?'✏️':'📖'}</text>`;
+    if(x.s>x.a)s+=`<rect x="${X(x.a)}" y="${y+4}" width="${X(x.s)-X(x.a)}" height="22" fill="url(#hatch)" rx="4"/>`;
+    s+=`<rect x="${X(x.s)}" y="${y+4}" width="${X(x.s+x.d)-X(x.s)}" height="22" rx="4" fill="${col}" opacity=".85"/>`;});
+  $('rwSvg').innerHTML=s;const wait=r.reduce((a,x)=>a+(x.s-x.a),0);const rw=rwSim(sc,'rw'),mx=rwSim(sc,'mutex');const wRw=rw.reduce((a,x)=>a+(x.s-x.a),0),wMx=mx.reduce((a,x)=>a+(x.s-x.a),0);
+  log('rwLog',`빗금 = 기다린 시간. ${mode==='rw'?'RwLock':'Mutex'}: 모두 끝나는 시각 <b>${end}</b>, 기다린 시간 합 <b>${wait}</b>. (비교: Mutex ${wMx} vs RwLock ${wRw}) ${segval('rwScen','s')==='read'?'읽기가 많으면 RwLock이 크게 이겨요.':'쓰기가 많으면 RwLock의 이점이 줄어요. 결국 쓰기는 한 명씩이니까요.'}`);}
+segctl('rwMode',rwDraw);segctl('rwScen',rwDraw);redraws.push(rwDraw);rwDraw();
+
+/* ===== 1-3 commit queue ===== */
+const CQ={};
+function cqReset(){CQ.tok=(CQ.tok||0)+1;CQ.ver=0;CQ.hist=[];CQ.q=[];CQ.busy=false;CQ.ok=0;CQ.bad=0;CQ.sync=0;
+  const keys=['x','y','x','z'];CQ.w=keys.map(k=>({key:k,began:0,st:'idle',msg:'일하는 중 (버전 0 사진)'}));cqRender();$('cqDesk').textContent='쉬는 중';log('cqLog','손님마다 "커밋 요청"을 누르거나, 👥로 네 명을 한꺼번에 보내 보세요.');}
+function cqRender(){$('cqWorkers').innerHTML=CQ.w.map((w,i)=>`<div class="wk ${w.st==='queued'?'queued':w.st==='ok'?'ok':w.st==='bad'?'bad':''}"><b>T${i+1}</b>고칠 키 <select data-i="${i}" ${w.st==='queued'?'disabled':''}>${['x','y','z'].map(k=>`<option ${k===w.key?'selected':''}>${k}</option>`).join('')}</select><br><button data-i="${i}" ${w.st==='queued'?'disabled':''}>커밋 요청</button><div class="st">${w.msg}</div></div>`).join('');
+  $('cqWorkers').querySelectorAll('select').forEach(s=>s.onchange=()=>{CQ.w[+s.dataset.i].key=s.value;});
+  $('cqWorkers').querySelectorAll('button').forEach(b=>b.onclick=()=>cqReq(+b.dataset.i));
+  $('cqQueue').innerHTML=CQ.q.length?CQ.q.map(it=>`<span class="letter">T${it.w+1}: ${it.key} (v${it.began}~)</span>`).join(''):'<span class="small">비어 있음</span>';
+  $('cqOk').textContent=CQ.ok;$('cqBad').textContent=CQ.bad;$('cqSync').textContent=CQ.sync;$('cqVer').textContent=CQ.ver;}
+function cqReq(i){const w=CQ.w[i];if(w.st==='queued')return;w.st='queued';w.msg='📨 바구니에 넣고 답장 기다림';CQ.q.push({w:i,key:w.key,began:w.began});cqRender();cqLoop();}
+async function cqLoop(){if(CQ.busy)return;CQ.busy=true;const tok=CQ.tok;
+  while(CQ.q.length){await sleep(500);if(tok!==CQ.tok)return;
+    const group=segval('cqMode','m')==='group';const batch=group?CQ.q.splice(0):[CQ.q.shift()];cqRender();
+    $('cqDesk').innerHTML=batch.map(b=>`<span class="letter">T${b.w+1}:${b.key}</span>`).join(' ')+'<br>① 충돌 검사';await sleep(900);if(tok!==CQ.tok)return;
+    const res=[];for(const it of batch){const hit=CQ.hist.find(h=>h.ver>it.began&&h.key===it.key);if(hit){res.push({...it,ok:false,by:hit});}else{CQ.ver++;CQ.hist.push({ver:CQ.ver,key:it.key,w:it.w});res.push({...it,ok:true,ver:CQ.ver});}}
+    $('cqDesk').innerHTML=res.map(b=>`<span class="letter ${b.ok?'ok':'bad'}">T${b.w+1}:${b.key}</span>`).join(' ')+'<br>'+(res.some(r=>r.ok)?'② WAL 쓰기 ③ 🔒 sync…':'통과한 게 없어 sync 안 함');
+    await sleep(res.some(r=>r.ok)?1300:600);if(tok!==CQ.tok)return;if(res.some(r=>r.ok))CQ.sync++;
+    for(const r of res){const w=CQ.w[r.w];if(r.ok){CQ.ok++;w.st='ok';w.msg=`✅ 커밋됨 (v${r.ver})`;}else{CQ.bad++;w.st='bad';w.msg=`❌ 충돌: T${r.by.w+1}이(가) v${r.by.ver}에 ${r.key}를 먼저 커밋`;}w.began=CQ.ver;}
+    log('cqLog',`${group?'🚌 버스 1회':'한 장 처리'}: ${res.map(r=>`T${r.w+1} ${r.ok?'✅':'❌ 충돌'}`).join(', ')} · sync ${res.some(r=>r.ok)?1:0}번. 답장을 받은 손님은 최신 버전(v${CQ.ver}) 사진으로 새 트랜잭션을 시작해요.`,res.every(r=>r.ok)?'good':'');
+    cqRender();$('cqDesk').textContent=CQ.q.length?'다음 손님…':'쉬는 중';}
+  CQ.busy=false;}
+segctl('cqMode',()=>{});$('cqReset').onclick=cqReset;$('cqAll').onclick=()=>{CQ.w.forEach((w,i)=>{if(w.st!=='queued')cqReq(i);});};
+cqReset();
+
+/* ===== 1-4 OK order ===== */
+const OK={tok:0};
+function okDots(n,steps){$('okDots').innerHTML=steps.map((s,i)=>`<span class="${i<n?'on':''}" title="${s}">${i+1}</span>`).join('');}
+$('okRun').onclick=async()=>{const tok=++OK.tok;const safe=segval('okOrd','o')==='safe';OK.synced=false;OK.oked=false;OK.running=true;$('okCrash').disabled=false;$('okRun').disabled=true;
+  const steps=safe?[['WAL에 기록 (아직 OS 캐시 = 메모리)',()=>{}],['🔒 sync: 디스크에 확실히',()=>{OK.synced=true;}],['📩 손님에게 OK',()=>{OK.oked=true;}]]:[['WAL에 기록 (아직 OS 캐시 = 메모리)',()=>{}],['📩 손님에게 OK',()=>{OK.oked=true;}],['🔒 sync: 디스크에 확실히',()=>{OK.synced=true;}]];
+  okDots(0,steps.map(s=>s[0]));
+  for(let i=0;i<steps.length;i++){log('okLog',`${i+1}. ${steps[i][0]}… <span class="small">(지금 💥)</span>`);await sleep(1500);if(tok!==OK.tok)return;steps[i][1]();okDots(i+1,steps.map(s=>s[0]));}
+  OK.running=false;$('okCrash').disabled=true;$('okRun').disabled=false;log('okLog','정전 없이 끝났어요. 이번엔 중간에 💥를 눌러 보세요.','good');};
+$('okCrash').onclick=()=>{OK.tok++;$('okCrash').disabled=true;$('okRun').disabled=false;
+  if(OK.oked&&!OK.synced)log('okLog','💥 손님은 <b>OK를 받았는데</b> 기록은 메모리에만 있다가 사라졌어요. <b>약속 위반</b>: "됐다고 했잖아요!" 은행이라면 송금 완료 문자를 받았는데 돈이 그대로인 상황이에요.','err');
+  else if(OK.synced)log('okLog','💥 sync가 끝났으니 기록은 디스크에 있어요. 다시 켜면 WAL 재생으로 살아나요'+(OK.oked?'.':'. 손님은 OK를 못 받았으니 "결과 모름"이고 확인 후 다시 시도하면 돼요.'),'good');
+  else log('okLog','💥 기록이 사라졌지만 손님도 OK를 못 받았어요. 약속은 지켜졌어요. 손님은 실패로 알고 다시 시도해요.','good');};
+okDots(0,['기록','sync','OK']);
+segctl('okOrd',()=>{OK.tok++;$('okCrash').disabled=true;$('okRun').disabled=false;okDots(0,['기록','sync','OK']);log('okLog','▶을 누르고, 진행 중에 💥를 눌러 보세요.');});
+
+/* ===== 1-5 loom ===== */
+function interleavings(a,b){if(!a.length)return[b];if(!b.length)return[a];return interleavings(a.slice(1),b).map(r=>[a[0],...r]).concat(interleavings(a,b.slice(1)).map(r=>[b[0],...r]));}
+const LM_ALL=interleavings(['R1','W1'],['R2','W2']);
+function lmRun1(order){let v=0;const reg={};for(const s of order){const t=s[1];if(s[0]==='R')reg[t]=v;else v=reg[t]+1;}return v;}
+function lmAllowed(o){return segval('lmMode','m')==='none'||o.join('')==='R1W1R2W2'||o.join('')==='R2W2R1W1';}
+function lmTable(upto,cur){$('lmTab').innerHTML='<tr><th>#</th><th>실행 순서</th><th>칠판 결과</th></tr>'+LM_ALL.map((o,i)=>{const allowed=lmAllowed(o);const shown=i<upto;const v=lmRun1(o);
+  const cls=!allowed?'off':i===cur?'now':shown?(v===2?'good':'bad'):'';return `<tr class="${cls}"><td>${i+1}</td><td class="mono">${o.map(s=>`<span class="op t${s[1]}">${s}</span>`).join(' → ')}</td><td>${!allowed?'🔒 잠금 때문에 불가능한 순서':shown?(v===2?'2 ✅':'1 ❌ 잃어버린 업데이트'):'?'}</td></tr>`;}).join('');}
+$('lmRun').onclick=async()=>{for(let i=0;i<=LM_ALL.length;i++){lmTable(i,i<LM_ALL.length?i:-1);await sleep(450);}
+  const bad=LM_ALL.filter(o=>lmAllowed(o)&&lmRun1(o)!==2).length;const n=LM_ALL.filter(lmAllowed).length;
+  log('lmLog',bad?`가능한 ${n}가지 중 <b>${bad}가지가 틀려요</b>. 무작위 테스트라면 운이 좋을 때 못 볼 수도 있지만, loom은 하나도 안 놓쳐요.`:`잠금이 있으면 가능한 순서가 ${n}가지뿐이고, 모두 2예요. loom이 "모든 순서에서 맞다"를 증명해 줬어요.`,bad?'err':'good');};
+segctl('lmMode',()=>{lmTable(0,-1);log('lmLog','▶을 눌러 보세요.');});
+function fact(n){let r=1n;for(let i=2n;i<=BigInt(n);i++)r*=i;return r;}
+function lmCount(){const k=+$('lmSteps').value,t=+$('lmThreads').value;$('lmStepsV').textContent=k;$('lmThreadsV').textContent=t;const c=fact(k*t)/(fact(k)**BigInt(t));
+  log('lmCount',`일꾼 ${t}명이 ${k}걸음씩이면 가능한 순서는 <b class="mono">${c.toLocaleString()}</b>가지. 걸음이 조금만 늘어도 폭발해요. 그래서 loom은 검사할 부품을 <b>아주 작게</b> 떼어 내요.`);}
+$('lmSteps').oninput=lmCount;$('lmThreads').oninput=lmCount;lmCount();lmTable(0,-1);log('lmLog','▶을 눌러 보세요.');
+
+/* ===== 1-6 history checker ===== */
+const HC={
+ ok:{ev:[['T1 시작 (사진 v0)','',''],['','','T2 시작 (사진 v0)'],['읽기 x = 0','',''],['','','읽기 x = 0'],['쓰기 x = 1','',''],['COMMIT ✅','v1',''],['','','쓰기 x = 1'],['','✋','COMMIT ❌ 충돌'],['','','다시: 시작 (사진 v1), 읽기 x = 1'],['','','쓰기 x = 2, COMMIT ✅']],
+     res:['✅ 위반 없음. 두 번의 +1이 모두 남아 최종 x = 2예요. 충돌 난 T2는 다시 시도해서 성공했어요.','good']},
+ noconf:{ev:[['T1 시작 (사진 v0)','',''],['','','T2 시작 (사진 v0)'],['읽기 x = 0','',''],['','','읽기 x = 0'],['쓰기 x = 1','',''],['COMMIT ✅','v1',''],['','','쓰기 x = 1'],['','v2','COMMIT ✅ (검사 꺼짐!)']],
+     res:['🚨 검사기: <b>잃어버린 업데이트</b>. T1과 T2가 모두 x = 0을 읽고 둘 다 커밋했는데, 최종 x = 1이에요. T2는 자기 사진 이후에 T1이 커밋한 x를 덮어썼어요.','err']},
+ latest:{ev:[['T1 시작 (사진 v0)','',''],['읽기 y = 0','',''],['','','T2 시작 (사진 v0)'],['','','쓰기 y = 5'],['','v1','COMMIT ✅'],['읽기 y = 5 (?!)','',''],['COMMIT ✅','v2','']],
+     res:['🚨 검사기: <b>반복 불가능한 읽기</b>. T1이 같은 y를 두 번 읽었는데 0 → 5로 바뀌었어요. 시작 이후의 커밋(T2, v1)이 보였으니 사진이 아니라 최신 트리를 읽은 거예요.','err']}};
+function hcRender(){const h=HC[segval('hcBug','b')];$('hcLanes').innerHTML='<div class="hd">T1</div><div class="hd">커밋 순서</div><div class="hd">T2</div>'+h.ev.map(([a,m,b])=>`<div>${a?`<div class="ev${/❌/.test(a)?' bad':/✅/.test(a)?' good':''}">${a}</div>`:'<div class="empty"></div>'}</div><div>${m?`<div class="mid">${m}</div>`:'<div class="empty"></div>'}</div><div>${b?`<div class="ev${/❌/.test(b)?' bad':/✅/.test(b)?' good':''}">${b}</div>`:'<div class="empty"></div>'}</div>`).join('');log('hcLog',h.res[0],h.res[1]);}
+segctl('hcBug',hcRender);hcRender();
+
+/* ===== 1-7 A/B ===== */
+function randn(){let u=0,v=0;while(!u)u=Math.random();while(!v)v=Math.random();return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v);}
+function abLabels(){$('abDiffV').textContent='+'+$('abDiff').value+'%';$('abNoiseV').textContent='±'+$('abNoise').value+'%';$('abNV').textContent=$('abN').value+'번';}
+let AB=null;
+function abDraw(){if(!AB)return;const {A,B,diff}=AB;const all=A.concat(B);const lo=Math.min(...all)-3,hi=Math.max(...all)+3;const X=v=>60+(v-lo)/(hi-lo)*680;
+  const mean=a=>a.reduce((x,y)=>x+y,0)/a.length;const sd=a=>{const m=mean(a);return Math.sqrt(a.reduce((x,y)=>x+(y-m)**2,0)/(a.length-1));};
+  let s='';[['A',A,css('--inner'),45],['B',B,css('--oak'),115]].forEach(([n,a,c,y])=>{s+=`<text x="20" y="${y+5}" font-size="15" font-weight="900" fill="${c}">${n}</text>`;a.forEach(v=>s+=`<circle cx="${X(v)}" cy="${y+(Math.random()-.5)*18}" r="5" fill="${c}" opacity=".55"/>`);const m=mean(a);s+=`<line x1="${X(m)}" y1="${y-22}" x2="${X(m)}" y2="${y+22}" stroke="${c}" stroke-width="3"/>`;});
+  s+=`<text x="740" y="165" font-size="11" text-anchor="end" fill="${css('--muted')}">초당 커밋 (A 평균을 100으로)</text>`;$('abSvg').innerHTML=s;
+  const d=mean(B)-mean(A),se=Math.sqrt(sd(A)**2/A.length+sd(B)**2/B.length),ci=1.96*se;const sig=Math.abs(d)>ci;
+  log('abLog',`${diff===0?'<b>A/A</b> (진짜 차이 0%)':'<b>A/B</b> (진짜 개선 +'+diff+'%)'} · 잰 차이 <b>${d>=0?'+':''}${d.toFixed(1)}</b> ± ${ci.toFixed(1)} (95%) → ${sig?(diff===0?'⚠️ "차이 있음"이 나왔어요. 같은 코드인데도요! 우연(5% 확률) 아니면 측정 환경이 흔들리는 거예요.':'✅ 차이 있음'):(diff===0?'✅ 구분 못 함. A/A에서는 이게 정상이에요.':'🤷 구분 못 함. 흔들림에 묻혔어요. 반복을 늘려 보세요.')}`,sig===(diff>0)?'good':'err');}
+function abRun(diff){const n=+$('abN').value,noise=+$('abNoise').value;AB={diff,A:Array.from({length:n},()=>100+randn()*noise),B:Array.from({length:n},()=>100*(1+diff/100)+randn()*noise)};abDraw();}
+['abDiff','abNoise','abN'].forEach(id=>$(id).oninput=abLabels);abLabels();$('abRun').onclick=()=>abRun(+$('abDiff').value);$('abAA').onclick=()=>abRun(0);redraws.push(abDraw);abRun(3);
+
+/* ===== SQL mini lexer/parser ===== */
+const KW=new Set(['SELECT','FROM','WHERE','INSERT','INTO','VALUES','UPDATE','SET','DELETE','CREATE','TABLE','PRIMARY','KEY','INTEGER','TEXT','BLOB','AND','OR','NOT','NULL','IS','BETWEEN','BEGIN','COMMIT','ROLLBACK']);
+function lex(src){const out=[];let i=0;while(i<src.length){const c=src[i];
+  if(/\s/.test(c)){i++;continue;}
+  if(/[A-Za-z_]/.test(c)){let j=i;while(j<src.length&&/[A-Za-z0-9_]/.test(src[j]))j++;const w=src.slice(i,j);KW.has(w.toUpperCase())?out.push({k:'kw',v:w.toUpperCase(),p:i}):out.push({k:'id',v:w,p:i});i=j;continue;}
+  if(/[0-9]/.test(c)){let j=i;while(j<src.length&&/[0-9]/.test(src[j]))j++;out.push({k:'num',v:+src.slice(i,j),p:i});i=j;continue;}
+  if(c==="'"){let j=i+1,s='';for(;;){if(j>=src.length)throw {m:'따옴표가 닫히지 않았어요',p:i};if(src[j]==="'"){if(src[j+1]==="'"){s+="'";j+=2;continue;}break;}s+=src[j++];}out.push({k:'str',v:s,p:i});i=j+1;continue;}
+  const two=src.slice(i,i+2);if(['<=','>=','!=','<>'].includes(two)){out.push({k:'sym',v:two==='<>'?'!=':two,p:i});i+=2;continue;}
+  if('(),;*=<>+-'.includes(c)){out.push({k:'sym',v:c,p:i});i++;continue;}
+  throw {m:`모르는 글자 '${c}'`,p:i};}
+  return out;}
+function Parser(toks){let i=0;const peek=()=>toks[i],at=(k,v)=>toks[i]&&toks[i].k===k&&(v===undefined||toks[i].v===v);
+  const err=m=>{throw {m:m+(toks[i]?` ('${toks[i].k==='str'?"'"+toks[i].v+"'":toks[i].v}' 앞)`:' (문장 끝)'),p:toks[i]?toks[i].p:null};};
+  const eat=(k,v,what)=>{if(at(k,v))return toks[i++];err(`${what||v}이(가) 와야 해요`);};
+  const ident=w=>eat('id',undefined,w||'이름').v;
+  function expr(){return or();}
+  function or(){let l=and();while(at('kw','OR')){i++;l={t:'OR',l,r:and()};}return l;}
+  function and(){let l=not();while(at('kw','AND')){i++;l={t:'AND',l,r:not()};}return l;}
+  function not(){if(at('kw','NOT')){i++;return {t:'NOT',e:not()};}return cmp();}
+  function cmp(){const l=add();if(at('sym')&&['=','!=','<','<=','>','>='].includes(peek().v)){const op=toks[i++].v;return {t:'CMP',op,l,r:add()};}
+    if(at('kw','BETWEEN')){i++;const lo=add();eat('kw','AND','AND');return {t:'BETWEEN',e:l,lo,hi:add()};}
+    if(at('kw','IS')){i++;let neg=false;if(at('kw','NOT')){i++;neg=true;}eat('kw','NULL','NULL');return {t:'ISNULL',neg,e:l};}return l;}
+  function add(){let l=prim();while(at('sym','+')||at('sym','-')){const op=toks[i++].v;l={t:'ARITH',op,l,r:prim()};}return l;}
+  function prim(){if(at('num'))return {t:'LIT',v:toks[i++].v};if(at('sym','-')&&toks[i+1]&&toks[i+1].k==='num'){i++;return {t:'LIT',v:-toks[i++].v};}
+    if(at('str'))return {t:'LIT',v:toks[i++].v,s:true};if(at('kw','NULL')){i++;return {t:'LIT',v:null};}if(at('id'))return {t:'COL',n:toks[i++].v};
+    if(at('sym','(')){i++;const e=expr();eat('sym',')',')');return e;}err('값이나 열 이름이 와야 해요');}
+  function where(){if(at('kw','WHERE')){i++;return expr();}return null;}
+  function stmt(){const t=peek();if(!t)err('문장이 비었어요');
+    if(at('kw','SELECT')){i++;let cols;if(at('sym','*')){i++;cols=['*'];}else{cols=[ident('열 이름')];while(at('sym',',')){i++;cols.push(ident('열 이름'));}}eat('kw','FROM','FROM');const tb=ident('표 이름');return {t:'SELECT',cols,tb,w:where()};}
+    if(at('kw','INSERT')){i++;eat('kw','INTO','INTO');const tb=ident('표 이름');let cols=null;if(at('sym','(')){i++;cols=[ident()];while(at('sym',',')){i++;cols.push(ident());}eat('sym',')',')');}
+      eat('kw','VALUES','VALUES');const rows=[];do{if(rows.length)i++;eat('sym','(','(');const r=[expr()];while(at('sym',',')){i++;r.push(expr());}eat('sym',')',')');rows.push(r);}while(at('sym',','));return {t:'INSERT',tb,cols,rows};}
+    if(at('kw','UPDATE')){i++;const tb=ident('표 이름');eat('kw','SET','SET');const sets=[];do{if(sets.length)i++;const c=ident('열 이름');eat('sym','=','=');sets.push([c,expr()]);}while(at('sym',','));return {t:'UPDATE',tb,sets,w:where()};}
+    if(at('kw','DELETE')){i++;eat('kw','FROM','FROM');const tb=ident('표 이름');return {t:'DELETE',tb,w:where()};}
+    if(at('kw','CREATE')){i++;eat('kw','TABLE','TABLE');const tb=ident('표 이름');eat('sym','(','(');const cols=[];do{if(cols.length)i++;const n=ident('열 이름');if(!(at('kw','INTEGER')||at('kw','TEXT')||at('kw','BLOB')))err('타입(INTEGER/TEXT/BLOB)이 와야 해요');const ty=toks[i++].v;let pk=false;if(at('kw','PRIMARY')){i++;eat('kw','KEY','KEY');pk=true;}cols.push({n,ty,pk});}while(at('sym',','));eat('sym',')',')');return {t:'CREATE',tb,cols};}
+    if(at('kw','BEGIN')||at('kw','COMMIT')||at('kw','ROLLBACK')){return {t:toks[i++].v};}
+    err('지원하는 문장(SELECT/INSERT/UPDATE/DELETE/CREATE/BEGIN/COMMIT/ROLLBACK)이 아니에요');}
+  return {stmt:()=>{const s=stmt();if(at('sym',';'))i++;if(i<toks.length)err('문장이 끝나야 해요');return s;},expr:()=>{const e=expr();if(i<toks.length)err('식이 끝나야 해요');return e;}};}
+function lit(v,s){return v===null?'NULL':s?`'${v}'`:v;}
+function exprTree(e){const n=(cls,txt,kids,r)=>`<li><span class="nd ${cls}">${esc(txt)}${r?`<span class="r">${r}</span>`:''}</span>${kids&&kids.length?'<ul>'+kids.join('')+'</ul>':''}</li>`;
+  switch(e.t){case 'OR':case 'AND':return n('lg',e.t,[exprTree(e.l),exprTree(e.r)]);case 'NOT':return n('lg','NOT',[exprTree(e.e)]);
+    case 'CMP':return n('cmp',e.op,[exprTree(e.l),exprTree(e.r)]);case 'BETWEEN':return n('cmp','BETWEEN',[exprTree(e.e),exprTree(e.lo),exprTree(e.hi)]);
+    case 'ISNULL':return n('cmp',e.neg?'IS NOT NULL':'IS NULL',[exprTree(e.e)]);case 'ARITH':return n('cmp',e.op,[exprTree(e.l),exprTree(e.r)]);
+    case 'LIT':return n('lit',lit(e.v,e.s),null,'값');case 'COL':return n('',e.n,null,'열');}}
+function stmtTree(s){const n=(cls,txt,kids,r)=>`<li><span class="nd ${cls}">${esc(txt)}${r?`<span class="r">${r}</span>`:''}</span>${kids&&kids.length?'<ul>'+kids.join('')+'</ul>':''}</li>`;
+  const W=s.w?[n('lg','WHERE',[exprTree(s.w)])]:[];
+  switch(s.t){case 'SELECT':return n('st','SELECT',[n('','열: '+s.cols.join(', ')),n('','표: '+s.tb),...W]);
+    case 'INSERT':return n('st','INSERT',[n('','표: '+s.tb),...(s.cols?[n('','열: '+s.cols.join(', '))]:[]),...s.rows.map((r,k)=>n('','행 '+(k+1),r.map(exprTree)))]);
+    case 'UPDATE':return n('st','UPDATE',[n('','표: '+s.tb),...s.sets.map(([c,e])=>n('cmp','SET '+c+' =',[exprTree(e)])),...W]);
+    case 'DELETE':return n('st','DELETE',[n('','표: '+s.tb),...W]);
+    case 'CREATE':return n('st','CREATE TABLE',[n('','표: '+s.tb),...s.cols.map(c=>n('',`${c.n} ${c.ty}${c.pk?' PRIMARY KEY':''}`))]);
+    default:return n('st',s.t,null,'트랜잭션 명령');}}
+const TKNAME={kw:'키워드',id:'이름',num:'숫자',str:'글자',sym:'기호'};
+function psRun(){const src=$('psIn').value;try{const toks=lex(src);$('psToks').innerHTML=toks.map((t,k)=>`<span class="tk ${t.k}" style="animation-delay:${k*25}ms">${esc(t.k==='str'?"'"+t.v+"'":t.v)}<small>${TKNAME[t.k]}</small></span>`).join('');
+  try{const s=Parser(toks).stmt();$('psTree').innerHTML='<ul>'+stmtTree(s)+'</ul>';log('psLog',`✅ 낱말 ${toks.length}개 → 나무 완성. 실행기는 이 나무를 보고 엔진의 <code>get</code>/<code>scan</code>/<code>put</code>을 불러요.`,'good');}
+  catch(e){$('psTree').innerHTML='';log('psLog',`❌ <b>문법 오류</b>${e.p!=null?` (${e.p+1}번째 글자)`:''}: ${esc(e.m)}`,'err');}}
+  catch(e){$('psToks').innerHTML='';$('psTree').innerHTML='';log('psLog',`❌ <b>렉서 오류</b> (${e.p+1}번째 글자): ${esc(e.m)}`,'err');}}
+const PS_EX=["SELECT name FROM users WHERE id >= 10 AND (age < 30 OR name = 'kim')","INSERT INTO users (id, name) VALUES (1, 'kim'), (2, 'lee')","UPDATE users SET age = age + 1 WHERE id BETWEEN 3 AND 5","DELETE FROM users WHERE age IS NULL","CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)","SELEC * FROM users","SELECT * FROM users WHERE name = 'kim"];
+$('psEx').innerHTML=PS_EX.map((q,k)=>`<button data-k="${k}" class="small">${k<5?['SELECT','INSERT','UPDATE','DELETE','CREATE'][k]:k===5?'오타 1':'오타 2'}</button>`).join('');
+$('psEx').querySelectorAll('button').forEach(b=>b.onclick=()=>{$('psIn').value=PS_EX[+b.dataset.k];psRun();});$('psIn').oninput=psRun;psRun();
+
+/* 2-2 precedence */
+function prRun(inp,out){try{const e=Parser(lex($(inp).value)).expr();$(out).innerHTML='<ul>'+exprTree(e)+'</ul>';}catch(e){$(out).innerHTML=`<div class="log err">❌ ${esc(e.m)}</div>`;}}
+$('prA').oninput=()=>prRun('prA','prTA');$('prB').oninput=()=>prRun('prB','prTB');prRun('prA','prTA');prRun('prB','prTB');
+
+/* 2-3 WHERE plan */
+const NAMES=['kim','lee','park','choi','jung','kang','cho','yoon','jang','lim','han','oh'];
+const ROWS=Array.from({length:24},(_,k)=>({id:k+1,name:NAMES[(k*5)%12],age:(k%7===3)?null:18+((k*13)%27)}));
+function ev(e,row){switch(e.t){case 'LIT':return e.v;case 'COL':if(!(e.n in row))throw {m:`없는 열 '${e.n}'`};return row[e.n];
+  case 'ARITH':{const a=ev(e.l,row),b=ev(e.r,row);if(a===null||b===null)return null;return e.op==='+'?a+b:a-b;}
+  case 'CMP':{const a=ev(e.l,row),b=ev(e.r,row);if(a===null||b===null)return null;if(typeof a!==typeof b)throw {m:`타입이 달라 비교할 수 없어요 (${a} ${e.op} ${b})`};
+    return {'=':a===b,'!=':a!==b,'<':a<b,'<=':a<=b,'>':a>b,'>=':a>=b}[e.op];}
+  case 'BETWEEN':{const v=ev(e.e,row),lo=ev(e.lo,row),hi=ev(e.hi,row);if(v===null||lo===null||hi===null)return null;return v>=lo&&v<=hi;}
+  case 'ISNULL':{const v=ev(e.e,row);return e.neg?v!==null:v===null;}
+  case 'AND':{const a=ev(e.l,row),b=ev(e.r,row);if(a===false||b===false)return false;if(a===null||b===null)return null;return true;}
+  case 'OR':{const a=ev(e.l,row),b=ev(e.r,row);if(a===true||b===true)return true;if(a===null||b===null)return null;return false;}
+  case 'NOT':{const a=ev(e.e,row);return a===null?null:!a;}}}
+function conj(e){return e.t==='AND'?conj(e.l).concat(conj(e.r)):[e];}
+function pkRange(e){let lo=-Infinity,hi=Infinity,used=0;for(const c of conj(e)){
+  if(c.t==='CMP'){let col,val,op=c.op;if(c.l.t==='COL'&&c.l.n==='id'&&c.r.t==='LIT'&&typeof c.r.v==='number'){val=c.r.v;}else if(c.r.t==='COL'&&c.r.n==='id'&&c.l.t==='LIT'&&typeof c.l.v==='number'){val=c.l.v;op={'<':'>','<=':'>=','>':'<','>=':'<=','=':'=','!=':'!='}[op];}else continue;
+    if(op==='=' ){lo=Math.max(lo,val);hi=Math.min(hi,val);used++;}else if(op==='>'){lo=Math.max(lo,val+1);used++;}else if(op==='>='){lo=Math.max(lo,val);used++;}else if(op==='<'){hi=Math.min(hi,val-1);used++;}else if(op==='<='){hi=Math.min(hi,val);used++;}}
+  else if(c.t==='BETWEEN'&&c.e.t==='COL'&&c.e.n==='id'&&c.lo.t==='LIT'&&c.hi.t==='LIT'&&typeof c.lo.v==='number'&&typeof c.hi.v==='number'){lo=Math.max(lo,c.lo.v);hi=Math.min(hi,c.hi.v);used++;}}
+  return used?{lo,hi}:null;}
+function wpRun(){let e;try{e=Parser(lex($('wpIn').value)).expr();}catch(x){log('wpLog','❌ 문법 오류: '+esc(x.m),'err');return;}
+  const r=pkRange(e);let res;try{res=ROWS.map(row=>{const inR=!r||(row.id>=r.lo&&row.id<=r.hi);return {row,scan:inR,hit:inR&&ev(e,row)===true};});}catch(x){log('wpLog','❌ '+(/타입/.test(x.m)?'<b>타입 오류</b>: ':'')+esc(x.m),'err');return;}
+  $('wpGrid').innerHTML=res.map(x=>`<div class="${x.hit?'hit':x.scan?'scan':''}">${x.row.id}<small>${x.row.name}</small><small>${x.row.age===null?'∅':x.row.age}</small></div>`).join('');
+  const nr=res.filter(x=>x.scan).length,nh=res.filter(x=>x.hit).length;$('wpRead').textContent=nr;$('wpHit').textContent=nh;
+  $('wpPlan').textContent=r?(r.lo>r.hi?'범위 비어 있음':`범위 조회 id ${r.lo===-Infinity?'처음':r.lo}~${r.hi===Infinity?'끝':r.hi}`):'전체 훑기 + 거르기';
+  log('wpLog',r?`id 조건으로 범위를 좁혀 <b>${nr}행만</b> 읽었어요. 나머지 조건은 읽은 행에서 하나씩 걸러요.`:`id로 범위를 좁힐 수 없어 <b>24행 전부</b> 읽고 하나씩 검사했어요. 행이 백만 개면 백만 번이에요.`,r?'good':'');}
+const WP_EX=['id >= 5 AND id < 12 AND age > 25','id BETWEEN 10 AND 14','age > 30','name = \'kim\'','id = 3 OR id = 20','age = NULL','age IS NULL','NOT age < 30'];
+$('wpEx').innerHTML=WP_EX.map((q,k)=>`<button data-k="${k}" class="small mono">${esc(q)}</button>`).join('');$('wpEx').querySelectorAll('button').forEach(b=>b.onclick=()=>{$('wpIn').value=WP_EX[+b.dataset.k];wpRun();});$('wpIn').oninput=wpRun;wpRun();
+
+/* 2-4 3VL */
+const V3={T:true,F:false,N:null};const V3N=v=>v===true?'<span class="v-t">참</span>':v===false?'<span class="v-f">거짓</span>':'<span class="v-n">모름</span>';
+const AND3=(a,b)=>a===false||b===false?false:a===null||b===null?null:true,OR3=(a,b)=>a===true||b===true?true:a===null||b===null?null:false,NOT3=a=>a===null?null:!a;
+function nlRun(){const a=segval('nlA','v'),b=segval('nlB','v');const ks=['T','F','N'];
+  const tab=(name,f)=>`<div class="card" style="margin:0"><b>A ${name} B</b><table class="tt"><tr><th>A＼B</th>${ks.map(k=>`<th>${V3N(V3[k])}</th>`).join('')}</tr>${ks.map(x=>`<tr><th>${V3N(V3[x])}</th>${ks.map(y=>`<td class="${x===a&&y===b?'on':''}">${V3N(f(V3[x],V3[y]))}</td>`).join('')}</tr>`).join('')}</table></div>`;
+  $('nlTabs').innerHTML=tab('AND',AND3)+tab('OR',OR3)+`<div class="card" style="margin:0"><b>NOT A</b><table class="tt"><tr><th>A</th><th>NOT A</th></tr>${ks.map(x=>`<tr><th>${V3N(V3[x])}</th><td class="${x===a?'on':''}">${V3N(NOT3(V3[x]))}</td></tr>`).join('')}</table></div>`;
+  const r=AND3(V3[a],V3[b]),o=OR3(V3[a],V3[b]);
+  log('nlLog',`A AND B = ${V3N(r)}, A OR B = ${V3N(o)}. 규칙 한 줄: <b>모름이 끼어도 답이 정해지면 그 답, 아니면 모름</b>. (거짓 AND 모름 = 거짓, 참 OR 모름 = 참) WHERE에서는 ${r===true?'A AND B인 행이 통과해요.':'A AND B인 행은 <b>탈락</b>이에요. 거짓도 모름도 통과 못 해요.'}`);}
+segctl('nlA',nlRun);segctl('nlB',nlRun);nlRun();
+
+/* 2-5 Halloween */
+const HW={tok:0};
+function hwShow(keys,cur,fresh){$('hwLeaf').innerHTML=keys.map(k=>`<span class="${k===cur?'cur':''} ${fresh===k?'newk':''}">${k}</span>`).join('');}
+$('hwRun').onclick=async()=>{const tok=++HW.tok;let keys=[1,2,3,4,5,40];let cnt=0;$('hwCnt').textContent=0;hwShow(keys);const live=segval('hwMode','m')==='live';
+  if(live){let cur=-Infinity;for(let g=0;g<40;g++){const nx=keys.find(k=>k>cur);if(nx===undefined)break;cur=nx;hwShow(keys,cur);log('hwLog',`커서가 ${cur}에 있어요. ${cur<30?'id &lt; 30이니 고쳐요 → '+(cur+10):'조건에 안 맞아 지나가요.'}`);await sleep(600);if(tok!==HW.tok)return;
+      if(cur<30){keys=keys.filter(k=>k!==cur).concat(cur+10).sort((a,b)=>a-b);cnt++;$('hwCnt').textContent=cnt;hwShow(keys,cur,cur+10);await sleep(350);if(tok!==HW.tok)return;}}
+    hwShow(keys);log('hwLog',`❌ 5행을 고치려 했는데 <b>${cnt}번</b> 고쳤어요. 1 → 11 → 21 → 31처럼 같은 행이 커서 앞으로 옮겨 가서 또 만났어요. 결과 id도 31~35로 틀렸어요(기대: 11~15).`,'err');}
+  else{const tgt=keys.filter(k=>k<30);log('hwLog',`① 먼저 대상 키를 다 모아요: [${tgt.join(', ')}] (이 목록은 더 이상 안 바뀌어요)`);hwShow(keys);await sleep(1200);
+    for(const k of tgt){if(tok!==HW.tok)return;keys=keys.filter(x=>x!==k).concat(k+10).sort((a,b)=>a-b);cnt++;$('hwCnt').textContent=cnt;hwShow(keys,null,k+10);log('hwLog',`② ${k} → ${k+10}`);await sleep(500);}
+    log('hwLog','✅ 정확히 5번, 결과 11~15. 대가: 대상 키를 담아 둘 메모리가 필요해요. 대신 "사진(스냅샷)만 훑기"도 같은 효과가 있어요.','good');}};
+segctl('hwMode',()=>{HW.tok++;hwShow([1,2,3,4,5,40]);$('hwCnt').textContent=0;log('hwLog','▶을 눌러 보세요.');});hwShow([1,2,3,4,5,40]);log('hwLog','▶을 눌러 보세요. 40은 조건(id &lt; 30)에 안 맞는 행이에요.');
+
+/* 2-6 error cards */
+(function(){const C=[
+ ['✏️','SELEC * FROM users','오타','문법 오류','"SELEC"에서 막힘. 위치를 함께 알려 줘요.','다시 해도 똑같이 실패. 고쳐서 보내야 해요.'],
+ ['🔢',"INSERT INTO users VALUES ('kim', 1)",'id가 INTEGER인 표','타입 오류','id 자리에 글자가 왔어요.','다시 해도 실패. 값을 고쳐야 해요.'],
+ ['🚧','SELECT * FROM a JOIN b ON …','JOIN','미지원 기능','문법은 맞지만 Oakdb v1 범위 밖이에요(스펙의 Out of scope).','다시 해도 실패. 다른 방법을 써야 해요.'],
+ ['🔑',"INSERT INTO users VALUES (1, 'lee')",'id 1이 이미 있음','제약 위반 (기본 키 중복)','같은 기본 키는 두 번 못 넣어요.','다시 해도 실패. 다른 키를 쓰거나 UPDATE를 써야 해요.'],
+ ['⚔️','COMMIT','남이 같은 키를 먼저 커밋','충돌 (14번)','first-committer-wins에서 진 쪽이에요.','✅ <b>다시 해 볼 만해요</b>. BEGIN부터 새로 하면 남의 쓰기가 보이는 새 사진에서 시작해요.'],
+ ['💾','COMMIT','디스크 sync가 실패','결과 모름 (12번)','커밋이 됐는지 안 됐는지 엔진도 몰라요. 엔진은 멈춰요.','⚠️ 그냥 다시 하면 안 돼요. 다시 띄운 뒤 결과를 확인해야 해요.']];
+ $('erFlips').innerHTML=C.map(c=>`<div class="flip"><div class="in"><div class="fr"><div><div class="ico">${c[0]}</div><div class="q mono" style="font-size:14px">${esc(c[1])}</div></div><div><div class="src">${c[2]}</div><div class="hint">눌러서 종류 보기 ↻</div></div></div><div class="bk"><div class="a">${c[3]}</div>${c[4]}<div class="no">${c[5]}</div></div></div></div>`).join('');
+ document.querySelectorAll('#erFlips .flip').forEach(f=>f.onclick=()=>f.classList.toggle('on'));})();
+
+/* 2-7 txn session */
+const TX={};
+function txReset(){TX.db={owner:'(빈자리)',ver:0};TX.tx=null;txRender();log('txLog','명령을 눌러 보세요. BEGIN 없이 UPDATE를 보내면 그 문장 하나가 바로 커밋돼요.');}
+function txRender(){$('txMode').className='mode '+(TX.tx?'tx':'auto');$('txMode').textContent=TX.tx?`트랜잭션 안 (사진 v${TX.tx.snap.ver})`:'자동 커밋';
+  $('txPend').innerHTML=TX.tx?(TX.tx.w?'개인 버퍼: A1.owner = \'나\' (아직 남에게 안 보임)':'개인 버퍼: 비어 있음'):'BEGIN 전이에요';$('txDb').innerHTML=`seats: A1 → owner = '${TX.db.owner}' <span class="small">(v${TX.db.ver})</span>`;}
+$('txBegin').onclick=()=>{if(TX.tx){log('txLog','❌ 이미 트랜잭션 안이에요 (SQLite처럼 오류로 처리).','err');return;}TX.tx={snap:{...TX.db},w:false};txRender();log('txLog','BEGIN: 지금 DB의 사진(v'+TX.db.ver+')을 찍고 장바구니를 들었어요.');};
+$('txUpd').onclick=()=>{if(TX.tx){TX.tx.w=true;txRender();log('txLog','UPDATE: 내 장바구니에만 담았어요. 남에게는 아직 안 보여요. 영향받은 행: 1');}
+  else{TX.db={owner:'나',ver:TX.db.ver+1};txRender();log('txLog','UPDATE (자동 커밋): 이 문장 하나가 트랜잭션 하나로 실행되고 <b>바로 커밋</b>됐어요.','good');}};
+$('txSel').onclick=()=>{const v=TX.tx?(TX.tx.w?'나':TX.tx.snap.owner):TX.db.owner;log('txLog',`SELECT → A1.owner = '${v}' ${TX.tx?`(사진 v${TX.tx.snap.ver} + 내 쓰기를 봐요${TX.db.ver>TX.tx.snap.ver?'. 그 뒤의 커밋 v'+TX.db.ver+'은 안 보여요':''})`:'(최신 커밋)'}`);};
+$('txCommit').onclick=()=>{if(!TX.tx){log('txLog','❌ 트랜잭션 밖에서 COMMIT: 할 게 없어요 (SQLite처럼 오류로 처리).','err');return;}
+  if(TX.tx.w&&TX.db.ver>TX.tx.snap.ver){TX.tx=null;txRender();log('txLog','❌ <b>충돌 오류</b>: 내 사진 이후 다른 손님이 A1을 먼저 커밋했어요. 트랜잭션은 끝났고 흔적은 없어요. 다시 하려면 BEGIN부터.','err');return;}
+  if(TX.tx.w)TX.db={owner:'나',ver:TX.db.ver+1};TX.tx=null;txRender();log('txLog','✅ COMMIT: 장바구니가 한 번에 반영됐어요.','good');};
+$('txRb').onclick=()=>{if(!TX.tx){log('txLog','❌ 트랜잭션 밖에서 ROLLBACK (SQLite처럼 오류로 처리).','err');return;}TX.tx=null;txRender();log('txLog','ROLLBACK: 장바구니를 통째로 내려놨어요. DB에는 흔적이 없어요.');};
+$('txOther').onclick=()=>{TX.db={owner:'다른 손님',ver:TX.db.ver+1};txRender();log('txLog',`👤 다른 손님이 A1을 가져가고 커밋했어요 (v${TX.db.ver}).${TX.tx?' 내 사진은 그대로라 SELECT에는 안 보여요. 이제 COMMIT하면?':''}`);};
+$('txReset').onclick=txReset;txReset();
+
+/* 3-1 TCP framing */
+const TC_MSG=['SELECT 1','INSERT INTO t VALUES (2)','BEGIN'];
+function tcSend(){const len=segval('tcMode','m')==='len';const bytes=[];TC_MSG.forEach(m=>{if(len)bytes.push({ln:true,v:m.length});[...m].forEach(ch=>bytes.push({v:ch}));});
+  const cuts=new Set();const nCuts=2+Math.floor(Math.random()*3);while(cuts.size<nCuts)cuts.add(1+Math.floor(Math.random()*(bytes.length-1)));
+  const chunks=[];let cur=[];bytes.forEach((b,k)=>{if(cuts.has(k)){chunks.push(cur);cur=[];}cur.push(b);});chunks.push(cur);
+  $('tcStream').innerHTML=chunks.map((c,ci)=>c.map((b,k)=>`<span class="c${ci%2}${b.ln?' ln':''}${k===c.length-1&&ci<chunks.length-1?' cut':''}">${b.ln?b.v:b.v===' '?'␣':esc(b.v)}</span>`).join('')).join('');
+  let out='';if(!len){chunks.forEach(c=>{const s=c.map(b=>b.v).join('');const ok=TC_MSG.includes(s);out+=`<div class="outmsg ${ok?'good':'bad'}">${ok?'✅':'❌'} "${esc(s)}"</div>`;});
+    out+=`<div class="small">받은 덩어리 하나하나를 문장 하나로 착각해서 문장이 섞이고 끊겼어요. 보낸 문장은 3개예요.</div>`;}
+  else{const flat=chunks.flat();let p=0;while(p<flat.length){const n=flat[p].v;p++;const s=flat.slice(p,p+n).map(b=>b.v).join('');p+=n;out+=`<div class="outmsg good">✅ 길이 ${n} 읽음 → 정확히 ${n}글자 모으기 → "${esc(s)}"</div>`;}
+    out+=`<div class="small">덩어리가 ${chunks.length}개로 어떻게 잘려 와도, 길이를 먼저 읽고 그만큼 모으면 문장 3개가 정확히 나와요.</div>`;}
+  $('tcOut').innerHTML=out;}
+segctl('tcMode',tcSend);$('tcSend').onclick=tcSend;tcSend();
+
+/* 3-2 frame */
+function frRun(){const cmd=+segval('frCmd','c');const data=cmd===1?[...new TextEncoder().encode($('frIn').value)]:[];$('frIn').disabled=cmd!==1;const L=1+data.length;
+  const lenB=[(L>>>24)&255,(L>>>16)&255,(L>>>8)&255,L&255];const hx=b=>b.toString(16).padStart(2,'0');
+  $('frBytes').innerHTML=lenB.map((b,k)=>`<div class="byte len">${hx(b)}<small>${k===0?'길이':''}</small></div>`).join('')+`<div class="byte cmd">${hx(cmd)}<small>명령</small></div>`+data.map((b,k)=>`<div class="byte dat">${hx(b)}<small>${b>=32&&b<127?esc(String.fromCharCode(b)):'·'}</small></div>`).join('');
+  log('frLog',`총 ${4+L}바이트 = 길이 4바이트(빅 엔디언, 값 ${L}) + 명령 1바이트 + 데이터 ${data.length}바이트(UTF-8). 받는 쪽은 ① 4바이트를 <code>read_exact</code> ② 그 수만큼 <code>read_exact</code>. 길이 상한(예: 16MB)도 정해야 해요. 안 그러면 엉터리 길이 하나로 서버 메모리가 바닥나요.`);}
+segctl('frCmd',frRun);$('frIn').oninput=frRun;frRun();
+
+/* 3-3 threads vs async */
+function tmRun(){const n=Math.round(10**(+$('tmN').value/25));$('tmNV').textContent=n.toLocaleString()+'명';const thr=n*2,asy=n*8/1024;const mx=Math.max(thr,1);
+  const fmt=mb=>mb>=1024?(mb/1024).toFixed(1)+' GB':mb>=1?mb.toFixed(mb<10?1:0)+' MB':(mb*1024).toFixed(0)+' KB';
+  $('tmBars').innerHTML=`<div>① 스레드 ${n.toLocaleString()}개</div><div class="tr"><div class="fl" style="width:${Math.max(.5,thr/mx*100)}%;background:var(--oak)"></div></div><div class="n">${fmt(thr)} 예약</div>
+  <div>② async 작업 ${n.toLocaleString()}개</div><div class="tr"><div class="fl" style="width:${Math.max(.5,asy/mx*100)}%;background:var(--inner)"></div></div><div class="n">${fmt(asy)}</div>`;}
+$('tmN').oninput=tmRun;tmRun();
+
+/* 3-4 sessions */
+const CN={};
+function cnReset(){CN.db=[];CN.a={st:'auto',w:[]};cnRender();log('cnLog','A로 BEGIN → INSERT를 하고, B로 SELECT해 보세요. 그다음 A의 선을 뽑아 보세요.');}
+function cnRender(){const a=CN.a;$('cnAMode').className='mode '+(a.st==='tx'?'tx':a.st==='dead'?'dead':'auto');$('cnAMode').textContent=a.st==='tx'?'트랜잭션 안':a.st==='dead'?'🔌 끊김':'자동 커밋';
+  $('cnAPend').textContent=a.st==='tx'?(a.w.length?'안 커밋된 쓰기: '+a.w.map(x=>'id='+x).join(', '):'안 커밋된 쓰기 없음'):'';$('cnDb').textContent=CN.db.length?'users: '+CN.db.map(x=>'id='+x).join(', '):'users: (비어 있음)';
+  ['cnABegin','cnAIns','cnACommit','cnAPull'].forEach(id=>$(id).disabled=a.st==='dead');$('cnAConn').disabled=a.st!=='dead';}
+$('cnABegin').onclick=()=>{if(CN.a.st==='tx'){log('cnLog','A: 이미 트랜잭션 안이에요.','err');return;}CN.a={st:'tx',w:[]};cnRender();log('cnLog','A: BEGIN. 서버는 A 접속 전용 <code>Txn</code>을 만들어 A의 세션에 둬요.');};
+$('cnAIns').onclick=()=>{if(CN.a.st==='tx'){if(!CN.a.w.includes(7))CN.a.w.push(7);cnRender();log('cnLog','A: INSERT id=7 → A의 개인 버퍼에만.');}else{if(!CN.db.includes(7))CN.db.push(7);cnRender();log('cnLog','A: INSERT id=7 (자동 커밋) → 바로 DB에.','good');}};
+$('cnACommit').onclick=()=>{if(CN.a.st!=='tx'){log('cnLog','A: 트랜잭션 밖이라 COMMIT할 게 없어요.','err');return;}CN.a.w.forEach(x=>{if(!CN.db.includes(x))CN.db.push(x);});CN.a={st:'auto',w:[]};cnRender();log('cnLog','A: COMMIT ✅ 이제 B에게도 보여요.','good');};
+$('cnBSel').onclick=()=>{const has=CN.db.includes(7);log('cnLog',`B: SELECT id=7 → ${has?'1행 (id=7) ✅':'0행'}${!has&&CN.a.st==='tx'&&CN.a.w.includes(7)?'. A가 넣었지만 아직 커밋 전이라 B에게는 안 보여요.':''}`,has?'good':'');};
+$('cnAPull').onclick=()=>{const had=CN.a.st==='tx'&&CN.a.w.length;CN.a={st:'dead',w:[]};cnRender();log('cnLog',`🔌 A의 선이 뽑혔어요. 서버의 A 담당 코드가 다음 읽기에서 "연결 끊김"을 보고 끝나요 → 세션이 버려지며 <code>Txn</code>도 Drop → ${had?'<b>안 커밋된 id=7은 롤백</b>돼 흔적이 없어요. B로 확인해 보세요.':'진행 중인 트랜잭션이 없어 버릴 것도 없어요.'}`,'good');};
+$('cnAConn').onclick=()=>{CN.a={st:'auto',w:[]};cnRender();log('cnLog','A가 새로 접속했어요. 새 세션은 자동 커밋 상태로 시작해요.');};
+$('cnReset').onclick=cnReset;cnReset();
+
+/* 3-5 shutdown */
+const SD={tok:0};
+const SD_INIT=[['C1','😴 접속만 하고 쉬는 중',''],['C2','🛒 BEGIN 후 쓰는 중 (커밋 전)',''],['C3','📨 COMMIT 보냄, sync 기다리는 중','busy'],['C4','🚪 지금 막 접속하려는 중','']];
+function sdRender(cl){$('sdCl').innerHTML=cl.map(([n,s,c])=>`<div class="cl ${c}"><b>${n}</b><div class="s">${s}</div></div>`).join('');}
+function sdDots(k){$('sdDots').innerHTML=['신호','문 닫기','커밋 마무리','진행 중 정리','접속 닫기','종료'].map((s,i)=>`<span class="${i<k?'on':''}" title="${s}">${i+1}</span>`).join('');}
+function sdReset(){SD.tok++;SD.cl=SD_INIT.map(x=>[...x]);sdRender(SD.cl);sdDots(0);$('sdGo').disabled=false;log('sdLog','손님 네 명이 각자 다른 상태예요. 🛑를 눌러 보세요.');}
+$('sdGo').onclick=async()=>{const tok=++SD.tok;$('sdGo').disabled=true;const cl=SD.cl;
+  const steps=[[()=>{},'① 종료 신호를 받았어요. 서버는 "마감 모드"로 바뀌어요.'],
+    [()=>{cl[3]=['C4','🚫 접속 거절: "서버 종료 중"','bad'];},'② 문 닫기: 리스너(접속 받는 소켓)를 닫아 새 접속을 거절해요.'],
+    [()=>{cl[2]=['C3','✅ sync 끝 → OK 받음','good'];},'③ 이미 창구에 들어온 커밋(C3)은 끝까지 처리해요. sync가 끝나야 OK. 절대 반쯤에서 끊지 않아요.'],
+    [()=>{cl[1]=['C2','↩️ 롤백 + 오류 "서버 종료로 트랜잭션 취소"','bad'];},'④ 커밋 전인 트랜잭션(C2)은 롤백하고 <b>명확한 오류</b>를 보내요. (얼마나 기다려 줄지는 설계 때 정해요)'],
+    [()=>{cl[0]=['C1','👋 접속 닫힘 안내','good'];},'⑤ 쉬던 접속(C1)도 닫아요.'],
+    [()=>{},'⑥ 모든 접속 담당이 끝난 걸 확인하고 엔진을 닫아요. 다시 띄우면 C3의 커밋은 있고, C2의 쓰기는 없어요. 둘 다 각자 들은 말과 일치해요. ✅']];
+  for(let i=0;i<steps.length;i++){steps[i][0]();sdRender(cl);sdDots(i+1);log('sdLog',steps[i][1],i===steps.length-1?'good':'');await sleep(1500);if(tok!==SD.tok)return;}};
+$('sdReset').onclick=sdReset;sdReset();
+
+/* 3-6 network model */
+function nbDraw(){const rtt=+$('nbRtt').value/2;$('nbRttV').textContent=rtt+' ms';const gc=$('nbGc').checked;const svc=0.2,sync=3,batch=64;
+  const cap=gc?batch/(sync+batch*svc)*1000:1/(sync+svc)*1000;const thr=n=>Math.min(n/((rtt+svc+sync)/1000),cap);
+  const N=64,maxY=Math.max(cap*1.1,thr(1)*1.5,50);const X=n=>60+(n-1)/(N-1)*670,Y=v=>250-v/maxY*220;
+  let s=`<line x1="60" y1="250" x2="730" y2="250" stroke="${css('--line')}"/><line x1="60" y1="30" x2="60" y2="250" stroke="${css('--line')}"/>`;
+  [1,8,16,32,48,64].forEach(n=>s+=`<text x="${X(n)}" y="268" font-size="11" text-anchor="middle" fill="${css('--muted')}">${n}</text>`);
+  s+=`<text x="730" y="280" font-size="11" text-anchor="end" fill="${css('--muted')}">클라이언트 수</text><text x="64" y="24" font-size="11" fill="${css('--muted')}">초당 커밋</text>`;
+  s+=`<line x1="60" y1="${Y(cap)}" x2="730" y2="${Y(cap)}" stroke="${css('--warn')}" stroke-dasharray="5 4"/><text x="726" y="${Y(cap)-6}" font-size="11" text-anchor="end" fill="${css('--warn')}">창구 천장 ≈ ${Math.round(cap).toLocaleString()}/s</text>`;
+  let d='';for(let n=1;n<=N;n++)d+=(n===1?'M':'L')+X(n)+' '+Y(thr(n));s+=`<path d="${d}" fill="none" stroke="${css('--oak')}" stroke-width="3"/>`;
+  const knee=Math.ceil(cap*(rtt+svc+sync)/1000);$('nbSvg').innerHTML=s;
+  log('nbLog',`손님 한 명이 한 건에 쓰는 시간 = 왕복 ${rtt}ms + 처리·sync ${svc+sync}ms → 한 명당 초당 약 ${Math.round(1000/(rtt+svc+sync))}건. ${knee<=N?`손님 약 <b>${knee}명</b>부터 창구가 꽉 차요.`:'이 범위에서는 아직 창구가 안 꽉 차요.'} ${gc?'':'그룹 커밋이 없으면 sync 한 번에 한 건이라 천장이 아주 낮아요.'}`);}
+$('nbRtt').oninput=nbDraw;$('nbGc').onchange=nbDraw;redraws.push(nbDraw);nbDraw();
+</script>
+</body>
+</html>
