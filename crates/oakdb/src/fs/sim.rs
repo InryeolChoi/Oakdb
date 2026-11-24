@@ -70,6 +70,8 @@ struct GateState {
     let_go: usize,
     /// Whether the next sync panics ([`SimFs::panic_at_next_sync`]).
     panic_next: bool,
+    /// How long each sync takes ([`SimFs::set_sync_delay`]).
+    sync_delay: Duration,
 }
 
 impl Gate {
@@ -84,6 +86,12 @@ impl Gate {
         if std::mem::take(&mut state.panic_next) {
             drop(state);
             panic!("a sync panicked, as the test asked");
+        }
+        let delay = state.sync_delay;
+        if !delay.is_zero() {
+            drop(state);
+            std::thread::sleep(delay);
+            state = self.state();
         }
         if !state.held {
             return;
@@ -335,6 +343,14 @@ impl SimFs {
         HeldSyncs {
             gate: Arc::clone(&self.gate),
         }
+    }
+
+    /// Makes every [`FsFile::sync_data`] take `delay` before it does
+    /// anything, as a real disk's does, so commits sent meanwhile wait and
+    /// go as one batch (issue #29, design 0024 Q3). Zero, the default, makes
+    /// syncs instant.
+    pub fn set_sync_delay(&self, delay: Duration) {
+        self.gate.state().sync_delay = delay;
     }
 
     /// Makes the next [`FsFile::sync_data`] panic before it does anything,

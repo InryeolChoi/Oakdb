@@ -268,6 +268,34 @@ fn seeing_one_key_before_a_commit_and_another_after_it_is_read_skew() {
 }
 
 #[test]
+fn read_skew_in_a_transaction_that_lost_a_conflict_is_found_too() {
+    // t1 read two moments, then lost a conflict on x: its snapshot was
+    // still wrong.
+    let (t1, t2) = (t(0, 0), t(1, 0));
+    let y2 = Elem::new(t2, 1);
+    let history = History {
+        txns: vec![
+            txn(
+                t1,
+                Outcome::Fail,
+                0,
+                40,
+                vec![r("x", &[]), r("y", &[y2]), a("x", e(t1))],
+            ),
+            txn(
+                t2,
+                Outcome::Ok,
+                5,
+                10,
+                vec![r("x", &[]), a("x", e(t2)), r("y", &[]), a("y", y2)],
+            ),
+        ],
+        last: last(&[("x", &[e(t2)]), ("y", &[y2])]),
+    };
+    assert_finds(&history, Kind::GSingle);
+}
+
+#[test]
 fn seeing_half_of_another_transactions_writes_is_a_fractured_read() {
     // t2 wrote x and y; t1 sees its y but an older x, after t3 also wrote
     // y on top of t2.

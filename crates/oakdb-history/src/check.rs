@@ -108,9 +108,17 @@ impl Anomaly {
     }
 }
 
+/// A list as text, only its last few names if it is long.
 fn list(elems: &[Elem]) -> String {
-    let names: Vec<String> = elems.iter().map(Elem::to_string).collect();
-    format!("[{}]", names.join(","))
+    const SHOWN: usize = 4;
+    let from = elems.len().saturating_sub(SHOWN);
+    let names: Vec<String> = elems[from..].iter().map(Elem::to_string).collect();
+    let more = if from > 0 {
+        format!("{from} more,")
+    } else {
+        String::new()
+    };
+    format!("[{more}{}]", names.join(","))
 }
 
 fn cycle(f: &mut fmt::Formatter<'_>, cycle: &[(TxnId, Edge)]) -> fmt::Result {
@@ -521,7 +529,11 @@ impl<'h> Checker<'h> {
         }
     }
 
-    /// Builds the graph of committed transactions and sorts its cycles.
+    /// Builds the graph and sorts its cycles. Its writes are the committed
+    /// ones; its reads are every transaction's snapshot, those that did
+    /// not commit too: an aborted transaction writes nothing, but it read a
+    /// snapshot all the same, which must be one moment. So a transaction
+    /// that lost a conflict and read two moments is found too.
     fn cycles(&mut self) {
         let n = self.txns.len();
         let mut edges: Vec<Vec<(usize, Edge)>> = vec![Vec::new(); n];
@@ -534,7 +546,7 @@ impl<'h> Checker<'h> {
             }
         }
         for snap in &self.snaps {
-            if !self.committed[snap.txn] || !self.agrees(snap) {
+            if !self.agrees(snap) {
                 continue;
             }
             let r = snap.txn;

@@ -129,6 +129,18 @@ fn op(s: &str) -> Option<Op> {
     }
 }
 
+impl FromStr for Elem {
+    type Err = ParseError;
+
+    /// Reads a name as [`Elem`]'s `Display` writes it: `t2#17`, `t2#17/1`.
+    fn from_str(s: &str) -> Result<Self, ParseError> {
+        elem(s).ok_or_else(|| ParseError {
+            line: 1,
+            message: format!("{s:?} is not a name like t2#17"),
+        })
+    }
+}
+
 impl FromStr for History {
     type Err = ParseError;
 
