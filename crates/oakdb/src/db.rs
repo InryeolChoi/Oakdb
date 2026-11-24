@@ -33,8 +33,9 @@
 //!
 //! Threads share a database (`&Db` in a scope, or `Arc<Db>`) and run
 //! transactions at once (issue #27, design 0018). Commits and checkpoints
-//! go, one at a time in the order they come, to the commit thread, which
-//! alone touches the files. It holds no lock while it syncs: transactions
+//! go, in the order they come, to the commit thread, which alone touches
+//! the files. It takes the commits waiting for it as one batch, which
+//! shares one WAL write and one sync (issue #28, design 0021). It holds no lock while it syncs: transactions
 //! begin, read and end meanwhile, and a commit shows only once it is
 //! synced.
 
@@ -80,12 +81,17 @@ pub const MAX_BATCH: usize = 128;
 
 /// What the commit thread did since the database was opened, from
 /// [`Db::stats`] (issue #28, design 0021). Several commits sharing one sync
-/// show as `wal_syncs < commits`; the mean batch is `commits / batches`.
+/// show as `wal_syncs < commits`. A batch holds the commits that passed and
+/// those that conflicted, so the mean batch is
+/// `(commits + conflicts + in_doubt) / batches`, not `commits / batches`.
+/// The numbers are read one by one while the commit thread works, so they
+/// may be a moment apart: `commits` can briefly exceed `received`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Stats {
     /// Requests sent to the commit thread, commits and checkpoints. A
-    /// request is counted once it is waiting there.
+    /// request is counted once it is waiting there, so just after it is
+    /// sent: seeing the count means the request is queued.
     pub received: u64,
     /// Commits answered `Ok` that had writes.
     pub commits: u64,
@@ -96,8 +102,12 @@ pub struct Stats {
     /// Syncs of the WAL that commits made: one per batch that changed
     /// anything. Checkpoints' syncs are not counted.
     pub wal_syncs: u64,
-    /// The most commits one batch held.
+    /// The most commits one batch held, conflicting ones included, as
+    /// [`MAX_BATCH`] counts them.
     pub largest_batch: u64,
+    /// Commits answered [`Error::OutcomeUnknown`]: those that passed the
+    /// conflict check in the batch whose write or sync failed.
+    pub in_doubt: u64,
 }
 
 /// An open database. Threads can share it: it is `Send` and `Sync`.
@@ -141,13 +151,10 @@ struct Counters {
     batches: AtomicU64,
     wal_syncs: AtomicU64,
     largest_batch: AtomicU64,
+    in_doubt: AtomicU64,
 }
 
 impl Counters {
-    fn add(counter: &AtomicU64, n: u64) {
-        counter.fetch_add(n, Ordering::Relaxed);
-    }
-
     fn stats(&self) -> Stats {
         Stats {
             received: self.received.load(Ordering::Relaxed),
@@ -156,6 +163,7 @@ impl Counters {
             batches: self.batches.load(Ordering::Relaxed),
             wal_syncs: self.wal_syncs.load(Ordering::Relaxed),
             largest_batch: self.largest_batch.load(Ordering::Relaxed),
+            in_doubt: self.in_doubt.load(Ordering::Relaxed),
         }
     }
 }
@@ -412,7 +420,7 @@ impl<F: Fs> Db<F> {
             .expect("the commit thread runs until the database is dropped");
         // Counted once it waits there, so a test that sees the count knows
         // the request is queued (design 0021 Q6).
-        Counters::add(&self.shared.counters.received, 1);
+        bump(&self.shared.counters.received, 1);
         answered
             .recv()
             .expect("the commit thread answers every request")
@@ -471,6 +479,14 @@ struct Waiting {
 }
 
 impl Waiting {
+    fn new(writes: Writes, begun_after: u64, answer: SyncSender<Result<()>>) -> Self {
+        Waiting {
+            writes,
+            begun_after,
+            answer: Some(answer),
+        }
+    }
+
     fn answer(&mut self, result: Result<()>) {
         if let Some(answer) = self.answer.take() {
             // A requester that is gone (it panicked) needs no answer.
@@ -479,13 +495,23 @@ impl Waiting {
     }
 }
 
+/// What the conflict check decided for one commit of a batch.
+enum Verdict {
+    /// It writes: it goes on the batch's tree.
+    Passed,
+    /// A recorded commit wrote one of its keys: answered at once.
+    Lost(Error),
+    /// A commit ahead in the same batch wrote one of its keys: answered once
+    /// the batch shows (or failed), so a transaction begun after the answer
+    /// reads the winner's write, as [`Error::Conflict`] promises.
+    LostInBatch(Error),
+}
+
 impl<File: FsFile> Committer<File> {
     /// Answers requests in the order they came until the database is
-    /// dropped. Commits go in batches (issue #28, design 0021): it takes
-    /// the first, then every commit waiting behind it without waiting for
-    /// more, up to [`MAX_BATCH`], and commits them with one sync. A
-    /// checkpoint request ends a batch, so it runs after the commits sent
-    /// before it and before those sent after it.
+    /// dropped. Commits go in batches (issue #28, design 0021): see
+    /// [`take_batch`]. A checkpoint request ends a batch, so it runs after
+    /// the commits sent before it and before those sent after it.
     fn run(mut self, requests: &Receiver<Request>) {
         let mut next = requests.recv().ok();
         while let Some(request) = next.take() {
@@ -499,34 +525,16 @@ impl<File: FsFile> Committer<File> {
                     begun_after,
                     answer,
                 } => {
-                    let mut batch = vec![Waiting {
-                        writes,
-                        begun_after,
-                        answer: Some(answer),
-                    }];
-                    while batch.len() < MAX_BATCH {
-                        match requests.try_recv() {
-                            Ok(Request::Commit {
-                                writes,
-                                begun_after,
-                                answer,
-                            }) => batch.push(Waiting {
-                                writes,
-                                begun_after,
-                                answer: Some(answer),
-                            }),
-                            Ok(other) => {
-                                next = Some(other);
-                                break;
-                            }
-                            Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
-                        }
-                    }
+                    let first = Waiting::new(writes, begun_after, answer);
+                    let (mut batch, after) = take_batch(first, requests);
+                    next = after;
                     if let Err(e) =
                         self.guarded(|c| c.commit_batch(&mut batch), Error::OutcomeUnknown)
                     {
                         // It panicked, a bug: whoever it did not answer
                         // may be in the WAL.
+                        let left = batch.iter().filter(|w| w.answer.is_some()).count();
+                        bump(&self.shared.counters.in_doubt, left as u64);
                         for waiting in &mut batch {
                             waiting.answer(Err(e.clone()));
                         }
@@ -567,8 +575,9 @@ impl<File: FsFile> Committer<File> {
     /// [`Txn::commit`]. The commits that pass the conflict check go on one
     /// copy of the tree, which goes to the WAL as one commit with one sync
     /// (ADR 0007: after a power cut a batch is all there or not at all),
-    /// and shows once that sync is done. Conflicts are answered at once:
-    /// they write nothing, whatever the sync does (design 0021 Q2).
+    /// and shows once that sync is done. A commit that lost to a recorded
+    /// commit is answered at once; one that lost to a commit ahead in the
+    /// batch, only once the batch shows or failed (design 0021 Q2).
     fn commit_batch(&mut self, batch: &mut [Waiting]) {
         // The check that matters: a commit that was waiting here when the
         // batch ahead of it failed writes nothing. The caller's check
@@ -580,80 +589,94 @@ impl<File: FsFile> Committer<File> {
             return;
         }
         let counters = &self.shared.counters;
-        Counters::add(&counters.batches, 1);
+        bump(&counters.batches, 1);
         counters
             .largest_batch
             .fetch_max(batch.len() as u64, Ordering::Relaxed);
-        let mut next = Tree::clone(&self.tree);
-        // The keys of the commits in this batch that passed, so far.
-        let mut written: HashSet<Vec<u8>> = HashSet::new();
+        let (verdicts, next) = self.judge(batch);
         let mut passed = Vec::new();
-        for (at, waiting) in batch.iter_mut().enumerate() {
-            match self.check_conflict(&waiting.writes, waiting.begun_after, &written) {
-                Err(e) => {
-                    Counters::add(&self.shared.counters.conflicts, 1);
-                    waiting.answer(Err(e));
+        let mut later = Vec::new();
+        for (at, verdict) in verdicts.into_iter().enumerate() {
+            match verdict {
+                Verdict::Passed => passed.push(at),
+                Verdict::Lost(e) => {
+                    bump(&self.shared.counters.conflicts, 1);
+                    batch[at].answer(Err(e));
                 }
-                Ok(()) => {
-                    apply(&mut next, &waiting.writes);
-                    written.extend(waiting.writes.keys().cloned());
-                    passed.push(at);
+                Verdict::LostInBatch(e) => {
+                    bump(&self.shared.counters.conflicts, 1);
+                    later.push((at, e));
                 }
             }
         }
-        if passed.is_empty() {
-            return;
-        }
-        if let Err(e) = self.write(&mut next) {
+        if let Some(mut next) = next {
+            if let Err(e) = self.write(&mut next) {
+                bump(&self.shared.counters.in_doubt, passed.len() as u64);
+                for &at in &passed {
+                    batch[at].answer(Err(e.clone()));
+                }
+                answer_later(batch, later);
+                return;
+            }
+            let commits: Vec<Writes> = passed
+                .iter()
+                .map(|&at| std::mem::take(&mut batch[at].writes))
+                .collect();
+            self.publish(next, commits);
+            bump(&self.shared.counters.commits, passed.len() as u64);
             for &at in &passed {
-                batch[at].answer(Err(e.clone()));
+                batch[at].answer(Ok(()));
             }
-            return;
         }
-        let commits: Vec<Writes> = passed
-            .iter()
-            .map(|&at| std::mem::take(&mut batch[at].writes))
-            .collect();
-        self.publish(next, commits);
-        Counters::add(&self.shared.counters.commits, passed.len() as u64);
-        for &at in &passed {
-            batch[at].answer(Ok(()));
-        }
+        answer_later(batch, later);
         // After the answers: the batch is durable, and a checkpoint that
         // fails does not change them (design 0021 G6).
         self.checkpoint_if_due();
     }
 
-    /// First committer wins (ADR 0006): fails if a commit since the
-    /// transaction began after `begun_after` wrote one of its keys. Only
-    /// writes are compared, so reads never conflict (snapshot isolation;
-    /// write skew is allowed). Only this thread records keys, so none can
-    /// be recorded between this check and the commit's own record in
-    /// [`Committer::publish`], though the lock is let go.
+    /// Checks each commit of `batch` for conflicts, in order, and makes the
+    /// writes of those that pass on a copy of the latest tree, taken only
+    /// once one passes.
     ///
-    /// `batch` holds the keys of the commits ahead in the same batch, which
-    /// are recorded only once the batch is synced. Every transaction in the
-    /// batch began before the batch shows, so such a key was written after
-    /// the transaction began: a conflict, whatever its number would be.
-    fn check_conflict(
-        &self,
-        writes: &Writes,
-        begun_after: u64,
-        batch: &HashSet<Vec<u8>>,
-    ) -> Result<()> {
-        let conflict = match writes.keys().find(|key| batch.contains(*key)) {
-            Some(key) => Some(key.clone()),
-            None => self
-                .shared
-                .committed()
-                .recent
-                .conflict(begun_after, writes.keys().map(Vec::as_slice))
-                .map(<[u8]>::to_vec),
-        };
-        match conflict {
-            Some(key) => Err(Error::Conflict { key }),
-            None => Ok(()),
+    /// First committer wins (ADR 0006): a commit fails if a commit since its
+    /// transaction began wrote one of its keys. Only writes are compared,
+    /// so reads never conflict (snapshot isolation; write skew is allowed).
+    /// Only this thread records keys, so none can be recorded between this
+    /// check and the batch's record in [`Committer::publish`], though the
+    /// lock is let go. The keys of the commits ahead in the batch are not
+    /// recorded until the batch is synced, so they are compared here too.
+    /// Every transaction in the batch began before the batch shows, so
+    /// such a key was written after it began: a conflict, whatever its
+    /// number would be.
+    fn judge(&self, batch: &[Waiting]) -> (Vec<Verdict>, Option<Tree>) {
+        let mut next: Option<Tree> = None;
+        let mut written: HashSet<&[u8]> = HashSet::new();
+        let mut verdicts = Vec::with_capacity(batch.len());
+        for waiting in batch {
+            let keys = || waiting.writes.keys().map(Vec::as_slice);
+            let in_batch = keys().find(|key| written.contains(key));
+            let recorded = || {
+                self.shared
+                    .committed()
+                    .recent
+                    .conflict(waiting.begun_after, keys())
+                    .map(<[u8]>::to_vec)
+            };
+            let verdict = if let Some(key) = in_batch {
+                Verdict::LostInBatch(Error::Conflict { key: key.to_vec() })
+            } else if let Some(key) = recorded() {
+                Verdict::Lost(Error::Conflict { key })
+            } else {
+                apply(
+                    next.get_or_insert_with(|| Tree::clone(&self.tree)),
+                    &waiting.writes,
+                );
+                written.extend(keys());
+                Verdict::Passed
+            };
+            verdicts.push(verdict);
         }
+        (verdicts, next)
     }
 
     /// Writes the pages `next` changed and its meta fields to the WAL, and
@@ -672,7 +695,7 @@ impl<File: FsFile> Committer<File> {
             self.shared.stop(&e);
             e
         })?;
-        Counters::add(&self.shared.counters.wal_syncs, 1);
+        bump(&self.shared.counters.wal_syncs, 1);
         Ok(())
     }
 
@@ -732,6 +755,37 @@ fn apply(tree: &mut Tree, writes: &Writes) {
             tree.put(key, value);
         }
     }
+}
+
+/// Answers the commits of `batch` that lost to a commit ahead in it.
+fn answer_later(batch: &mut [Waiting], later: Vec<(usize, Error)>) {
+    for (at, e) in later {
+        batch[at].answer(Err(e));
+    }
+}
+
+/// Takes `first` and every commit waiting behind it, without waiting for
+/// more, up to [`MAX_BATCH`]. Returns them, and the request that ended the
+/// batch if it was not a commit.
+fn take_batch(first: Waiting, requests: &Receiver<Request>) -> (Vec<Waiting>, Option<Request>) {
+    let mut batch = vec![first];
+    while batch.len() < MAX_BATCH {
+        match requests.try_recv() {
+            Ok(Request::Commit {
+                writes,
+                begun_after,
+                answer,
+            }) => batch.push(Waiting::new(writes, begun_after, answer)),
+            Ok(other) => return (batch, Some(other)),
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+        }
+    }
+    (batch, None)
+}
+
+/// Adds `n` to `counter`, one of [`Counters`].
+fn bump(counter: &AtomicU64, n: u64) {
+    counter.fetch_add(n, Ordering::Relaxed);
 }
 
 /// The message a panic was raised with, if it was text.
