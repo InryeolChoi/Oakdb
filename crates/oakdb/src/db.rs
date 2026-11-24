@@ -30,12 +30,22 @@
 //! (ADR 0007, design 0012): it does not retry, the commit that hit the
 //! failure gets [`Error::OutcomeUnknown`], and every request after it gets
 //! [`Error::Stopped`]. Opening the database again recovers it.
+//!
+//! Threads share a database (`&Db` in a scope, or `Arc<Db>`) and run
+//! transactions at once (issue #27, design 0018). Commits and checkpoints
+//! go, one at a time in the order they come, to the commit thread, which
+//! alone touches the files. It holds no lock while it syncs: transactions
+//! begin, read and end meanwhile, and a commit shows only once it is
+//! synced.
 
 use std::collections::{btree_map, BTreeMap, BTreeSet};
 use std::iter::{FusedIterator, Peekable};
+use std::marker::PhantomData;
 use std::ops::{Bound, RangeBounds};
 use std::path::Path;
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::thread::JoinHandle;
 
 use crate::checkpoint;
 use crate::checksum;
@@ -55,23 +65,64 @@ pub const DATA_FILE: &str = "oakdb.data";
 /// become a setting of the database.
 pub const CHECKPOINT_AFTER: u64 = 4 * 1024 * 1024;
 
-/// An open database.
+/// The name of the thread that commits (design 0018).
+pub const COMMIT_THREAD: &str = "oakdb-commit";
+
+/// An open database. Threads can share it: it is `Send` and `Sync`.
 pub struct Db<F: Fs = StdFs> {
-    /// The data file, held open for its lock. Checkpoints write it.
-    file: F::File,
-    /// Where commits go. Only taken while holding `committed` for now; a lock of
-    /// its own so the commit thread (ADR 0006, #27) can later write the
-    /// WAL while readers take the tree.
-    wal: Mutex<Wal<F::File>>,
-    /// The committed tree, and the keys recent commits wrote. Commits hold
-    /// the lock while they check for conflicts and write, so they happen
-    /// one at a time, and swap in a new tree when done. A transaction keeps
-    /// the tree it began on, so commits never change it under it.
+    /// What transactions share with the commit thread.
+    shared: Arc<Shared>,
+    /// Where commits and checkpoints go, to the commit thread. `None` only
+    /// while the database is dropped.
+    requests: Option<Sender<Request>>,
+    /// The commit thread, which holds the files. Joined when the database
+    /// is dropped. `None` only then.
+    thread: Option<JoinHandle<()>>,
+    /// The file system the files came from.
+    fs: PhantomData<fn() -> F>,
+}
+
+/// What transactions share with the commit thread.
+struct Shared {
+    /// The committed tree, and the keys recent commits wrote. Held only for
+    /// moments: to begin or end a transaction, and by the commit thread to
+    /// check for conflicts and to swap in a new tree, never while it syncs.
+    /// A transaction keeps the tree it began on, so commits never change
+    /// it under it.
     committed: Mutex<Committed>,
     /// Why the engine stopped, once a write or sync failed. Set at most
-    /// once, while holding `committed`, and never cleared: this process does not
-    /// trust the files again (design 0012).
+    /// once, by the commit thread, and never cleared: this process does
+    /// not trust the files again (design 0012).
     stopped: OnceLock<Arc<Error>>,
+}
+
+/// A transaction's writes: the last write to each key, `Some(value)` for a
+/// put, `None` for a delete.
+type Writes = BTreeMap<Vec<u8>, Option<Vec<u8>>>;
+
+/// Work for the commit thread, with where to send the answer.
+enum Request {
+    Commit {
+        writes: Writes,
+        /// The number of the last commit in the transaction's snapshot.
+        begun_after: u64,
+        answer: SyncSender<Result<()>>,
+    },
+    Checkpoint {
+        answer: SyncSender<Result<()>>,
+    },
+}
+
+/// The commit thread's own state: the files, and the latest tree.
+struct Committer<File: FsFile> {
+    shared: Arc<Shared>,
+    /// The data file, held open for its lock. Checkpoints write it.
+    file: File,
+    /// Where commits go.
+    wal: Wal<File>,
+    /// The latest committed tree, the same as `shared`'s: kept here too so
+    /// building the next commit takes no lock.
+    tree: Arc<Tree>,
 }
 
 /// What commits change, under one lock, so a transaction's snapshot and
@@ -201,14 +252,29 @@ impl<F: Fs> Db<F> {
                 tree
             }
         };
-        Ok(Db {
-            file,
-            wal: Mutex::new(wal),
+        let tree = Arc::new(tree);
+        let shared = Arc::new(Shared {
             committed: Mutex::new(Committed {
-                tree: Arc::new(tree),
+                tree: Arc::clone(&tree),
                 recent: RecentWrites::default(),
             }),
             stopped: OnceLock::new(),
+        });
+        let committer = Committer {
+            shared: Arc::clone(&shared),
+            file,
+            wal,
+            tree,
+        };
+        let (requests, received) = mpsc::channel();
+        let thread = std::thread::Builder::new()
+            .name(COMMIT_THREAD.into())
+            .spawn(move || committer.run(&received))?;
+        Ok(Db {
+            shared,
+            requests: Some(requests),
+            thread: Some(thread),
+            fs: PhantomData,
         })
     }
 
@@ -216,10 +282,9 @@ impl<F: Fs> Db<F> {
     /// whatever is committed while it runs (issue #25). Holding it holds
     /// that version of the tree in memory: pages commits change after this
     /// are copies, so the ones it reads stay until it ends. It takes the
-    /// tree's lock for a moment, so it waits while a commit syncs (#27 and
-    /// #28 are to let commits sync without the lock).
+    /// tree's lock for a moment; commits do not hold it while they sync.
     pub fn begin(&self) -> Txn<'_, F> {
-        let mut committed = self.committed();
+        let mut committed = self.shared.committed();
         Txn {
             db: self,
             snapshot: Arc::clone(&committed.tree),
@@ -231,7 +296,7 @@ impl<F: Fs> Db<F> {
     /// How many pages the database uses, free ones included, counting the
     /// two meta pages: what its data file holds once checkpointed.
     pub fn page_count(&self) -> u64 {
-        self.committed().tree.meta().page_count
+        self.shared.committed().tree.meta().page_count
     }
 
     /// Moves the pages the WAL holds to the data file and empties the WAL,
@@ -245,12 +310,11 @@ impl<F: Fs> Db<F> {
     /// commit is still there then. It is not [`Error::OutcomeUnknown`]: a
     /// checkpoint changes nothing the database holds, so no commit's
     /// outcome is in doubt, wherever it stopped.
+    ///
+    /// It runs on the commit thread, after the commits that came before it.
     pub fn checkpoint(&self) -> Result<()> {
-        let committed = self.committed();
-        // Checked holding the lock, so a commit that failed while this one
-        // waited for it is seen, and nothing is written after a failure.
         self.check_running()?;
-        checkpoint::run(&self.file, &mut self.wal(), &committed.tree).inspect_err(|e| self.stop(e))
+        self.ask(|answer| Request::Checkpoint { answer })
     }
 
     /// Checkpoints and closes the database. Every committed transaction is
@@ -263,6 +327,44 @@ impl<F: Fs> Db<F> {
 
     /// Fails with [`Error::Stopped`] if the engine stopped.
     fn check_running(&self) -> Result<()> {
+        self.shared.check_running()
+    }
+
+    /// Sends the commit thread the request `request` makes of where to
+    /// answer, and waits for the answer.
+    ///
+    /// # Panics
+    ///
+    /// If the commit thread panicked: a bug, which the caller sees as it
+    /// would see a panic in its own commit.
+    fn ask(&self, request: impl FnOnce(SyncSender<Result<()>>) -> Request) -> Result<()> {
+        let (answer, answered) = mpsc::sync_channel(1);
+        let requests = self.requests.as_ref().expect("set until dropped");
+        if requests.send(request(answer)).is_err() {
+            panic!("the commit thread panicked");
+        }
+        answered.recv().expect("the commit thread panicked")
+    }
+}
+
+impl<F: Fs> Drop for Db<F> {
+    /// Stops the commit thread and waits for it, so the files are closed
+    /// and their lock is free when this returns. No request can be under
+    /// way: each waits for its answer holding a borrow of the database.
+    fn drop(&mut self) {
+        drop(self.requests.take());
+        if let Some(thread) = self.thread.take() {
+            // A commit thread that panicked already made its requester
+            // panic; another panic here, perhaps while unwinding, helps no
+            // one.
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Shared {
+    /// Fails with [`Error::Stopped`] if the engine stopped.
+    fn check_running(&self) -> Result<()> {
         match self.stopped.get() {
             Some(cause) => Err(Error::Stopped(Arc::clone(cause))),
             None => Ok(()),
@@ -270,23 +372,116 @@ impl<F: Fs> Db<F> {
     }
 
     /// Stops the engine because of `cause`, the error the failing call
-    /// returns, which every request after it reports. Called holding
-    /// `tree`, so the first failure is the one kept.
+    /// returns, which every request after it reports. Only the commit
+    /// thread calls it, one request at a time, so the first failure is the
+    /// one kept.
     fn stop(&self, cause: &Error) {
         let _ = self.stopped.set(Arc::new(cause.clone()));
     }
 
-    fn wal(&self) -> MutexGuard<'_, Wal<F::File>> {
-        self.wal.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
     fn committed(&self) -> MutexGuard<'_, Committed> {
         // A panic while holding the lock cannot leave the tree half changed:
-        // commits change a copy and swap it in at the end, and record their
-        // keys after that.
+        // the commit thread changes a copy and records the keys before it
+        // swaps the copy in.
         self.committed
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl<File: FsFile> Committer<File> {
+    /// Answers requests one at a time, in the order they came, until the
+    /// database is dropped. Group commit (#28) is to take every request
+    /// waiting here at once and sync them together.
+    fn run(mut self, requests: &Receiver<Request>) {
+        for request in requests {
+            // A requester that is gone (it panicked) needs no answer.
+            let _ = match request {
+                Request::Commit {
+                    writes,
+                    begun_after,
+                    answer,
+                } => answer.send(self.commit(writes, begun_after)),
+                Request::Checkpoint { answer } => answer.send(self.checkpoint()),
+            };
+        }
+    }
+
+    /// Commits `writes` of a transaction that began after commit
+    /// `begun_after`: see [`Txn::commit`].
+    fn commit(&mut self, writes: Writes, begun_after: u64) -> Result<()> {
+        // Checked here, so a commit that came after a failure writes
+        // nothing.
+        self.shared.check_running()?;
+        // First committer wins (ADR 0006): if a commit since this
+        // transaction began wrote one of its keys, it writes nothing. Only
+        // writes are compared, so reads never conflict (snapshot isolation;
+        // write skew is allowed). Only this thread records keys, so none
+        // can be recorded between this check and this commit's own record
+        // below, though the lock is let go.
+        let conflict = self
+            .shared
+            .committed()
+            .recent
+            .conflict(begun_after, writes.keys().map(Vec::as_slice))
+            .map(<[u8]>::to_vec);
+        if let Some(key) = conflict {
+            return Err(Error::Conflict { key });
+        }
+        let mut next = Tree::clone(&self.tree);
+        // Take out every key this transaction writes before putting any
+        // back, so space freed by a delete or a shrinking value is there for
+        // a put that sorts before it.
+        for key in writes.keys() {
+            next.delete(key);
+        }
+        for (key, value) in &writes {
+            if let Some(value) = value {
+                next.put(key, value);
+            }
+        }
+        // No lock is held while the WAL is written and synced: transactions
+        // begin and end meanwhile, on the tree before this commit.
+        if next.has_dirty() || next.meta() != self.tree.meta() {
+            if let Err(e) = append(&mut self.wal, &mut next) {
+                // Appending only fails writing or syncing, so whatever it
+                // is, the outcome is unknown. The tree is not swapped and
+                // the WAL tail stays where it was, but neither is used
+                // again: the engine stops.
+                let e = Error::OutcomeUnknown(Arc::new(e));
+                self.shared.stop(&e);
+                return Err(e);
+            }
+        }
+        let next = Arc::new(next);
+        {
+            let mut committed = self.shared.committed();
+            // The keys go down before the new tree goes in: were anything
+            // in between to panic, a transaction could see the tree with no
+            // record of who wrote it, and overwrite it without a conflict.
+            // This way it can at worst conflict with a commit that never
+            // showed. Even writes that changed nothing in the tree count: a
+            // write is a write, and a transaction that began before this
+            // one and writes the same key must fail all the same.
+            committed.recent.record(writes.into_keys());
+            committed.tree = Arc::clone(&next);
+        }
+        self.tree = next;
+        if self.wal.len() > CHECKPOINT_AFTER {
+            if let Err(e) = checkpoint::run(&self.file, &mut self.wal, &self.tree) {
+                // The commit is in the WAL and synced: it stays, whatever
+                // the checkpoint did. The next request reports the stop.
+                self.shared.stop(&e);
+            }
+        }
+        Ok(())
+    }
+
+    /// See [`Db::checkpoint`].
+    fn checkpoint(&mut self) -> Result<()> {
+        // Checked here, so nothing is written after a failure.
+        self.shared.check_running()?;
+        checkpoint::run(&self.file, &mut self.wal, &self.tree).inspect_err(|e| self.shared.stop(e))
     }
 }
 
@@ -313,7 +508,7 @@ pub struct Txn<'db, F: Fs = StdFs> {
     begun_after: u64,
     /// The last write to each key: `Some(value)` for a put, `None` for a
     /// delete.
-    writes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    writes: Writes,
 }
 
 impl<F: Fs> Txn<'_, F> {
@@ -405,66 +600,17 @@ impl<F: Fs> Txn<'_, F> {
     /// goes on; begin a new transaction, which sees the winner's write, and
     /// try again.
     pub fn commit(mut self) -> Result<()> {
-        if self.writes.is_empty() {
-            return self.db.check_running();
-        }
-        let mut committed = self.db.committed();
-        // Checked holding the lock, so a commit that failed while this one
-        // waited for it is seen, and nothing is written after a failure.
         self.db.check_running()?;
-        // First committer wins (ADR 0006): if a commit since this
-        // transaction began wrote one of its keys, it writes nothing. Only
-        // writes are compared, so reads never conflict (snapshot isolation;
-        // write skew is allowed).
-        let keys = self.writes.keys().map(Vec::as_slice);
-        if let Some(key) = committed.recent.conflict(self.begun_after, keys) {
-            return Err(Error::Conflict { key: key.to_vec() });
+        if self.writes.is_empty() {
+            return Ok(());
         }
-        let mut next = Tree::clone(&committed.tree);
-        // Take out every key this transaction writes before putting any
-        // back, so space freed by a delete or a shrinking value is there for
-        // a put that sorts before it.
-        for key in self.writes.keys() {
-            next.delete(key);
-        }
-        for (key, value) in &self.writes {
-            if let Some(value) = value {
-                next.put(key, value);
-            }
-        }
-        // Taken even for a commit that writes nothing, to see whether the
-        // WAL is due a checkpoint.
-        let mut wal = self.db.wal();
-        if next.has_dirty() || next.meta() != committed.tree.meta() {
-            if let Err(e) = append(&mut wal, &mut next) {
-                // Appending only fails writing or syncing, so whatever it
-                // is, the outcome is unknown. The tree is not swapped and
-                // the WAL tail stays where it was, but neither is used
-                // again: the engine stops.
-                let e = Error::OutcomeUnknown(Arc::new(e));
-                self.db.stop(&e);
-                return Err(e);
-            }
-        }
-        // The keys go down before the new tree goes in: were anything in
-        // between to panic, a transaction could see the tree with no record
-        // of who wrote it, and overwrite it without a conflict. This way it
-        // can at worst conflict with a commit that never showed. Even
-        // writes that changed nothing in the tree count: a write is a
-        // write, and a transaction that began before this one and writes
-        // the same key must fail all the same.
-        committed
-            .recent
-            .record(std::mem::take(&mut self.writes).into_keys());
-        committed.tree = Arc::new(next);
-        if wal.len() > CHECKPOINT_AFTER {
-            if let Err(e) = checkpoint::run(&self.db.file, &mut wal, &committed.tree) {
-                // The commit is in the WAL and synced: it stays, whatever
-                // the checkpoint did. The next request reports the stop.
-                self.db.stop(&e);
-            }
-        }
-        Ok(())
+        let writes = std::mem::take(&mut self.writes);
+        let begun_after = self.begun_after;
+        self.db.ask(|answer| Request::Commit {
+            writes,
+            begun_after,
+            answer,
+        })
     }
 
     /// Throws away the writes.
@@ -475,7 +621,7 @@ impl<F: Fs> Drop for Txn<'_, F> {
     /// Ends the transaction, committed or not, so the commits it began
     /// after no longer need keeping for conflicts with it.
     fn drop(&mut self) {
-        self.db.committed().recent.end(self.begun_after);
+        self.db.shared.committed().recent.end(self.begun_after);
     }
 }
 

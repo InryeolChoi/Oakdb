@@ -40,7 +40,10 @@ pub trait Fs {
 
 /// An open file. Reads and writes use explicit offsets so the engine never
 /// depends on a shared cursor.
-pub trait FsFile {
+///
+/// The commit thread holds the database's files, so they can go to another
+/// thread (design 0018).
+pub trait FsFile: Send + Sync + 'static {
     /// Reads exactly `buf.len()` bytes starting at `offset`.
     fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()>;
 
