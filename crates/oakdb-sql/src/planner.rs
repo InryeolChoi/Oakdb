@@ -53,6 +53,15 @@ pub(crate) fn plan(table: &Table, filter: Option<Expr>) -> Result<Plan, SqlError
     })
 }
 
+/// One `column = value` of SET, checked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Assignment {
+    /// The column's position in the row.
+    pub(crate) column: usize,
+    /// What it gets, computed from the old row.
+    pub(crate) value: Scalar,
+}
+
 /// Checks the SET list of an UPDATE (design 0022, section 4-2): each
 /// column exists and is named once, and each expression is a value of the
 /// column's type, or a NULL literal outside the primary key. Returns each
@@ -62,31 +71,20 @@ pub(crate) fn plan(table: &Table, filter: Option<Expr>) -> Result<Plan, SqlError
 pub(crate) fn assignments(
     table: &Table,
     assignments: Vec<(String, Expr)>,
-) -> Result<Vec<(usize, Scalar)>, SqlError> {
-    let mut checked: Vec<(usize, Scalar)> = Vec::with_capacity(assignments.len());
-    for (name, expr) in assignments {
-        let column = table
-            .column(&name)
-            .ok_or_else(|| table.no_such_column(&name))?;
-        if checked.iter().any(|&(earlier, _)| earlier == column) {
-            return Err(SqlError::DuplicateColumn(name));
-        }
-        let value = scalar(table, expr)?;
-        let expected = table.columns[column].column_type;
-        let fits = match value.column_type {
-            None => column != table.primary_key,
-            Some(found) => found == expected,
-        };
-        if !fits {
-            return Err(SqlError::TypeMismatch {
-                column: name,
-                expected,
-                found: value.column_type,
-            });
-        }
-        checked.push((column, value.scalar));
-    }
-    Ok(checked)
+) -> Result<Vec<Assignment>, SqlError> {
+    let columns = table.resolve_columns(assignments.iter().map(|(name, _)| name.as_str()))?;
+    columns
+        .into_iter()
+        .zip(assignments)
+        .map(|(column, (_, expr))| {
+            let value = scalar(table, expr)?;
+            table.check_fits(column, value.column_type)?;
+            Ok(Assignment {
+                column,
+                value: value.scalar,
+            })
+        })
+        .collect()
 }
 
 // ------------------------------------------------------------ types
@@ -605,6 +603,13 @@ mod tests {
     }
 
     fn assignments_of(set: &str) -> Result<Vec<(usize, Scalar)>, SqlError> {
+        Ok(checked_assignments(set)?
+            .into_iter()
+            .map(|a| (a.column, a.value))
+            .collect())
+    }
+
+    fn checked_assignments(set: &str) -> Result<Vec<Assignment>, SqlError> {
         match parse(&format!("UPDATE t SET {set}")).unwrap() {
             Statement::Update { assignments: a, .. } => assignments(&table(), a),
             other => panic!("{other:?}"),

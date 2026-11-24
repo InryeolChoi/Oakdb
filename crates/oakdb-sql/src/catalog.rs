@@ -39,6 +39,48 @@ impl Table {
         self.columns.iter().position(|column| column.name == name)
     }
 
+    /// Where each column `names` lists is, in the same order: an INSERT's
+    /// column list or the columns an UPDATE sets. A name the table does not
+    /// have, or one named twice, is an error.
+    pub(crate) fn resolve_columns<'a>(
+        &self,
+        names: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Vec<usize>, SqlError> {
+        let mut columns: Vec<usize> = Vec::new();
+        for name in names {
+            let column = self.column(name).ok_or_else(|| self.no_such_column(name))?;
+            if columns.contains(&column) {
+                return Err(SqlError::DuplicateColumn(name.to_owned()));
+            }
+            columns.push(column);
+        }
+        Ok(columns)
+    }
+
+    /// Whether a value of type `found` (`None` for NULL) fits column
+    /// `column`: of its type, or NULL anywhere but the primary key. If not,
+    /// the error says so.
+    pub(crate) fn check_fits(
+        &self,
+        column: usize,
+        found: Option<ColumnType>,
+    ) -> Result<(), SqlError> {
+        let expected = self.columns[column].column_type;
+        let fits = match found {
+            None => column != self.primary_key,
+            Some(found) => found == expected,
+        };
+        if fits {
+            Ok(())
+        } else {
+            Err(SqlError::TypeMismatch {
+                column: self.columns[column].name.clone(),
+                expected,
+                found,
+            })
+        }
+    }
+
     /// The error for a column the table does not have.
     pub(crate) fn no_such_column(&self, name: &str) -> SqlError {
         SqlError::NoSuchColumn {
