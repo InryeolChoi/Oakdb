@@ -11,7 +11,19 @@ repository.workspace = true
 crc32c = "0.6.9"
 libc = "0.2"
 
+# The commit queue is checked under loom (issue #29, design 0024): built
+# only with `RUSTFLAGS="--cfg loom"`, so a normal build never fetches it.
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+
+[features]
+# Bugs a test can choose to plant when it opens a database, to see the
+# history checker find them (design 0024 V6). Off by default; even when on,
+# a database has none unless it is opened with one.
+planted-bugs = []
+
 [dev-dependencies]
+oakdb-history = { path = "../oakdb-history" }
 tempfile = "3"
 criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
 proptest = "1"
@@ -19,3 +31,10 @@ proptest = "1"
 [[bench]]
 name = "single_page"
 harness = false
+
+[[test]]
+name = "planted_bugs"
+required-features = ["planted-bugs"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
