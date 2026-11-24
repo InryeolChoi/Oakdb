@@ -40,10 +40,15 @@ struct Usage(String);
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // `oakdb serve --help` and `oakdb cli --help` too, wherever it stands.
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        println!("{USAGE}");
+        return ExitCode::SUCCESS;
+    }
     let result = match args.first().map(String::as_str) {
         Some("serve") => serve(&args[1..]),
         Some("cli") => cli(&args[1..]),
-        Some("-h" | "--help" | "help") => {
+        Some("help") => {
             println!("{USAGE}");
             return ExitCode::SUCCESS;
         }
@@ -176,7 +181,7 @@ fn cli(args: &[String]) -> Result<ExitCode, Usage> {
         interactive,
     );
     match code {
-        Ok(code) => Ok(ExitCode::from(code as u8)),
+        Ok(code) => Ok(ExitCode::from(code)),
         Err(e) => fail(e),
     }
 }

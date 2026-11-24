@@ -7,6 +7,7 @@ use std::io::{self, BufRead, Write};
 use oakdb_sql::{Output, Value};
 
 use crate::client::{Client, ClientError};
+use crate::protocol::closes;
 
 /// Gathers lines until a `;` outside single quotes ends a statement.
 #[derive(Debug, Default)]
@@ -150,7 +151,7 @@ pub fn run(
     out: &mut impl Write,
     err: &mut impl Write,
     interactive: bool,
-) -> io::Result<i32> {
+) -> io::Result<u8> {
     let mut splitter = Splitter::new();
     let mut failed = false;
     let mut lines = input.lines();
@@ -172,7 +173,7 @@ pub fn run(
         };
         let line = line?;
         if splitter.is_empty() && line.trim() == "\\q" {
-            return Ok(i32::from(failed));
+            return Ok(u8::from(failed));
         }
         for statement in splitter.push_line(&line) {
             match send(client, &statement, out, err)? {
@@ -182,14 +183,18 @@ pub fn run(
             }
         }
     }
-    if let Some(statement) = splitter.finish() {
+    // A statement left without its `;` runs when input is a script, and is
+    // dropped when a person pressed Ctrl-D halfway through it, as psql
+    // does (review P8).
+    let last = splitter.finish().filter(|_| !interactive);
+    if let Some(statement) = last {
         match send(client, &statement, out, err)? {
             Sent::Ok => {}
             Sent::Failed => failed = true,
             Sent::Lost => return Ok(1),
         }
     }
-    Ok(i32::from(failed))
+    Ok(u8::from(failed))
 }
 
 enum Sent {
@@ -210,9 +215,15 @@ fn send(
             out.flush()?;
             Ok(Sent::Ok)
         }
-        Err(e @ ClientError::Server { .. }) => {
+        // An error after which the server closes ends the session now,
+        // not at the next statement (review P7).
+        Err(e @ ClientError::Server { code, .. }) => {
             writeln!(err, "{e}")?;
-            Ok(Sent::Failed)
+            Ok(if closes(code) {
+                Sent::Lost
+            } else {
+                Sent::Failed
+            })
         }
         Err(e) => {
             writeln!(err, "{e}")?;

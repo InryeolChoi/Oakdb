@@ -134,6 +134,7 @@ impl Allowlist {
 
     /// `nets` and nothing else, not even loopback. The command line never
     /// builds this; tests use it to turn a loopback client away.
+    #[doc(hidden)]
     pub fn strict(nets: Vec<Ipv4Net>) -> Self {
         Allowlist {
             nets,
@@ -160,7 +161,9 @@ impl Allowlist {
     }
 
     /// Whether a client at `ip` may connect. An IPv4 address written as
-    /// IPv6 (`::ffff:10.0.0.5`) is matched as IPv4.
+    /// IPv6 (`::ffff:10.0.0.5`) is matched as IPv4. Any other IPv6 address,
+    /// `::1` too, is turned away: the server listens on IPv4 only, so none
+    /// can arrive. Look at `::1` again when it listens on both (review P10).
     pub fn allows(&self, ip: IpAddr) -> bool {
         let v4 = match ip {
             IpAddr::V4(v4) => v4,

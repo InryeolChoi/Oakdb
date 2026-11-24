@@ -5,12 +5,13 @@
 use std::io::Read;
 use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use oakdb::fs::sim::SimFs;
-use oakdb::fs::Fs;
+use oakdb::fs::{Fs, FsFile};
 use oakdb::Db;
 use oakdb_server::allow::Allowlist;
 use oakdb_server::client::{Client, ClientError};
@@ -65,7 +66,7 @@ fn raw(addr: SocketAddr) -> TcpStream {
     write_frame(&mut stream, &Request::Hello { version: VERSION }.encode()).unwrap();
     let ready = read_frame(&mut stream).unwrap().unwrap();
     assert_eq!(
-        Response::decode(&ready).unwrap(),
+        Response::decode(ready).unwrap(),
         Response::Ready { version: VERSION }
     );
     stream
@@ -73,7 +74,7 @@ fn raw(addr: SocketAddr) -> TcpStream {
 
 fn read_response(stream: &mut TcpStream) -> Response {
     let frame = read_frame(stream).unwrap().expect("a response");
-    Response::decode(&frame).unwrap()
+    Response::decode(frame).unwrap()
 }
 
 fn error_code(response: Response) -> u8 {
@@ -521,19 +522,205 @@ fn a_dropped_connection_frees_its_thread_without_harm() {
             ..config()
         },
     );
-    for _ in 0..10 {
+    for i in 0..10 {
         // Half a frame, then gone.
         let mut stream = raw(addr);
         std::io::Write::write_all(&mut stream, &[0, 0, 0, 9, command::QUERY]).unwrap();
         drop(stream);
-        let mut client = Client::connect(addr)
-            .or_else(|_| {
-                thread::sleep(Duration::from_millis(200));
-                Client::connect(addr)
-            })
-            .unwrap();
-        client
-            .query("CREATE TABLE IF_NOT_A_TABLE (id INTEGER PRIMARY KEY)")
-            .ok();
+        // The seat comes back once the server sees the end; until then the
+        // limit of two may turn a client away.
+        let deadline = Instant::now() + TIMEOUT;
+        let mut client = loop {
+            match Client::connect(addr) {
+                Ok(client) => break client,
+                Err(ClientError::Server {
+                    code: code::TOO_MANY_CONNECTIONS,
+                    ..
+                }) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+                Err(e) => panic!("{e:?}"),
+            }
+        };
+        assert_eq!(
+            client
+                .query(&format!("CREATE TABLE t{i} (id INTEGER PRIMARY KEY)"))
+                .unwrap(),
+            Output::Done
+        );
     }
+}
+
+#[test]
+fn refused_clients_read_their_error_every_time() {
+    // The refusal must arrive before the close, never as a reset (review
+    // P3), however the client's HELLO and the close cross.
+    let dir = tempfile::tempdir().unwrap();
+    let addr = start(
+        Db::open(dir.path()).unwrap(),
+        Config {
+            max_connections: 1,
+            ..config()
+        },
+    );
+    let _seated = connect(addr);
+    for _ in 0..100 {
+        match Client::connect(addr) {
+            Err(ClientError::Server {
+                code: code::TOO_MANY_CONNECTIONS,
+                ..
+            }) => {}
+            other => panic!("expected 0x45, got {other:?}"),
+        }
+    }
+}
+
+/// A disk that panics on the next write once armed: a bug inside the
+/// server, as seen from a connection thread.
+#[derive(Clone)]
+struct PanickingFs {
+    inner: SimFs,
+    armed: Arc<AtomicBool>,
+}
+
+struct PanickingFile {
+    inner: <SimFs as Fs>::File,
+    armed: Arc<AtomicBool>,
+}
+
+impl Fs for PanickingFs {
+    type File = PanickingFile;
+
+    fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
+        self.inner.create_dir_all(path)
+    }
+
+    fn open(&self, path: &Path) -> std::io::Result<PanickingFile> {
+        Ok(PanickingFile {
+            inner: self.inner.open(path)?,
+            armed: Arc::clone(&self.armed),
+        })
+    }
+
+    fn sync_dir(&self, dir: &Path) -> std::io::Result<()> {
+        self.inner.sync_dir(dir)
+    }
+
+    fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        self.inner.rename(from, to)
+    }
+}
+
+impl FsFile for PanickingFile {
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+        self.inner.read_exact_at(buf, offset)
+    }
+
+    fn write_all_at(&self, buf: &[u8], offset: u64) -> std::io::Result<()> {
+        if self.armed.swap(false, Ordering::SeqCst) {
+            panic!("a bug in the server (planted by the test)");
+        }
+        self.inner.write_all_at(buf, offset)
+    }
+
+    fn size(&self) -> std::io::Result<u64> {
+        self.inner.size()
+    }
+
+    fn set_len(&self, len: u64) -> std::io::Result<()> {
+        self.inner.set_len(len)
+    }
+
+    fn try_lock(&self) -> std::io::Result<()> {
+        self.inner.try_lock()
+    }
+
+    fn sync_data(&self) -> std::io::Result<()> {
+        self.inner.sync_data()
+    }
+}
+
+#[test]
+fn a_panic_in_the_commit_thread_reaches_the_client_as_an_engine_error_and_the_server_goes_on() {
+    let fs = PanickingFs {
+        inner: SimFs::new(),
+        armed: Arc::new(AtomicBool::new(false)),
+    };
+    let armed = Arc::clone(&fs.armed);
+    let addr = start(Db::open_with(fs, "/db").unwrap(), config());
+
+    let mut stream = raw(addr);
+    armed.store(true, Ordering::SeqCst);
+    let create = Request::Query("CREATE TABLE t (id INTEGER PRIMARY KEY)".into());
+    write_frame(&mut stream, &create.encode()).unwrap();
+    // The commit thread turns its panic into the engine's outcome-unknown
+    // error (#27), so the client gets that code, not INTERNAL (0x7F is
+    // tested in server.rs, where the connection thread itself panics).
+    let got = error_code(read_response(&mut stream));
+    assert_ne!(got, code::INTERNAL);
+    assert!(
+        (0x20..=0x3F).contains(&got),
+        "an engine error, got {got:#x}"
+    );
+
+    // Other clients still get in.
+    raw(addr);
+}
+
+#[test]
+fn a_statement_cut_off_by_ctrl_d_runs_from_a_script_but_not_from_a_person() {
+    let dir = tempfile::tempdir().unwrap();
+    let addr = start_on(dir.path());
+    let run = |input: &str, interactive: bool| {
+        let mut client = connect(addr);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = oakdb_server::cli::run(
+            &mut client,
+            input.as_bytes(),
+            &mut out,
+            &mut err,
+            interactive,
+        )
+        .unwrap();
+        (code, String::from_utf8(out).unwrap())
+    };
+
+    let (code, _) = run("CREATE TABLE typed (id INTEGER PRIMARY KEY)", true);
+    assert_eq!(code, 0);
+    let (code, _) = run("SELECT id FROM typed WHERE id = 1;", false);
+    assert_eq!(code, 1, "the half-typed CREATE ran");
+
+    let (code, out) = run("CREATE TABLE piped (id INTEGER PRIMARY KEY)", false);
+    assert_eq!((code, out.as_str()), (0, "OK\n"));
+}
+
+#[test]
+fn a_where_nested_twenty_thousand_deep_gets_an_error_on_a_connection_thread_and_the_server_goes_on()
+{
+    // The connection thread has a small stack (CONNECTION_STACK); the
+    // parser's depth limit (#32) must stop the input before it does.
+    let addr = start(Db::open_with(SimFs::new(), "/db").unwrap(), config());
+    let mut stream = raw(addr);
+    let send = |stream: &mut TcpStream, sql: String| {
+        write_frame(stream, &Request::Query(sql).encode()).unwrap();
+        read_response(stream)
+    };
+    assert!(matches!(
+        send(
+            &mut stream,
+            "CREATE TABLE t (id INTEGER PRIMARY KEY)".into()
+        ),
+        Response::Done
+    ));
+    let nots = "NOT ".repeat(20_000);
+    let parens = format!("{}id = 1{}", "(".repeat(5_000), ")".repeat(5_000));
+    let chain = format!("id{} = 1", " + 1".repeat(20_000));
+    for clause in [format!("{nots}id = 1"), parens, chain] {
+        let got = error_code(send(&mut stream, format!("SELECT * FROM t WHERE {clause}")));
+        assert_eq!(got, code::SYNTAX, "a depth error, not a crash");
+    }
+    // Same connection, still served; a new one gets in too.
+    assert!(matches!(
+        send(&mut stream, "SELECT * FROM t WHERE id = 1".into()),
+        Response::Rows { .. }
+    ));
+    raw(addr);
 }
