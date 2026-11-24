@@ -245,29 +245,44 @@ impl Scalar {
     /// The value on `row`, which holds a value for every column the
     /// expression reads. Borrows a column's or literal's value rather
     /// than copying it.
+    ///
+    /// It recurses over the tree, whose height the parser bounds (PR #69
+    /// review S1); the work at each node is done by functions of its own,
+    /// so the recursive frame stays small.
     pub(crate) fn eval<'a>(&'a self, row: &'a [Value]) -> Result<Cow<'a, Value>, SqlError> {
         Ok(match self {
             Scalar::Literal(value) => Cow::Borrowed(value),
             Scalar::Column(i) => Cow::Borrowed(&row[*i]),
-            Scalar::Neg(e) => Cow::Owned(match e.eval(row)?.as_ref() {
-                Value::Null => Value::Null,
-                Value::Integer(i) => Value::Integer(i.checked_neg().ok_or_else(|| {
-                    SqlError::Arithmetic(format!(
-                        "integer overflow: -({i}) does not fit in 64 bits"
-                    ))
-                })?),
-                other => return Err(not_integer(other)),
-            }),
+            Scalar::Neg(e) => Cow::Owned(negate(e.eval(row)?.as_ref())?),
             Scalar::Arith { op, left, right } => {
                 let left = left.eval(row)?;
                 let right = right.eval(row)?;
-                Cow::Owned(match (left.as_ref(), right.as_ref()) {
-                    (Value::Null, _) | (_, Value::Null) => Value::Null,
-                    (Value::Integer(l), Value::Integer(r)) => Value::Integer(op.apply(*l, *r)?),
-                    (Value::Integer(_), other) | (other, _) => return Err(not_integer(other)),
-                })
+                Cow::Owned(arith(*op, &left, &right)?)
             }
         })
+    }
+}
+
+/// `-value`: NULL for NULL.
+#[inline(never)]
+fn negate(value: &Value) -> Result<Value, SqlError> {
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::Integer(i) => i.checked_neg().map(Value::Integer).ok_or_else(|| {
+            SqlError::Arithmetic(format!("integer overflow: -({i}) does not fit in 64 bits"))
+        }),
+        other => Err(not_integer(other)),
+    }
+}
+
+/// `left op right`: NULL if either is NULL, even when dividing by zero
+/// (design 0019, section 2-2).
+#[inline(never)]
+fn arith(op: ArithOp, left: &Value, right: &Value) -> Result<Value, SqlError> {
+    match (left, right) {
+        (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+        (Value::Integer(l), Value::Integer(r)) => op.apply(*l, *r).map(Value::Integer),
+        (Value::Integer(_), other) | (other, _) => Err(not_integer(other)),
     }
 }
 
@@ -276,7 +291,27 @@ impl Pred {
     /// true one, BETWEEN at a false lower bound and IN at the first
     /// match: the answer is the same, but what is not computed cannot
     /// overflow (design 0019, section 2-1).
+    ///
+    /// Only NOT, AND and OR recurse here; the other conditions are
+    /// computed by [`Pred::eval_leaf`], so the recursive frame stays small.
     pub(crate) fn eval(&self, row: &[Value]) -> Result<Truth, SqlError> {
+        Ok(match self {
+            Pred::Not(e) => e.eval(row)?.not(),
+            Pred::And(left, right) => match left.eval(row)? {
+                Truth::False => Truth::False,
+                left => left.and(right.eval(row)?),
+            },
+            Pred::Or(left, right) => match left.eval(row)? {
+                Truth::True => Truth::True,
+                left => left.or(right.eval(row)?),
+            },
+            leaf => leaf.eval_leaf(row)?,
+        })
+    }
+
+    /// A comparison, IS NULL, BETWEEN or IN on `row`.
+    #[inline(never)]
+    fn eval_leaf(&self, row: &[Value]) -> Result<Truth, SqlError> {
         Ok(match self {
             Pred::Compare { op, left, right } => {
                 compare(*op, &*left.eval(row)?, &*right.eval(row)?)?
@@ -324,15 +359,7 @@ impl Pred {
                 }
                 found.negate_if(*negated)
             }
-            Pred::Not(e) => e.eval(row)?.not(),
-            Pred::And(left, right) => match left.eval(row)? {
-                Truth::False => Truth::False,
-                left => left.and(right.eval(row)?),
-            },
-            Pred::Or(left, right) => match left.eval(row)? {
-                Truth::True => Truth::True,
-                left => left.or(right.eval(row)?),
-            },
+            Pred::Not(_) | Pred::And(..) | Pred::Or(..) => self.eval(row)?,
         })
     }
 }

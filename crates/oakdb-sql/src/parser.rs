@@ -49,6 +49,7 @@ pub(crate) fn parse(sql: &str) -> Result<Statement, SqlError> {
     let mut parser = Parser {
         tokens: tokenize(sql)?,
         at: 0,
+        depth: 0,
     };
     let statement = parser.statement()?;
     parser.finish()?;
@@ -71,11 +72,21 @@ const UNSUPPORTED_OPERATORS: [&str; 4] = ["LIKE", "GLOB", "REGEXP", "MATCH"];
 /// What an unsupported operator's error says Oakdb supports.
 const OPERATORS_SUPPORTED: &str = "only comparisons, IS [NOT] NULL, BETWEEN and IN are supported";
 
+/// How deep an expression may nest (PR #69 review S1, design 0019
+/// section 1). Parsing, planning, computing and dropping an expression
+/// each recurse over its tree, so a tree deep enough would overflow the
+/// stack and abort the process. The parser refuses one taller than this,
+/// or that would make it recurse deeper than this, before building it.
+pub(crate) const MAX_DEPTH: usize = 200;
+
 struct Parser {
     /// The tokens, ending with [`Token::End`], which [`Parser::next`]
     /// never moves past.
     tokens: Vec<Spanned>,
     at: usize,
+    /// How many expressions, NOTs and unary minuses the parser is inside
+    /// of right now.
+    depth: usize,
 }
 
 impl Parser {
@@ -358,7 +369,7 @@ impl Parser {
             Token::End | Token::Symbol(";") => None,
             Token::Word(word) if word.eq_ignore_ascii_case("WHERE") => {
                 self.next();
-                Some(self.expr()?)
+                Some(self.expr()?.expr)
             }
             Token::Word(word) => {
                 return Err(SqlError::Unsupported(format!(
@@ -374,220 +385,426 @@ impl Parser {
         })
     }
 
-    /// expr := and_expr (OR and_expr)*
-    fn expr(&mut self) -> Result<Expr, SqlError> {
-        let mut left = self.and_expr()?;
-        while self.at_keyword("OR") {
-            self.next();
-            left = Expr::Or(Box::new(left), Box::new(self.and_expr()?));
-        }
-        Ok(left)
-    }
-
-    /// and_expr := not_expr (AND not_expr)*
-    fn and_expr(&mut self) -> Result<Expr, SqlError> {
-        let mut left = self.not_expr()?;
-        while self.at_keyword("AND") {
-            self.next();
-            left = Expr::And(Box::new(left), Box::new(self.not_expr()?));
-        }
-        Ok(left)
-    }
-
-    /// not_expr := NOT not_expr | predicate
-    fn not_expr(&mut self) -> Result<Expr, SqlError> {
-        if self.at_keyword("NOT") {
-            self.next();
-            return Ok(Expr::Not(Box::new(self.not_expr()?)));
-        }
-        self.predicate()
-    }
-
-    /// predicate := sum [ compare_op sum
-    ///                  | IS [NOT] NULL
-    ///                  | [NOT] BETWEEN sum AND sum
-    ///                  | [NOT] IN "(" expr ("," expr)* ")" ]
+    /// expr := a whole expression, as in WHERE and each item of an IN
+    /// list.
     ///
-    /// The ends of BETWEEN are sums, so the AND between them is never read
-    /// as a logical AND. A comparison cannot be followed by another
-    /// (`a < b < c`): that is unsupported rather than read as comparing a
-    /// condition.
-    fn predicate(&mut self) -> Result<Expr, SqlError> {
-        let left = Box::new(self.sum()?);
-        let predicate = match self.peek().token.clone() {
-            Token::Symbol(symbol) => match compare_op(symbol) {
-                Some(op) => {
-                    self.next();
-                    Expr::Compare {
-                        op,
-                        left,
-                        right: Box::new(self.sum()?),
-                    }
-                }
-                None => return Ok(*left),
-            },
-            Token::Word(word) if word.eq_ignore_ascii_case("IS") => {
-                self.next();
-                let negated = self.at_keyword("NOT");
-                if negated {
-                    self.next();
-                }
-                if !self.at_keyword("NULL") {
-                    return Err(SqlError::Unsupported(format!(
-                        "`IS` before {}; only IS NULL and IS NOT NULL are supported",
-                        describe(&self.peek().token)
-                    )));
-                }
-                self.next();
-                Expr::IsNull {
-                    operand: left,
-                    negated,
-                }
+    /// Operators are read by precedence climbing (design 0019, section 1)
+    /// rather than one function per level of precedence: a level of
+    /// parentheses then costs two stack frames instead of eight, and runs
+    /// of NOT or unary minus cost none, which matters on a server thread's
+    /// small stack (PR #69 review S1). The grammar is the same:
+    ///
+    /// ```text
+    /// expr      := and_expr (OR and_expr)*
+    /// and_expr  := not_expr (AND not_expr)*
+    /// not_expr  := NOT not_expr | predicate
+    /// predicate := sum [ compare_op sum | IS [NOT] NULL
+    ///                  | [NOT] BETWEEN sum AND sum | [NOT] IN "(" expr ("," expr)* ")" ]
+    /// sum       := product (("+" | "-") product)*
+    /// product   := unary (("*" | "/" | "%") unary)*
+    /// unary     := "-" unary | primary
+    /// primary   := literal | name | "(" expr ")"
+    /// ```
+    fn expr(&mut self) -> Result<Tree, SqlError> {
+        self.descend()?;
+        let tree = self.climb(Precedence::Or)?;
+        self.ascend();
+        Ok(tree)
+    }
+
+    /// An expression whose infix operators all bind at least as tightly
+    /// as `min`. Operators of one level join left to right (`a - b - c` is
+    /// `(a - b) - c`) in a loop, without recursing.
+    fn climb(&mut self, min: Precedence) -> Result<Tree, SqlError> {
+        let mut left = self.prefix(min)?;
+        while let Some(op) = self.infix()? {
+            if op.precedence() < min {
+                break;
             }
-            Token::Word(word)
-                if ["NOT", "BETWEEN", "IN"]
-                    .iter()
-                    .any(|k| word.eq_ignore_ascii_case(k)) =>
-            {
-                let negated = word.eq_ignore_ascii_case("NOT");
-                if negated {
-                    self.next();
-                }
-                if self.at_keyword("BETWEEN") {
-                    self.next();
-                    let low = Box::new(self.sum()?);
-                    self.expect_keyword("AND")?;
-                    let high = Box::new(self.sum()?);
-                    Expr::Between {
-                        operand: left,
-                        low,
-                        high,
-                        negated,
-                    }
-                } else if self.at_keyword("IN") {
-                    self.next();
-                    self.expect_symbol("(")?;
-                    let mut list = vec![self.expr()?];
-                    while self.comma_or_close(false)? {
-                        list.push(self.expr()?);
-                    }
-                    Expr::In {
-                        operand: left,
-                        list,
-                        negated,
-                    }
+            left = self.infixed(left, op)?;
+            if op.precedence() == Precedence::Predicate {
+                self.no_second_predicate()?;
+            }
+        }
+        Ok(left)
+    }
+
+    /// The operand an infix operator stands after: a run of NOTs (only
+    /// where `min` lets NOT stand) over a predicate, or a run of unary
+    /// minuses over a primary. Runs are read in a loop and wrapped from
+    /// the inside out, so they do not recurse.
+    fn prefix(&mut self, min: Precedence) -> Result<Tree, SqlError> {
+        let mut nots = Vec::new();
+        while min <= Precedence::Not && self.at_keyword("NOT") {
+            nots.push(self.next().position);
+        }
+        if !nots.is_empty() {
+            let mut tree = self.climb(Precedence::Predicate)?;
+            for &at in nots.iter().rev() {
+                tree = self.node(at, &[tree.height], Expr::Not(Box::new(tree.expr)))?;
+            }
+            return Ok(tree);
+        }
+        let mut minuses = Vec::new();
+        while self.at_symbol("-") {
+            minuses.push(self.next().position);
+        }
+        let mut tree = match minuses.last() {
+            Some(&at) if matches!(self.peek().token, Token::Integer(_)) => {
+                minuses.pop();
+                self.negative_literal(at)?
+            }
+            _ => self.primary()?,
+        };
+        for &at in minuses.iter().rev() {
+            tree = self.node(at, &[tree.height], Expr::Neg(Box::new(tree.expr)))?;
+        }
+        Ok(tree)
+    }
+
+    /// primary := literal | name | "(" expr ")"
+    fn primary(&mut self) -> Result<Tree, SqlError> {
+        match &self.peek().token {
+            Token::Symbol("(") => {
+                self.next();
+                self.descend()?;
+                let inner = self.climb(Precedence::Or)?;
+                self.ascend();
+                self.expect_symbol(")")?;
+                Ok(inner)
+            }
+            Token::Word(word) if !word.eq_ignore_ascii_case("NULL") => {
+                Ok(Tree::leaf(Expr::Column(self.name()?)))
+            }
+            Token::Word(_) | Token::Integer(_) | Token::Text(_) | Token::Blob(_) => {
+                Ok(Tree::leaf(Expr::Literal(self.literal()?)))
+            }
+            _ => Err(self.expected("an expression")),
+        }
+    }
+
+    /// The literal of the digits after a `-` at `at`. A `-` right before
+    /// digits is a negative literal, as in INSERT, so
+    /// `-9223372036854775808` is i64::MIN rather than the negation of a
+    /// number too big for 64 bits.
+    #[inline(never)]
+    fn negative_literal(&mut self, at: usize) -> Result<Tree, SqlError> {
+        match self.next().token {
+            Token::Integer(digits) => Ok(Tree::leaf(Expr::Literal(integer(&digits, true, at)?))),
+            found => Err(syntax(
+                at,
+                &format!("expected digits after `-`, found {}", describe(&found)),
+            )),
+        }
+    }
+
+    /// The infix operator at the next token, if one is there. Fails as
+    /// unsupported on an operator of real SQL that Oakdb does not support,
+    /// such as LIKE, and as a syntax error on NOT followed by neither
+    /// BETWEEN nor IN.
+    #[inline(never)]
+    fn infix(&self) -> Result<Option<Infix>, SqlError> {
+        let keyword = |token: &Token, keyword: &str| matches!(token, Token::Word(word) if word.eq_ignore_ascii_case(keyword));
+        let token = &self.peek().token;
+        Ok(Some(match token {
+            Token::Symbol("+") => Infix::Arith(ArithOp::Add),
+            Token::Symbol("-") => Infix::Arith(ArithOp::Sub),
+            Token::Symbol("*") => Infix::Arith(ArithOp::Mul),
+            Token::Symbol("/") => Infix::Arith(ArithOp::Div),
+            Token::Symbol("%") => Infix::Arith(ArithOp::Rem),
+            Token::Symbol(symbol) => match compare_op(symbol) {
+                Some(op) => Infix::Compare(op),
+                None => return Ok(None),
+            },
+            _ if keyword(token, "OR") => Infix::Or,
+            _ if keyword(token, "AND") => Infix::And,
+            _ if keyword(token, "IS") => Infix::Is,
+            _ if keyword(token, "BETWEEN") => Infix::Between { negated: false },
+            _ if keyword(token, "IN") => Infix::In { negated: false },
+            _ if keyword(token, "NOT") => {
+                let after = &self.tokens[(self.at + 1).min(self.tokens.len() - 1)];
+                if keyword(&after.token, "BETWEEN") {
+                    Infix::Between { negated: true }
+                } else if keyword(&after.token, "IN") {
+                    Infix::In { negated: true }
                 } else {
-                    self.unsupported_operator()?;
-                    return Err(self.expected("`BETWEEN` or `IN` after `NOT`"));
+                    unsupported_operator(&after.token)?;
+                    return Err(syntax(
+                        after.position,
+                        &format!(
+                            "expected `BETWEEN` or `IN` after `NOT`, found {}",
+                            describe(&after.token)
+                        ),
+                    ));
                 }
             }
             Token::Word(_) => {
-                self.unsupported_operator()?;
-                return Ok(*left);
+                unsupported_operator(token)?;
+                return Ok(None);
             }
-            _ => return Ok(*left),
-        };
-        if let Token::Symbol(symbol) = self.peek().token {
-            if compare_op(symbol).is_some() {
-                return Err(SqlError::Unsupported(format!(
-                    "`{symbol}` after a comparison; comparisons cannot be chained"
-                )));
-            }
-        }
-        Ok(predicate)
+            _ => return Ok(None),
+        }))
     }
 
-    /// Fails as unsupported if the next token is an operator of real SQL
-    /// that Oakdb does not support, such as LIKE.
-    fn unsupported_operator(&self) -> Result<(), SqlError> {
-        match &self.peek().token {
-            Token::Word(word)
-                if UNSUPPORTED_OPERATORS
-                    .iter()
-                    .any(|k| word.eq_ignore_ascii_case(k)) =>
-            {
+    /// Reads infix operator `op` and what follows it, after `left`.
+    fn infixed(&mut self, left: Tree, op: Infix) -> Result<Tree, SqlError> {
+        match op {
+            Infix::Or => self.binary(left, op, Expr::Or),
+            Infix::And => self.binary(left, op, Expr::And),
+            Infix::Compare(compare) => self.binary(left, op, |left, right| Expr::Compare {
+                op: compare,
+                left,
+                right,
+            }),
+            Infix::Arith(arith) => self.binary(left, op, |left, right| Expr::Arith {
+                op: arith,
+                left,
+                right,
+            }),
+            Infix::Is => self.is_null(left),
+            Infix::Between { negated } => self.between(left, negated),
+            Infix::In { negated } => self.in_list(left, negated),
+        }
+    }
+
+    /// The rest of `left op right` for a two-sided operator, at the
+    /// operator. The right side binds tighter than `op`, so operators of
+    /// one level join left to right.
+    fn binary(
+        &mut self,
+        left: Tree,
+        op: Infix,
+        make: impl FnOnce(Box<Expr>, Box<Expr>) -> Expr,
+    ) -> Result<Tree, SqlError> {
+        let at = self.next().position;
+        let right = self.climb(op.precedence().tighter())?;
+        self.join(at, left, right, make)
+    }
+
+    /// The rest of `left IS [NOT] NULL`, at `IS`.
+    #[inline(never)]
+    fn is_null(&mut self, left: Tree) -> Result<Tree, SqlError> {
+        let at = self.next().position;
+        let negated = self.at_keyword("NOT");
+        if negated {
+            self.next();
+        }
+        if !self.at_keyword("NULL") {
+            return Err(SqlError::Unsupported(format!(
+                "`IS` before {}; only IS NULL and IS NOT NULL are supported",
+                describe(&self.peek().token)
+            )));
+        }
+        self.next();
+        self.node(
+            at,
+            &[left.height],
+            Expr::IsNull {
+                operand: Box::new(left.expr),
+                negated,
+            },
+        )
+    }
+
+    /// The rest of `left [NOT] BETWEEN sum AND sum`, at `NOT` or
+    /// `BETWEEN`. The ends are sums, so the AND between them is never read
+    /// as a logical AND.
+    #[inline(never)]
+    fn between(&mut self, left: Tree, negated: bool) -> Result<Tree, SqlError> {
+        let at = self.next().position;
+        if negated {
+            self.next();
+        }
+        let low = self.climb(Precedence::Sum)?;
+        self.expect_keyword("AND")?;
+        let high = self.climb(Precedence::Sum)?;
+        self.node(
+            at,
+            &[left.height, low.height, high.height],
+            Expr::Between {
+                operand: Box::new(left.expr),
+                low: Box::new(low.expr),
+                high: Box::new(high.expr),
+                negated,
+            },
+        )
+    }
+
+    /// The rest of `left [NOT] IN (expr, ...)`, at `NOT` or `IN`.
+    #[inline(never)]
+    fn in_list(&mut self, left: Tree, negated: bool) -> Result<Tree, SqlError> {
+        let at = self.next().position;
+        if negated {
+            self.next();
+        }
+        self.expect_symbol("(")?;
+        let mut items = vec![self.expr()?];
+        while self.comma_or_close(false)? {
+            items.push(self.expr()?);
+        }
+        let mut heights: Vec<usize> = items.iter().map(|item| item.height).collect();
+        heights.push(left.height);
+        self.node(
+            at,
+            &heights,
+            Expr::In {
+                operand: Box::new(left.expr),
+                list: items.into_iter().map(|item| item.expr).collect(),
+                negated,
+            },
+        )
+    }
+
+    /// Fails as unsupported if another comparison, IS, BETWEEN or IN
+    /// follows one (`a < b < c`): that would compare a condition.
+    fn no_second_predicate(&self) -> Result<(), SqlError> {
+        match self.infix()? {
+            Some(op) if op.precedence() == Precedence::Predicate => {
                 Err(SqlError::Unsupported(format!(
-                    "operator `{}`; {OPERATORS_SUPPORTED}",
-                    word.to_ascii_uppercase()
+                    "{} after a comparison; comparisons cannot be chained",
+                    describe(&self.peek().token)
                 )))
             }
             _ => Ok(()),
         }
     }
 
-    /// sum := product (("+" | "-") product)*
-    fn sum(&mut self) -> Result<Expr, SqlError> {
-        let mut left = self.product()?;
-        loop {
-            let op = match self.peek().token {
-                Token::Symbol("+") => ArithOp::Add,
-                Token::Symbol("-") => ArithOp::Sub,
-                _ => return Ok(left),
-            };
-            self.next();
-            left = Expr::Arith {
-                op,
-                left: Box::new(left),
-                right: Box::new(self.product()?),
-            };
+    /// One more level of parentheses or IN lists, or a syntax error at
+    /// the next token past [`MAX_DEPTH`] levels.
+    fn descend(&mut self) -> Result<(), SqlError> {
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            return Err(too_deep(self.peek().position));
         }
+        Ok(())
     }
 
-    /// product := unary (("*" | "/" | "%") unary)*
-    fn product(&mut self) -> Result<Expr, SqlError> {
-        let mut left = self.unary()?;
-        loop {
-            let op = match self.peek().token {
-                Token::Symbol("*") => ArithOp::Mul,
-                Token::Symbol("/") => ArithOp::Div,
-                Token::Symbol("%") => ArithOp::Rem,
-                _ => return Ok(left),
-            };
-            self.next();
-            left = Expr::Arith {
-                op,
-                left: Box::new(left),
-                right: Box::new(self.unary()?),
-            };
-        }
+    /// Back out of a level [`Parser::descend`] entered.
+    fn ascend(&mut self) {
+        self.depth -= 1;
     }
 
-    /// unary := "-" unary | primary
-    ///
-    /// A `-` right before digits is a negative literal, as in INSERT, so
-    /// `-9223372036854775808` is i64::MIN rather than the negation of a
-    /// number too big for 64 bits.
-    fn unary(&mut self) -> Result<Expr, SqlError> {
-        if !self.at_symbol("-") {
-            return self.primary();
+    /// Node `expr` over children of heights `children`, or a syntax error
+    /// at `position` if that makes the tree taller than [`MAX_DEPTH`].
+    /// Chains such as `1 + 1 + ...` and runs of NOT grow the tree without
+    /// the parser recursing, so the tree's height is checked as well as
+    /// the parser's depth.
+    fn node(&self, position: usize, children: &[usize], expr: Expr) -> Result<Tree, SqlError> {
+        let height = 1 + children.iter().copied().max().unwrap_or(0);
+        if height > MAX_DEPTH {
+            return Err(too_deep(position));
         }
-        let minus = self.next();
-        if let Token::Integer(digits) = self.peek().token.clone() {
-            self.next();
-            return Ok(Expr::Literal(integer(&digits, true, minus.position)?));
-        }
-        Ok(Expr::Neg(Box::new(self.unary()?)))
+        Ok(Tree { expr, height })
     }
 
-    /// primary := literal | name | "(" expr ")"
-    fn primary(&mut self) -> Result<Expr, SqlError> {
-        match &self.peek().token {
-            Token::Symbol("(") => {
-                self.next();
-                let inner = self.expr()?;
-                self.expect_symbol(")")?;
-                Ok(inner)
-            }
-            Token::Word(word) if word.eq_ignore_ascii_case("NULL") => {
-                Ok(Expr::Literal(self.literal()?))
-            }
-            Token::Word(_) => Ok(Expr::Column(self.name()?)),
-            Token::Integer(_) | Token::Text(_) | Token::Blob(_) => {
-                Ok(Expr::Literal(self.literal()?))
-            }
-            _ => Err(self.expected("an expression")),
+    /// The node `make` builds over `left` and `right`.
+    fn join(
+        &self,
+        position: usize,
+        left: Tree,
+        right: Tree,
+        make: impl FnOnce(Box<Expr>, Box<Expr>) -> Expr,
+    ) -> Result<Tree, SqlError> {
+        let children = [left.height, right.height];
+        self.node(
+            position,
+            &children,
+            make(Box::new(left.expr), Box::new(right.expr)),
+        )
+    }
+}
+
+/// How tightly an operator binds, loosest first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Precedence {
+    Or,
+    And,
+    Not,
+    /// Comparisons, IS, BETWEEN and IN.
+    Predicate,
+    Sum,
+    Product,
+    /// Unary minus and primaries: no infix operator binds this tightly.
+    Unary,
+}
+
+impl Precedence {
+    /// The next tighter level: the right side of a left-associative
+    /// operator binds at least this tightly.
+    fn tighter(self) -> Self {
+        match self {
+            Precedence::Or => Precedence::And,
+            Precedence::And => Precedence::Not,
+            Precedence::Not => Precedence::Predicate,
+            Precedence::Predicate => Precedence::Sum,
+            Precedence::Sum => Precedence::Product,
+            Precedence::Product | Precedence::Unary => Precedence::Unary,
         }
     }
+}
+
+/// An infix operator.
+#[derive(Debug, Clone, Copy)]
+enum Infix {
+    Or,
+    And,
+    Compare(CompareOp),
+    Is,
+    Between { negated: bool },
+    In { negated: bool },
+    Arith(ArithOp),
+}
+
+impl Infix {
+    fn precedence(self) -> Precedence {
+        match self {
+            Infix::Or => Precedence::Or,
+            Infix::And => Precedence::And,
+            Infix::Compare(_) | Infix::Is | Infix::Between { .. } | Infix::In { .. } => {
+                Precedence::Predicate
+            }
+            Infix::Arith(ArithOp::Add | ArithOp::Sub) => Precedence::Sum,
+            Infix::Arith(ArithOp::Mul | ArithOp::Div | ArithOp::Rem) => Precedence::Product,
+        }
+    }
+}
+
+/// Fails as unsupported if `token` is an operator of real SQL that Oakdb
+/// does not support, such as LIKE.
+fn unsupported_operator(token: &Token) -> Result<(), SqlError> {
+    match token {
+        Token::Word(word)
+            if UNSUPPORTED_OPERATORS
+                .iter()
+                .any(|k| word.eq_ignore_ascii_case(k)) =>
+        {
+            Err(SqlError::Unsupported(format!(
+                "operator `{}`; {OPERATORS_SUPPORTED}",
+                word.to_ascii_uppercase()
+            )))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// An expression and the height of its tree, 1 for a literal or a column.
+struct Tree {
+    expr: Expr,
+    height: usize,
+}
+
+impl Tree {
+    fn leaf(expr: Expr) -> Self {
+        Tree { expr, height: 1 }
+    }
+}
+
+/// The error for an expression nested deeper than [`MAX_DEPTH`].
+fn too_deep(position: usize) -> SqlError {
+    syntax(
+        position,
+        &format!("the expression nests more than {MAX_DEPTH} levels deep"),
+    )
 }
 
 /// The comparison operator `symbol` stands for, if any.
