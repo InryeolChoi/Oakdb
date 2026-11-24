@@ -362,6 +362,10 @@ fn a_commit_whose_checkpoint_fails_is_kept_and_stops_the_engine() {
         let (txn, _) = writes(&db, &[3], &long(3), &model);
         let start = fs.ops();
         txn.commit().unwrap();
+        // The commit is answered before its checkpoint runs (design 0021
+        // G6); a checkpoint asked for now waits for that one and finds
+        // nothing to do.
+        db.checkpoint().unwrap();
         fs.ops() - start
     };
     assert!(ops > 10, "the commit did not checkpoint: {ops} operations");
@@ -392,6 +396,9 @@ fn a_commit_whose_checkpoint_fails_is_kept_and_stops_the_engine() {
                 // starts: it is kept, whatever the checkpoint does.
                 assert!(result.is_ok(), "{what}: {result:?}");
             }
+            // The commit is answered before its checkpoint runs (design
+            // 0021 G6): a checkpoint asked for now runs after that one.
+            let _ = db.checkpoint();
             assert_stopped(&db, &what);
             drop(db);
             let acked = if fail < 2 { &model } else { &landed };

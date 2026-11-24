@@ -267,10 +267,9 @@ fn a_failed_batch_sync_leaves_every_commit_in_it_in_doubt() {
             "{result:?}"
         );
     }
-    assert!(matches!(
-        writing(&db, &[b"e".to_vec()], b"v").commit(),
-        Err(Error::Stopped(_))
-    ));
+    let mut after = db.begin();
+    assert!(matches!(after.put(b"e", b"v"), Err(Error::Stopped(_))));
+    assert!(matches!(after.commit(), Err(Error::Stopped(_))));
     assert!(matches!(db.checkpoint(), Err(Error::Stopped(_))));
     drop(db);
     let db = open(&fs);
@@ -317,13 +316,17 @@ fn a_checkpoint_request_cuts_a_batch() {
     assert_eq!(after.batches - before.batches, 3, "{after:?}");
     assert_eq!(after.largest_batch, 1, "{after:?}");
     // The checkpoint emptied the WAL of the second commit; the third came
-    // after it.
+    // after it. All three keys share one leaf, so the third's page image
+    // holds the second's value too, but only once: had the checkpoint run
+    // before the second, the WAL would hold the second's own image as
+    // well, and had it run after the third, neither.
     let wal = wal_bytes(&fs);
     assert!(
-        find(&wal, SECOND).is_none(),
+        find(&wal, THIRD).is_some(),
         "the checkpoint ran after the third"
     );
-    assert!(find(&wal, THIRD).is_some(), "the third is not in the WAL");
+    let seconds = wal.windows(SECOND.len()).filter(|w| *w == SECOND).count();
+    assert_eq!(seconds, 1, "the checkpoint ran before the second");
 }
 
 #[test]
@@ -364,7 +367,9 @@ fn a_commit_is_answered_before_the_checkpoint_it_sets_off() {
             "the commit waited for the checkpoint: {answer:?}"
         );
     });
-    // The checkpoint did run.
+    // The sync held after the commit's was the checkpoint's. A checkpoint
+    // asked for now runs after it, and finds the WAL empty.
+    db.checkpoint().unwrap();
     assert!(wal_bytes(&fs).len() < 1024);
 }
 
