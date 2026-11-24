@@ -142,10 +142,7 @@ fn a_failed_statement_returns_its_kind_and_the_connection_goes_on() {
         server_error(client.query("INSERT INTO t VALUES (3, 'c'")),
         code::SYNTAX
     );
-    assert_eq!(
-        server_error(client.query("UPDATE t SET v = 'b'")),
-        code::UNSUPPORTED
-    );
+    assert_eq!(server_error(client.query("TRUNCATE t")), code::UNSUPPORTED);
     assert_eq!(
         server_error(client.query("SELECT * FROM nope WHERE id = 1")),
         code::NO_SUCH_TABLE

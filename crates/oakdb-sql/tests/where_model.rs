@@ -631,6 +631,19 @@ fn expect(s: &Schema, model: &Model, write: &Write) -> Expect {
             }
         },
         Write::Update(ints, texts, filter) => {
+            // A NULL literal for the primary key is a type error found
+            // before any row is read (design 0022, U8), on any table.
+            let null_key = if s.int_key {
+                ints.iter()
+                    .any(|(i, e)| *i == 0 && matches!(e, I::Lit(None)))
+            } else {
+                texts
+                    .iter()
+                    .any(|(i, e)| *i == 0 && matches!(e, T::Lit(None)))
+            };
+            if null_key {
+                return Expect::Strict(Err(vec![Failure::NullKey]));
+            }
             let Ok(keys) = matching(model, filter) else {
                 return Expect::Loose;
             };

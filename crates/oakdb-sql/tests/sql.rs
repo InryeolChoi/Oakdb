@@ -550,8 +550,8 @@ fn a_primary_key_too_long_for_the_engine_is_an_engine_error() {
 fn statements_oakdb_does_not_support_name_what_they_found() {
     let db = with_users();
     for (sql, named) in [
-        ("UPDATE users SET name = 'x'", "UPDATE"),
-        ("DELETE FROM users WHERE id = 1", "DELETE"),
+        ("TRUNCATE users", "TRUNCATE"),
+        ("REPLACE INTO users VALUES (1, NULL, NULL)", "REPLACE"),
         ("BEGIN", "BEGIN"),
         ("DROP TABLE users", "DROP"),
         ("CREATE INDEX i ON users (name)", "INDEX"),

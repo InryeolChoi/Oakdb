@@ -34,6 +34,21 @@ pub(crate) enum Statement {
         /// The WHERE condition, or `None` for every row.
         filter: Option<Expr>,
     },
+    /// `UPDATE table SET column = expr, ... [WHERE condition]` (design
+    /// 0022).
+    Update {
+        table: String,
+        /// Each column SET names and the expression it gets, in order.
+        assignments: Vec<(String, Expr)>,
+        /// The WHERE condition, or `None` for every row.
+        filter: Option<Expr>,
+    },
+    /// `DELETE FROM table [WHERE condition]` (design 0022).
+    Delete {
+        table: String,
+        /// The WHERE condition, or `None` for every row.
+        filter: Option<Expr>,
+    },
 }
 
 /// A column in CREATE TABLE.
@@ -60,9 +75,9 @@ pub(crate) fn parse(sql: &str) -> Result<Statement, SqlError> {
 /// Type names are not among them: `text TEXT` is a fine column.
 /// `BETWEEN`, `IN` and `LIKE` are not among them: they are only read where
 /// an operator stands, so they can still name a column (design 0019, Q1).
-const RESERVED: [&str; 15] = [
+const RESERVED: [&str; 18] = [
     "CREATE", "TABLE", "INSERT", "INTO", "VALUES", "SELECT", "FROM", "WHERE", "PRIMARY", "KEY",
-    "NULL", "AND", "OR", "NOT", "IS",
+    "NULL", "AND", "OR", "NOT", "IS", "UPDATE", "SET", "DELETE",
 ];
 
 /// Operators of real SQL that Oakdb does not support, where an operator
@@ -177,14 +192,17 @@ impl Parser {
         }
     }
 
-    /// statement := create | insert | select
+    /// statement := create | insert | select | update | delete
     fn statement(&mut self) -> Result<Statement, SqlError> {
         match &self.peek().token {
             Token::Word(word) if word.eq_ignore_ascii_case("CREATE") => self.create(),
             Token::Word(word) if word.eq_ignore_ascii_case("INSERT") => self.insert(),
             Token::Word(word) if word.eq_ignore_ascii_case("SELECT") => self.select(),
+            Token::Word(word) if word.eq_ignore_ascii_case("UPDATE") => self.update(),
+            Token::Word(word) if word.eq_ignore_ascii_case("DELETE") => self.delete(),
             Token::Word(word) => Err(SqlError::Unsupported(format!(
-                "statement `{word}`; only CREATE TABLE, INSERT and SELECT are supported"
+                "statement `{word}`; only CREATE TABLE, INSERT, SELECT, UPDATE and DELETE are \
+                 supported"
             ))),
             _ => Err(self.expected("a statement")),
         }
@@ -365,24 +383,82 @@ impl Parser {
         };
         self.expect_keyword("FROM")?;
         let table = self.name()?;
-        let filter = match &self.peek().token {
-            Token::End | Token::Symbol(";") => None,
-            Token::Word(word) if word.eq_ignore_ascii_case("WHERE") => {
-                self.next();
-                Some(self.expr()?.expr)
-            }
-            Token::Word(word) => {
-                return Err(SqlError::Unsupported(format!(
-                    "`{word}` in SELECT; only WHERE is supported after FROM"
-                )))
-            }
-            _ => return Err(self.expected("`WHERE`")),
-        };
+        let filter = self.filter("SELECT", "after FROM")?;
         Ok(Statement::Select {
             table,
             columns,
             filter,
         })
+    }
+
+    /// update := UPDATE name SET name "=" expr ("," name "=" expr)* [WHERE expr]
+    fn update(&mut self) -> Result<Statement, SqlError> {
+        self.expect_keyword("UPDATE")?;
+        if self.at_keyword("OR") {
+            return Err(SqlError::Unsupported(
+                "UPDATE OR ...; conflicts cannot be resolved another way".into(),
+            ));
+        }
+        let table = self.name()?;
+        self.expect_keyword_or_unsupported("SET", |word| {
+            format!("`{word}` in UPDATE; only SET is supported after the table")
+        })?;
+        let mut assignments = vec![self.assignment()?];
+        while self.at_symbol(",") {
+            self.next();
+            assignments.push(self.assignment()?);
+        }
+        let filter = self.filter("UPDATE", "after SET")?;
+        Ok(Statement::Update {
+            table,
+            assignments,
+            filter,
+        })
+    }
+
+    /// One `column = expr` of SET.
+    fn assignment(&mut self) -> Result<(String, Expr), SqlError> {
+        if self.at_symbol("(") {
+            return Err(SqlError::Unsupported(
+                "a list of columns in SET; set one column at a time".into(),
+            ));
+        }
+        let column = self.name()?;
+        self.expect_symbol("=")?;
+        if self.at_keyword("DEFAULT") {
+            return Err(SqlError::Unsupported(
+                "DEFAULT in SET; columns have no default value".into(),
+            ));
+        }
+        Ok((column, self.expr()?.expr))
+    }
+
+    /// delete := DELETE FROM name [WHERE expr]
+    fn delete(&mut self) -> Result<Statement, SqlError> {
+        self.expect_keyword("DELETE")?;
+        self.expect_keyword_or_unsupported("FROM", |word| {
+            format!("`{word}` after DELETE; only DELETE FROM is supported")
+        })?;
+        let table = self.name()?;
+        let filter = self.filter("DELETE", "after the table")?;
+        Ok(Statement::Delete { table, filter })
+    }
+
+    /// An optional `WHERE expr` ending `statement`. Another word there is
+    /// a clause Oakdb does not support (`ORDER BY`, `LIMIT`, `RETURNING`,
+    /// `FROM`); `place` says where WHERE stands in the error.
+    fn filter(&mut self, statement: &str, place: &str) -> Result<Option<Expr>, SqlError> {
+        match &self.peek().token {
+            Token::End | Token::Symbol(";") => Ok(None),
+            Token::Word(word) if word.eq_ignore_ascii_case("WHERE") => {
+                self.next();
+                Ok(Some(self.expr()?.expr))
+            }
+            Token::Word(word) => Err(SqlError::Unsupported(format!(
+                "`{word}` in {statement}; only WHERE is supported {place}"
+            ))),
+            _ => Err(self.expected("`WHERE`")),
+        }
     }
 
     /// expr := a whole expression, as in WHERE and each item of an IN
@@ -975,5 +1051,52 @@ mod tests {
             parse("SELECT * FROM t;").unwrap(),
             Statement::Select { filter: None, .. }
         ));
+    }
+
+    #[test]
+    fn update_reads_its_assignments_in_order_and_an_optional_where() {
+        assert_eq!(
+            parse("UPDATE t SET a = a + 1, b = 'x' WHERE id = 1").unwrap(),
+            Statement::Update {
+                table: "t".into(),
+                assignments: vec![
+                    ("a".into(), *arith(ArithOp::Add, col("a"), int(1))),
+                    ("b".into(), Expr::Literal(Value::Text("x".into()))),
+                ],
+                filter: Some(*cmp(CompareOp::Eq, col("id"), int(1))),
+            }
+        );
+        assert!(matches!(
+            parse("update t set a = 1;").unwrap(),
+            Statement::Update { filter: None, .. }
+        ));
+    }
+
+    #[test]
+    fn delete_reads_its_table_and_an_optional_where() {
+        assert_eq!(
+            parse("DELETE FROM t WHERE id > 1").unwrap(),
+            Statement::Delete {
+                table: "t".into(),
+                filter: Some(*cmp(CompareOp::Gt, col("id"), int(1))),
+            }
+        );
+        assert_eq!(
+            parse("delete from t").unwrap(),
+            Statement::Delete {
+                table: "t".into(),
+                filter: None,
+            }
+        );
+    }
+
+    #[test]
+    fn a_set_expression_is_nested_no_deeper_than_where() {
+        let deep = format!(
+            "UPDATE t SET a = {}1{}",
+            "(".repeat(MAX_DEPTH + 1),
+            ")".repeat(MAX_DEPTH + 1)
+        );
+        assert!(matches!(parse(&deep), Err(SqlError::Syntax { .. })));
     }
 }

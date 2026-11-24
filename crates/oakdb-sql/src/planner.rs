@@ -53,6 +53,42 @@ pub(crate) fn plan(table: &Table, filter: Option<Expr>) -> Result<Plan, SqlError
     })
 }
 
+/// Checks the SET list of an UPDATE (design 0022, section 4-2): each
+/// column exists and is named once, and each expression is a value of the
+/// column's type, or a NULL literal outside the primary key. Returns each
+/// column's position with its expression, in the order written. Like
+/// [`plan`], it reads no row, so an UPDATE with a type error fails on an
+/// empty table too.
+pub(crate) fn assignments(
+    table: &Table,
+    assignments: Vec<(String, Expr)>,
+) -> Result<Vec<(usize, Scalar)>, SqlError> {
+    let mut checked: Vec<(usize, Scalar)> = Vec::with_capacity(assignments.len());
+    for (name, expr) in assignments {
+        let column = table
+            .column(&name)
+            .ok_or_else(|| table.no_such_column(&name))?;
+        if checked.iter().any(|&(earlier, _)| earlier == column) {
+            return Err(SqlError::DuplicateColumn(name));
+        }
+        let value = scalar(table, expr)?;
+        let expected = table.columns[column].column_type;
+        let fits = match value.column_type {
+            None => column != table.primary_key,
+            Some(found) => found == expected,
+        };
+        if !fits {
+            return Err(SqlError::TypeMismatch {
+                column: name,
+                expected,
+                found: value.column_type,
+            });
+        }
+        checked.push((column, value.scalar));
+    }
+    Ok(checked)
+}
+
 // ------------------------------------------------------------ types
 
 /// A checked value expression and its type: `None` for a NULL literal,
@@ -566,5 +602,56 @@ mod tests {
         );
         // Only the primary key narrows the range.
         assert_eq!(plan_of(&table, "name = 'x'").range, (Un, Un));
+    }
+
+    fn assignments_of(set: &str) -> Result<Vec<(usize, Scalar)>, SqlError> {
+        match parse(&format!("UPDATE t SET {set}")).unwrap() {
+            Statement::Update { assignments: a, .. } => assignments(&table(), a),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_gives_column_positions_in_the_order_written() {
+        assert_eq!(
+            assignments_of("name = 'x', id = age").unwrap(),
+            vec![
+                (2, Scalar::Literal(Value::Text("x".into()))),
+                (0, Scalar::Column(1)),
+            ]
+        );
+        // NULL fits any column but the primary key.
+        assert_eq!(
+            assignments_of("age = NULL").unwrap(),
+            vec![(1, Scalar::Literal(Value::Null))]
+        );
+    }
+
+    #[test]
+    fn set_checks_columns_and_types_without_a_row() {
+        assert!(matches!(
+            assignments_of("nope = 1"),
+            Err(SqlError::NoSuchColumn { column, .. }) if column == "nope"
+        ));
+        assert!(matches!(
+            assignments_of("age = 1, age = 2"),
+            Err(SqlError::DuplicateColumn(c)) if c == "age"
+        ));
+        assert!(matches!(
+            assignments_of("age = name"),
+            Err(SqlError::TypeMismatch { column, expected: ColumnType::Integer, found: Some(ColumnType::Text) }) if column == "age"
+        ));
+        assert!(matches!(
+            assignments_of("id = NULL"),
+            Err(SqlError::TypeMismatch { column, found: None, .. }) if column == "id"
+        ));
+        assert!(matches!(
+            assignments_of("age = (age = 1)"),
+            Err(SqlError::Type(_))
+        ));
+        assert!(matches!(
+            assignments_of("age = name + 1"),
+            Err(SqlError::Type(_))
+        ));
     }
 }
