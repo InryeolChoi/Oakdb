@@ -21,12 +21,17 @@
 //! [`SimFs::set_torn_sector`] says what a sector a torn write did not land
 //! holds: the old bytes, or garbage where it was overwriting bytes the disk
 //! held (design 0014).
+//!
+//! [`SimFs::hold_syncs`] makes syncs wait at a gate until the test lets them
+//! go, so a test can see what other threads do while a commit is syncing
+//! (issue #27, design 0018).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use super::{Fs, FsFile};
 
@@ -40,6 +45,107 @@ pub const SECTOR: u64 = 512;
 #[derive(Clone, Default)]
 pub struct SimFs {
     disk: Arc<Mutex<Disk>>,
+    gate: Arc<Gate>,
+}
+
+/// Where syncs wait while a test holds them ([`SimFs::hold_syncs`]). Apart
+/// from the disk, so other calls go on while a sync waits.
+#[derive(Default)]
+struct Gate {
+    state: Mutex<GateState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct GateState {
+    /// Whether syncs wait.
+    held: bool,
+    /// The threads of the syncs that came to the gate while it was held,
+    /// in order, by name.
+    arrived: Vec<Option<String>>,
+    /// How many of `arrived` [`HeldSyncs::wait_for_sync`] has reported.
+    reported: usize,
+    /// Whether the next sync panics ([`SimFs::panic_at_next_sync`]).
+    panic_next: bool,
+}
+
+impl Gate {
+    fn state(&self) -> MutexGuard<'_, GateState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Waits while the gate is held, noting the calling thread. Panics
+    /// instead if [`SimFs::panic_at_next_sync`] asked for it.
+    fn pass(&self) {
+        let mut state = self.state();
+        if std::mem::take(&mut state.panic_next) {
+            drop(state);
+            panic!("a sync panicked, as the test asked");
+        }
+        if !state.held {
+            return;
+        }
+        state
+            .arrived
+            .push(std::thread::current().name().map(String::from));
+        self.changed.notify_all();
+        while state.held {
+            state = self.changed.wait(state).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+}
+
+/// Holds every sync of a [`SimFs`] until released or dropped. From
+/// [`SimFs::hold_syncs`].
+pub struct HeldSyncs {
+    gate: Arc<Gate>,
+}
+
+impl HeldSyncs {
+    /// How long [`HeldSyncs::wait_for_sync`] waits before it gives up.
+    pub const TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// Waits until one more sync than reported so far is waiting at the
+    /// gate, and returns the name of the thread that called it, if it has
+    /// one.
+    ///
+    /// # Panics
+    ///
+    /// If no sync comes within [`HeldSyncs::TIMEOUT`]. The gate is let go
+    /// first, so the threads waiting at it can finish.
+    pub fn wait_for_sync(&self) -> Option<String> {
+        let deadline = Instant::now() + Self::TIMEOUT;
+        let mut state = self.gate.state();
+        while state.arrived.len() == state.reported {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                state.held = false;
+                self.gate.changed.notify_all();
+                panic!("no sync came to the gate within {:?}", Self::TIMEOUT);
+            }
+            state = self
+                .gate
+                .changed
+                .wait_timeout(state, left)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+        state.reported += 1;
+        state.arrived[state.reported - 1].clone()
+    }
+
+    /// Lets every waiting sync go, and the ones after it pass.
+    pub fn release(self) {}
+}
+
+impl Drop for HeldSyncs {
+    fn drop(&mut self) {
+        let mut state = self.gate.state();
+        state.held = false;
+        state.arrived.clear();
+        state.reported = 0;
+        self.gate.changed.notify_all();
+    }
 }
 
 #[derive(Default)]
@@ -202,6 +308,26 @@ impl SimFs {
     /// An empty disk with the power on.
     pub fn new() -> Self {
         SimFs::default()
+    }
+
+    /// Makes every [`FsFile::sync_data`] wait, before it does anything,
+    /// until the returned guard is released or dropped. Other calls go on.
+    /// A test uses it to hold a commit in its sync and see what other
+    /// threads can do meanwhile (issue #27). Only one guard at a time.
+    pub fn hold_syncs(&self) -> HeldSyncs {
+        let mut state = self.gate.state();
+        assert!(!state.held, "syncs are already held");
+        state.held = true;
+        HeldSyncs {
+            gate: Arc::clone(&self.gate),
+        }
+    }
+
+    /// Makes the next [`FsFile::sync_data`] panic before it does anything,
+    /// as a bug in the code that called it would. A test uses it to see
+    /// what the engine does when its commit thread panics (design 0018).
+    pub fn panic_at_next_sync(&self) {
+        self.gate.state().panic_next = true;
     }
 
     /// Cuts the power after `ops` more operations that change the disk:
@@ -566,6 +692,7 @@ fn disk_failed() -> io::Error {
 /// An open file on a [`SimFs`].
 pub struct SimFile {
     disk: Arc<Mutex<Disk>>,
+    gate: Arc<Gate>,
     /// The file, followed through renames.
     inode: u64,
     /// The boot this handle was opened in.
@@ -630,6 +757,7 @@ impl Fs for SimFs {
         disk.next_handle += 1;
         Ok(SimFile {
             disk: Arc::clone(&self.disk),
+            gate: Arc::clone(&self.gate),
             inode,
             boot: disk.boot,
             handle: disk.next_handle,
@@ -771,6 +899,7 @@ impl FsFile for SimFile {
     }
 
     fn sync_data(&self) -> io::Result<()> {
+        self.gate.pass();
         // The waiting changes land on what the disk holds, not what reads
         // see: the two differ once a failed sync forgot changes.
         self.with(Access::Sync, |file, _| {

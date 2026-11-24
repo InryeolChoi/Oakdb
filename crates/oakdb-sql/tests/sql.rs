@@ -565,12 +565,11 @@ fn statements_oakdb_does_not_support_name_what_they_found() {
 fn clauses_oakdb_does_not_support_name_what_they_found() {
     let db = with_users();
     for (sql, named) in [
-        ("SELECT * FROM users WHERE id > 1", ">"),
-        ("SELECT * FROM users WHERE id <= 1", "<="),
-        ("SELECT * FROM users", "WHERE"),
+        // #32 made `>`, `<=`, AND, a WHERE on another column and a
+        // SELECT without WHERE work; these are still out of scope.
+        ("SELECT * FROM users WHERE name LIKE 'k%'", "LIKE"),
+        ("SELECT * FROM users WHERE id < 2 < 3", "<"),
         ("SELECT * FROM users ORDER BY id", "ORDER"),
-        ("SELECT * FROM users WHERE id = 1 AND name = 'a'", "AND"),
-        ("SELECT * FROM users WHERE name = 'kim'", "name"),
         ("CREATE TABLE t (id REAL PRIMARY KEY)", "REAL"),
         (
             "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT NOT NULL)",
@@ -625,8 +624,8 @@ fn broken_statements_are_syntax_errors_that_say_where() {
 fn errors_read_as_sentences() {
     let db = with_users();
     assert_eq!(
-        fail(&db, "SELECT * FROM users WHERE id > 1").to_string(),
-        "unsupported: operator `>` in WHERE; only `<primary key> = <value>` is supported"
+        fail(&db, "SELECT * FROM users WHERE name LIKE 'k%'").to_string(),
+        "unsupported: operator `LIKE`; only comparisons, IS [NOT] NULL, BETWEEN and IN are supported"
     );
     assert_eq!(
         fail(&db, "SELECT * FROM nope WHERE id = 1").to_string(),

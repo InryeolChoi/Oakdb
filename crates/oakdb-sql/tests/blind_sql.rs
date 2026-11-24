@@ -480,10 +480,10 @@ fn unsupported_statements_say_unsupported() {
         "COMMIT",
         "ROLLBACK",
         "SELECT * FROM users JOIN users WHERE id = 1",
-        "SELECT * FROM users WHERE name = 'a'",
-        "SELECT * FROM users WHERE id > 1",
-        "SELECT * FROM users WHERE id < 1",
-        "SELECT * FROM users",
+        // #32 made a WHERE on another column, `>`, `<` and a SELECT
+        // without WHERE work; these are still out of scope.
+        "SELECT * FROM users WHERE name LIKE 'a'",
+        "SELECT * FROM users WHERE id < 2 < 3",
         "SELECT * FROM users WHERE id = 1 ORDER BY id",
         "SELECT * FROM users WHERE id = 1; SELECT * FROM users WHERE id = 1",
         "CREATE INDEX i ON users (name)",

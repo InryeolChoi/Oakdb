@@ -7,7 +7,11 @@ Run from the repository root:
 
 `modes` is a comma-separated list of `commit_time` modes, by default
 `overwrite,grow`; `reopen` and `closed` time opening after the commits
-instead, without and with closing first.
+instead, without and with closing first; `begin_busy` times read-only
+transactions while another thread commits, and `threads` commits from 4
+threads at once (issue #27). Each run prints a mean and a median; the
+test uses the mean, except for `threads`, whose median is steadier (see
+`commit_time.rs`).
 
 Builds `ab_versions/commit_time.rs` as an example against each revision (in
 a temporary git worktree), then runs the two binaries in ABBA order, each
@@ -41,7 +45,7 @@ def build(rev, root):
 def once(binary, mode, commits):
     with tempfile.TemporaryDirectory() as d:
         out = subprocess.run([binary, d, mode, str(commits)], capture_output=True, text=True, check=True)
-    return float(out.stdout.split()[0])
+    return float(out.stdout.split()[1 if mode == "threads" else 0])
 
 
 def mann_whitney(a, b):

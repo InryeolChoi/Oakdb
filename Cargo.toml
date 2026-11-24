@@ -4,5 +4,11 @@ members = ["crates/oakdb", "crates/oakdb-sql", "crates/oakdb-server"]
 
 [workspace.package]
 edition = "2021"
+# std::fs::File::try_lock (data file lock) is stable since 1.89; sharing a
+# Db across threads also needs mpsc::Sender: Sync, since 1.72.
+rust-version = "1.89"
 license = "MIT"
 repository = "https://github.com/InryeolChoi/Oakdb"
+
+[profile.dev.package.oakdb-sql]
+opt-level = 1

@@ -3,6 +3,7 @@ name = "oakdb-sql"
 version = "0.1.0"
 description = "SQL layer of Oakdb: a lexer, parser and executor over the key-value engine"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
