@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 
 use oakdb::fs::Fs;
-use oakdb::{Db, Txn, MAX_KEY_LEN, MAX_VALUE_LEN};
+use oakdb::{Db, Txn};
 
 use crate::catalog::{self, Column, Table};
 use crate::encoding::{decode_row, encode_row, row_key, row_range};
@@ -235,21 +235,11 @@ fn update<F: Fs>(
         let new = assign(&assignments, old)?;
         check_row(&table, &new)?;
         let new_key = row_key(table.id, &new[table.primary_key]);
-        if new_key.len() > MAX_KEY_LEN {
-            return Err(oakdb::Error::KeyTooLarge {
-                len: new_key.len(),
-                max: MAX_KEY_LEN,
-            }
-            .into());
-        }
+        // The engine's own size rules, checked now so that the writes
+        // below cannot fail on them (U10).
+        oakdb::check_key(&new_key)?;
         let value = encode_row(&new)?;
-        if value.len() > MAX_VALUE_LEN {
-            return Err(oakdb::Error::ValueTooLarge {
-                len: value.len(),
-                max: MAX_VALUE_LEN,
-            }
-            .into());
-        }
+        oakdb::check_value_len(value.len())?;
         changes.push(Change {
             key: key.as_slice(),
             new_key,
