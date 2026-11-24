@@ -166,18 +166,7 @@ where
                 .stack_size(CONNECTION_STACK)
                 .spawn(move || {
                     eprintln!("oakdb: {peer} connected");
-                    let served =
-                        panic::catch_unwind(AssertUnwindSafe(|| serve(&slot.shared, &stream)));
-                    match served {
-                        Ok(Ok(())) => {}
-                        Ok(Err(e)) => eprintln!("oakdb: connection from {peer}: {e}"),
-                        Err(_) => {
-                            // The panic hook has printed what happened.
-                            eprintln!("oakdb: connection from {peer} failed inside the server");
-                            let message = "the server failed on this connection".to_string();
-                            let _ = send_error(&stream, code::INTERNAL, message);
-                        }
-                    }
+                    serve_guarded(peer, &stream, || serve(&slot.shared, &stream));
                     eprintln!("oakdb: {peer} disconnected");
                     drop(slot);
                 });
@@ -273,6 +262,21 @@ enum Next {
 
 /// Sends an `ERROR`. After a code that [`closes`] the connection, it waits
 /// for the client to read it and says to close.
+/// Runs `serve` for the connection from `peer`; if it panics, the client
+/// gets [`code::INTERNAL`] before the socket closes, and the server goes on.
+fn serve_guarded(peer: SocketAddr, stream: &TcpStream, serve: impl FnOnce() -> io::Result<()>) {
+    match panic::catch_unwind(AssertUnwindSafe(serve)) {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => eprintln!("oakdb: connection from {peer}: {e}"),
+        Err(_) => {
+            // The panic hook has printed what happened.
+            eprintln!("oakdb: connection from {peer} failed inside the server");
+            let message = "the server failed on this connection".to_string();
+            let _ = send_error(stream, code::INTERNAL, message);
+        }
+    }
+}
+
 fn send_error(stream: &TcpStream, code: u8, message: String) -> io::Result<Next> {
     let mut writer = stream;
     write_frame(&mut writer, &error_frame(code, message))?;
@@ -303,7 +307,9 @@ fn linger(stream: &TcpStream) {
     let _ = stream.shutdown(Shutdown::Write);
     let deadline = Instant::now() + LINGER;
     let _ = stream.set_read_timeout(Some(LINGER));
-    let mut sink = [0u8; 64 * 1024];
+    // Small enough for the LINGER_STACK thread this runs on: a buffer the
+    // size of the whole stack overflowed it in debug builds on Linux.
+    let mut sink = [0u8; 4096];
     let mut reader = stream;
     while Instant::now() < deadline {
         match reader.read(&mut sink) {
@@ -386,6 +392,34 @@ fn run<F: Fs>(shared: &Shared<F>, sql: &str) -> Response {
                 code,
                 message: e.to_string(),
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::{read_frame, Response};
+
+    // A panic on a connection's thread used to come from a planted disk
+    // panic; since the commit thread turns its own panics into an engine
+    // error (#27), nothing the tests can plant reaches this thread, so the
+    // guard is tested directly.
+    #[test]
+    fn a_panic_while_serving_sends_0x7f() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, peer) = listener.accept().unwrap();
+        serve_guarded(peer, &server, || {
+            panic!("a bug in the server (planted by the test)")
+        });
+        drop(server);
+        let frame = read_frame(&mut client)
+            .unwrap()
+            .expect("an ERROR before the close");
+        match Response::decode(frame).unwrap() {
+            Response::Error { code, .. } => assert_eq!(code, code::INTERNAL),
+            other => panic!("expected ERROR, got {other:?}"),
         }
     }
 }

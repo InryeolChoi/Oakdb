@@ -639,7 +639,7 @@ impl FsFile for PanickingFile {
 }
 
 #[test]
-fn a_panic_on_a_connection_sends_0x7f_and_closes_it_and_the_server_goes_on() {
+fn a_panic_in_the_commit_thread_reaches_the_client_as_an_engine_error_and_the_server_goes_on() {
     let fs = PanickingFs {
         inner: SimFs::new(),
         armed: Arc::new(AtomicBool::new(false)),
@@ -651,8 +651,15 @@ fn a_panic_on_a_connection_sends_0x7f_and_closes_it_and_the_server_goes_on() {
     armed.store(true, Ordering::SeqCst);
     let create = Request::Query("CREATE TABLE t (id INTEGER PRIMARY KEY)".into());
     write_frame(&mut stream, &create.encode()).unwrap();
-    assert_eq!(error_code(read_response(&mut stream)), code::INTERNAL);
-    assert_closed(&mut stream);
+    // The commit thread turns its panic into the engine's outcome-unknown
+    // error (#27), so the client gets that code, not INTERNAL (0x7F is
+    // tested in server.rs, where the connection thread itself panics).
+    let got = error_code(read_response(&mut stream));
+    assert_ne!(got, code::INTERNAL);
+    assert!(
+        (0x20..=0x3F).contains(&got),
+        "an engine error, got {got:#x}"
+    );
 
     // Other clients still get in.
     raw(addr);
@@ -683,4 +690,37 @@ fn a_statement_cut_off_by_ctrl_d_runs_from_a_script_but_not_from_a_person() {
 
     let (code, out) = run("CREATE TABLE piped (id INTEGER PRIMARY KEY)", false);
     assert_eq!((code, out.as_str()), (0, "OK\n"));
+}
+
+#[test]
+fn a_where_nested_twenty_thousand_deep_gets_an_error_on_a_connection_thread_and_the_server_goes_on()
+{
+    // The connection thread has a small stack (CONNECTION_STACK); the
+    // parser's depth limit (#32) must stop the input before it does.
+    let addr = start(Db::open_with(SimFs::new(), "/db").unwrap(), config());
+    let mut stream = raw(addr);
+    let send = |stream: &mut TcpStream, sql: String| {
+        write_frame(stream, &Request::Query(sql).encode()).unwrap();
+        read_response(stream)
+    };
+    assert!(matches!(
+        send(
+            &mut stream,
+            "CREATE TABLE t (id INTEGER PRIMARY KEY)".into()
+        ),
+        Response::Done
+    ));
+    let nots = "NOT ".repeat(20_000);
+    let parens = format!("{}id = 1{}", "(".repeat(5_000), ")".repeat(5_000));
+    let chain = format!("id{} = 1", " + 1".repeat(20_000));
+    for clause in [format!("{nots}id = 1"), parens, chain] {
+        let got = error_code(send(&mut stream, format!("SELECT * FROM t WHERE {clause}")));
+        assert_eq!(got, code::SYNTAX, "a depth error, not a crash");
+    }
+    // Same connection, still served; a new one gets in too.
+    assert!(matches!(
+        send(&mut stream, "SELECT * FROM t WHERE id = 1".into()),
+        Response::Rows { .. }
+    ));
+    raw(addr);
 }
