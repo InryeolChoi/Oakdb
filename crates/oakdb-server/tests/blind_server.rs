@@ -580,7 +580,8 @@ fn each_statement_error_gets_its_documented_code_and_the_connection_stays_open()
     let cases: Vec<(String, u8)> = vec![
         ("SELECT * FROM u WHERE id = 'unclosed".into(), 0x01),
         ("SELEC * FROM u WHERE id = 1".into(), 0x02), // unknown first word: unsupported (0017 C7)
-        ("UPDATE u SET name = 'x' WHERE id = 1".into(), 0x02),
+        // #33 made UPDATE run; TRUNCATE stays unsupported.
+        ("TRUNCATE u".into(), 0x02),
         // #32 made `WHERE id > 1` and a WHERE-less SELECT run; these stay unsupported.
         ("SELECT * FROM u WHERE name LIKE 'a%'".into(), 0x02),
         ("SELECT * FROM u ORDER BY id".into(), 0x02),
