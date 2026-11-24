@@ -39,13 +39,14 @@
 //! synced.
 
 use std::any::Any;
-use std::collections::{btree_map, BTreeMap, BTreeSet};
+use std::collections::{btree_map, BTreeMap, BTreeSet, HashSet};
 use std::iter::{FusedIterator, Peekable};
 use std::marker::PhantomData;
 use std::ops::{Bound, RangeBounds};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
-use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread::JoinHandle;
 
@@ -71,6 +72,33 @@ pub const CHECKPOINT_AFTER: u64 = 4 * 1024 * 1024;
 /// is public so that tests and tools can tell that thread apart, in a
 /// debugger, `top -H`, or a test that checks which thread syncs.
 pub const COMMIT_THREAD: &str = "oakdb-commit";
+
+/// The most commits the commit thread takes into one batch, which shares
+/// one WAL write and one sync (issue #28, design 0021). Commits waiting
+/// beyond it go in the next batch, in the order they came.
+pub const MAX_BATCH: usize = 128;
+
+/// What the commit thread did since the database was opened, from
+/// [`Db::stats`] (issue #28, design 0021). Several commits sharing one sync
+/// show as `wal_syncs < commits`; the mean batch is `commits / batches`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Stats {
+    /// Requests sent to the commit thread, commits and checkpoints. A
+    /// request is counted once it is waiting there.
+    pub received: u64,
+    /// Commits answered `Ok` that had writes.
+    pub commits: u64,
+    /// Commits that failed with [`Error::Conflict`].
+    pub conflicts: u64,
+    /// Batches of commits the commit thread took, one or more each.
+    pub batches: u64,
+    /// Syncs of the WAL that commits made: one per batch that changed
+    /// anything. Checkpoints' syncs are not counted.
+    pub wal_syncs: u64,
+    /// The most commits one batch held.
+    pub largest_batch: u64,
+}
 
 /// An open database. Threads can share it: it is `Send` and `Sync`.
 pub struct Db<F: Fs = StdFs> {
@@ -98,6 +126,38 @@ struct Shared {
     /// once, by the commit thread, and never cleared: this process does
     /// not trust the files again (design 0012).
     stopped: OnceLock<Arc<Error>>,
+    /// What [`Db::stats`] reports.
+    counters: Counters,
+}
+
+/// The numbers of [`Stats`], kept as the commit thread works. Each is
+/// written by one side only: `received` by the threads that send requests,
+/// the rest by the commit thread, before it answers.
+#[derive(Default)]
+struct Counters {
+    received: AtomicU64,
+    commits: AtomicU64,
+    conflicts: AtomicU64,
+    batches: AtomicU64,
+    wal_syncs: AtomicU64,
+    largest_batch: AtomicU64,
+}
+
+impl Counters {
+    fn add(counter: &AtomicU64, n: u64) {
+        counter.fetch_add(n, Ordering::Relaxed);
+    }
+
+    fn stats(&self) -> Stats {
+        Stats {
+            received: self.received.load(Ordering::Relaxed),
+            commits: self.commits.load(Ordering::Relaxed),
+            conflicts: self.conflicts.load(Ordering::Relaxed),
+            batches: self.batches.load(Ordering::Relaxed),
+            wal_syncs: self.wal_syncs.load(Ordering::Relaxed),
+            largest_batch: self.largest_batch.load(Ordering::Relaxed),
+        }
+    }
 }
 
 /// A transaction's writes: the last write to each key, `Some(value)` for a
@@ -263,6 +323,7 @@ impl<F: Fs> Db<F> {
                 recent: RecentWrites::default(),
             }),
             stopped: OnceLock::new(),
+            counters: Counters::default(),
         });
         let committer = Committer {
             shared: Arc::clone(&shared),
@@ -301,6 +362,11 @@ impl<F: Fs> Db<F> {
     /// two meta pages: what its data file holds once checkpointed.
     pub fn page_count(&self) -> u64 {
         self.shared.committed().tree.meta().page_count
+    }
+
+    /// What the commit thread did since the database was opened.
+    pub fn stats(&self) -> Stats {
+        self.shared.counters.stats()
     }
 
     /// Moves the pages the WAL holds to the data file and empties the WAL,
@@ -344,6 +410,9 @@ impl<F: Fs> Db<F> {
         requests
             .send(request(answer))
             .expect("the commit thread runs until the database is dropped");
+        // Counted once it waits there, so a test that sees the count knows
+        // the request is queued (design 0021 Q6).
+        Counters::add(&self.shared.counters.received, 1);
         answered
             .recv()
             .expect("the commit thread answers every request")
@@ -392,71 +461,167 @@ impl Shared {
     }
 }
 
-impl<File: FsFile> Committer<File> {
-    /// Answers requests one at a time, in the order they came, until the
-    /// database is dropped. Group commit (#28) is to take every request
-    /// waiting here at once and sync them together.
-    fn run(mut self, requests: &Receiver<Request>) {
-        for request in requests {
+/// A commit waiting in a batch: the transaction's writes, the number of
+/// the last commit in its snapshot, and where to answer it. The answer is
+/// taken once sent, so a batch that panics part way knows who is left.
+struct Waiting {
+    writes: Writes,
+    begun_after: u64,
+    answer: Option<SyncSender<Result<()>>>,
+}
+
+impl Waiting {
+    fn answer(&mut self, result: Result<()>) {
+        if let Some(answer) = self.answer.take() {
             // A requester that is gone (it panicked) needs no answer.
-            let _ = match request {
+            let _ = answer.send(result);
+        }
+    }
+}
+
+impl<File: FsFile> Committer<File> {
+    /// Answers requests in the order they came until the database is
+    /// dropped. Commits go in batches (issue #28, design 0021): it takes
+    /// the first, then every commit waiting behind it without waiting for
+    /// more, up to [`MAX_BATCH`], and commits them with one sync. A
+    /// checkpoint request ends a batch, so it runs after the commits sent
+    /// before it and before those sent after it.
+    fn run(mut self, requests: &Receiver<Request>) {
+        let mut next = requests.recv().ok();
+        while let Some(request) = next.take() {
+            match request {
+                Request::Checkpoint { answer } => {
+                    let result = self.guarded(Self::checkpoint, Error::Io).and_then(|r| r);
+                    let _ = answer.send(result);
+                }
                 Request::Commit {
                     writes,
                     begun_after,
                     answer,
-                } => answer.send(self.guarded(
-                    |committer| committer.commit(writes, begun_after),
-                    Error::OutcomeUnknown,
-                )),
-                Request::Checkpoint { answer } => {
-                    answer.send(self.guarded(Self::checkpoint, Error::Io))
+                } => {
+                    let mut batch = vec![Waiting {
+                        writes,
+                        begun_after,
+                        answer: Some(answer),
+                    }];
+                    while batch.len() < MAX_BATCH {
+                        match requests.try_recv() {
+                            Ok(Request::Commit {
+                                writes,
+                                begun_after,
+                                answer,
+                            }) => batch.push(Waiting {
+                                writes,
+                                begun_after,
+                                answer: Some(answer),
+                            }),
+                            Ok(other) => {
+                                next = Some(other);
+                                break;
+                            }
+                            Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+                        }
+                    }
+                    if let Err(e) =
+                        self.guarded(|c| c.commit_batch(&mut batch), Error::OutcomeUnknown)
+                    {
+                        // It panicked, a bug: whoever it did not answer
+                        // may be in the WAL.
+                        for waiting in &mut batch {
+                            waiting.answer(Err(e.clone()));
+                        }
+                    }
                 }
-            };
+            }
+            if next.is_none() {
+                next = requests.recv().ok();
+            }
         }
     }
 
-    /// Runs `work`, the request being answered. If it panics, a bug, the
-    /// request gets `failed` of the panic's message and the engine stops,
-    /// so every request after it gets [`Error::Stopped`] instead of a
-    /// panic in its caller's thread. A commit that panicked gets
+    /// Runs `work`, the request being answered. If it panics, a bug, it
+    /// returns `failed` of the panic's message and the engine stops, so
+    /// every request after it gets [`Error::Stopped`] instead of a panic in
+    /// its caller's thread. A commit that panicked gets
     /// [`Error::OutcomeUnknown`]: it may have reached the WAL.
     ///
     /// The thread's state may be half changed after a panic, which is why
     /// unwinding is safe to catch here: the engine stops, and every request
     /// checks that first, so nothing reads that state again.
-    fn guarded(
+    fn guarded<T>(
         &mut self,
-        work: impl FnOnce(&mut Self) -> Result<()>,
+        work: impl FnOnce(&mut Self) -> T,
         failed: fn(Arc<std::io::Error>) -> Error,
-    ) -> Result<()> {
-        match panic::catch_unwind(AssertUnwindSafe(|| work(self))) {
-            Ok(result) => result,
-            Err(payload) => {
-                let e = failed(Arc::new(std::io::Error::other(format!(
-                    "the commit thread panicked: {}",
-                    panic_message(payload.as_ref())
-                ))));
-                self.shared.stop(&e);
-                Err(e)
-            }
-        }
+    ) -> Result<T> {
+        panic::catch_unwind(AssertUnwindSafe(|| work(self))).map_err(|payload| {
+            let e = failed(Arc::new(std::io::Error::other(format!(
+                "the commit thread panicked: {}",
+                panic_message(payload.as_ref())
+            ))));
+            self.shared.stop(&e);
+            e
+        })
     }
 
-    /// Commits `writes` of a transaction that began after commit
-    /// `begun_after`: see [`Txn::commit`]. In steps that group commit (#28)
-    /// will run for several commits at once, syncing once between
-    /// [`Committer::write`] and [`Committer::publish`].
-    fn commit(&mut self, writes: Writes, begun_after: u64) -> Result<()> {
+    /// Commits `batch`, in the order it came, and answers each: see
+    /// [`Txn::commit`]. The commits that pass the conflict check go on one
+    /// copy of the tree, which goes to the WAL as one commit with one sync
+    /// (ADR 0007: after a power cut a batch is all there or not at all),
+    /// and shows once that sync is done. Conflicts are answered at once:
+    /// they write nothing, whatever the sync does (design 0021 Q2).
+    fn commit_batch(&mut self, batch: &mut [Waiting]) {
         // The check that matters: a commit that was waiting here when the
-        // one ahead of it failed writes nothing. The caller's check before
-        // sending only saves a trip.
-        self.shared.check_running()?;
-        self.check_conflict(&writes, begun_after)?;
-        let mut next = self.build(&writes);
-        self.write(&mut next)?;
-        self.publish(next, writes);
+        // batch ahead of it failed writes nothing. The caller's check
+        // before sending only saves a trip.
+        if let Err(e) = self.shared.check_running() {
+            for waiting in batch {
+                waiting.answer(Err(e.clone()));
+            }
+            return;
+        }
+        let counters = &self.shared.counters;
+        Counters::add(&counters.batches, 1);
+        counters
+            .largest_batch
+            .fetch_max(batch.len() as u64, Ordering::Relaxed);
+        let mut next = Tree::clone(&self.tree);
+        // The keys of the commits in this batch that passed, so far.
+        let mut written: HashSet<Vec<u8>> = HashSet::new();
+        let mut passed = Vec::new();
+        for (at, waiting) in batch.iter_mut().enumerate() {
+            match self.check_conflict(&waiting.writes, waiting.begun_after, &written) {
+                Err(e) => {
+                    Counters::add(&self.shared.counters.conflicts, 1);
+                    waiting.answer(Err(e));
+                }
+                Ok(()) => {
+                    apply(&mut next, &waiting.writes);
+                    written.extend(waiting.writes.keys().cloned());
+                    passed.push(at);
+                }
+            }
+        }
+        if passed.is_empty() {
+            return;
+        }
+        if let Err(e) = self.write(&mut next) {
+            for &at in &passed {
+                batch[at].answer(Err(e.clone()));
+            }
+            return;
+        }
+        let commits: Vec<Writes> = passed
+            .iter()
+            .map(|&at| std::mem::take(&mut batch[at].writes))
+            .collect();
+        self.publish(next, commits);
+        Counters::add(&self.shared.counters.commits, passed.len() as u64);
+        for &at in &passed {
+            batch[at].answer(Ok(()));
+        }
+        // After the answers: the batch is durable, and a checkpoint that
+        // fails does not change them (design 0021 G6).
         self.checkpoint_if_due();
-        Ok(())
     }
 
     /// First committer wins (ADR 0006): fails if a commit since the
@@ -465,39 +630,35 @@ impl<File: FsFile> Committer<File> {
     /// write skew is allowed). Only this thread records keys, so none can
     /// be recorded between this check and the commit's own record in
     /// [`Committer::publish`], though the lock is let go.
-    fn check_conflict(&self, writes: &Writes, begun_after: u64) -> Result<()> {
-        let conflict = self
-            .shared
-            .committed()
-            .recent
-            .conflict(begun_after, writes.keys().map(Vec::as_slice))
-            .map(<[u8]>::to_vec);
+    ///
+    /// `batch` holds the keys of the commits ahead in the same batch, which
+    /// are recorded only once the batch is synced. Every transaction in the
+    /// batch began before the batch shows, so such a key was written after
+    /// the transaction began: a conflict, whatever its number would be.
+    fn check_conflict(
+        &self,
+        writes: &Writes,
+        begun_after: u64,
+        batch: &HashSet<Vec<u8>>,
+    ) -> Result<()> {
+        let conflict = match writes.keys().find(|key| batch.contains(*key)) {
+            Some(key) => Some(key.clone()),
+            None => self
+                .shared
+                .committed()
+                .recent
+                .conflict(begun_after, writes.keys().map(Vec::as_slice))
+                .map(<[u8]>::to_vec),
+        };
         match conflict {
             Some(key) => Err(Error::Conflict { key }),
             None => Ok(()),
         }
     }
 
-    /// The latest tree with `writes` made.
-    fn build(&self, writes: &Writes) -> Tree {
-        let mut next = Tree::clone(&self.tree);
-        // Take out every key the transaction writes before putting any
-        // back, so space freed by a delete or a shrinking value is there for
-        // a put that sorts before it.
-        for key in writes.keys() {
-            next.delete(key);
-        }
-        for (key, value) in writes {
-            if let Some(value) = value {
-                next.put(key, value);
-            }
-        }
-        next
-    }
-
     /// Writes the pages `next` changed and its meta fields to the WAL, and
     /// syncs, if it changed anything. No lock is held meanwhile:
-    /// transactions begin and end on the tree before this commit.
+    /// transactions begin and end on the tree before this batch.
     fn write(&mut self, next: &mut Tree) -> Result<()> {
         if !next.has_dirty() && next.meta() == self.tree.meta() {
             return Ok(());
@@ -510,12 +671,16 @@ impl<File: FsFile> Committer<File> {
             let e = Error::OutcomeUnknown(Arc::new(e));
             self.shared.stop(&e);
             e
-        })
+        })?;
+        Counters::add(&self.shared.counters.wal_syncs, 1);
+        Ok(())
     }
 
     /// Makes `next`, now durable, the tree transactions begin on, and
-    /// records the keys `writes` wrote for later conflicts.
-    fn publish(&mut self, next: Tree, writes: Writes) {
+    /// records the keys of each of `commits`, in order, for later
+    /// conflicts. All under one lock: a transaction sees the whole batch or
+    /// none of it.
+    fn publish(&mut self, next: Tree, commits: Vec<Writes>) {
         let next = Arc::new(next);
         {
             let mut committed = self.shared.committed();
@@ -526,15 +691,17 @@ impl<File: FsFile> Committer<File> {
             // showed. Even writes that changed nothing in the tree count: a
             // write is a write, and a transaction that began before this
             // one and writes the same key must fail all the same.
-            committed.recent.record(writes.into_keys());
+            for writes in commits {
+                committed.recent.record(writes.into_keys());
+            }
             committed.tree = Arc::clone(&next);
         }
         self.tree = next;
     }
 
     /// Checkpoints if the WAL is longer than [`CHECKPOINT_AFTER`]. If that
-    /// fails, the engine stops, but the commit before it is in the WAL and
-    /// synced: it stays, and is answered `Ok`. The next request reports
+    /// fails, the engine stops, but the batch before it is in the WAL and
+    /// synced: it stays, and was answered `Ok`. The next request reports
     /// the stop.
     fn checkpoint_if_due(&mut self) {
         if self.wal.len() > CHECKPOINT_AFTER {
@@ -549,6 +716,21 @@ impl<File: FsFile> Committer<File> {
         // Checked here, so nothing is written after a failure.
         self.shared.check_running()?;
         checkpoint::run(&self.file, &mut self.wal, &self.tree).inspect_err(|e| self.shared.stop(e))
+    }
+}
+
+/// Makes a transaction's `writes` in `tree`.
+fn apply(tree: &mut Tree, writes: &Writes) {
+    // Take out every key the transaction writes before putting any back,
+    // so space freed by a delete or a shrinking value is there for a put
+    // that sorts before it.
+    for key in writes.keys() {
+        tree.delete(key);
+    }
+    for (key, value) in writes {
+        if let Some(value) = value {
+            tree.put(key, value);
+        }
     }
 }
 

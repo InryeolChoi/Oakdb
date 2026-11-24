@@ -685,7 +685,7 @@ fn commit_until_stopped(db: &Db<SimFs>) -> Vec<Vec<(u32, Result<(), Error>)>> {
 }
 
 #[test]
-fn after_a_power_cut_one_commit_is_unknown_the_rest_stop_and_every_acknowledged_commit_survives() {
+fn after_a_power_cut_one_batch_is_unknown_the_rest_stop_and_every_acknowledged_commit_survives() {
     for seed in 0..4u64 {
         let (fs, db) = open_sim();
         fs.fail_after(40 + seed * 7);
@@ -713,10 +713,12 @@ fn after_a_power_cut_one_commit_is_unknown_the_rest_stop_and_every_acknowledged_
             }
             assert!(seen_error, "seed {seed}: thread {i} never saw the failure");
         }
-        assert_eq!(
-            unknown.len(),
-            1,
-            "seed {seed}: exactly one commit meets the failure"
+        // Group commit (#28): the failure meets one batch, which holds at
+        // most one commit per thread.
+        assert!(
+            (1..=6).contains(&unknown.len()),
+            "seed {seed}: {} commits met the failure, not one batch",
+            unknown.len()
         );
 
         // Every request on every thread now stops.
@@ -764,7 +766,8 @@ fn after_a_failed_disk_operation_with_the_power_on_all_threads_see_the_engine_st
         .flatten()
         .filter(|(_, r)| matches!(r, Err(Error::OutcomeUnknown(_))))
         .count();
-    assert_eq!(unknown, 1);
+    // One batch (#28): at most one commit per thread.
+    assert!((1..=6).contains(&unknown), "{unknown} commits in doubt");
     for (i, out) in outcomes.iter().enumerate() {
         assert!(
             out.iter()

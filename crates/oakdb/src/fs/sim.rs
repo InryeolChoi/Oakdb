@@ -65,6 +65,9 @@ struct GateState {
     arrived: Vec<Option<String>>,
     /// How many of `arrived` [`HeldSyncs::wait_for_sync`] has reported.
     reported: usize,
+    /// How many of `arrived`, the first ones, may go on although syncs are
+    /// held ([`HeldSyncs::let_waiting_go`]).
+    let_go: usize,
     /// Whether the next sync panics ([`SimFs::panic_at_next_sync`]).
     panic_next: bool,
 }
@@ -88,8 +91,9 @@ impl Gate {
         state
             .arrived
             .push(std::thread::current().name().map(String::from));
+        let mine = state.arrived.len();
         self.changed.notify_all();
-        while state.held {
+        while state.held && state.let_go < mine {
             state = self.changed.wait(state).unwrap_or_else(|e| e.into_inner());
         }
     }
@@ -134,6 +138,15 @@ impl HeldSyncs {
         state.arrived[state.reported - 1].clone()
     }
 
+    /// Lets the syncs waiting at the gate now go on, and keeps holding the
+    /// ones that come after: a test can hold one commit's sync, then the
+    /// next one's (issue #28).
+    pub fn let_waiting_go(&self) {
+        let mut state = self.gate.state();
+        state.let_go = state.arrived.len();
+        self.gate.changed.notify_all();
+    }
+
     /// Lets every waiting sync go, and the ones after it pass.
     pub fn release(self) {}
 }
@@ -144,6 +157,7 @@ impl Drop for HeldSyncs {
         state.held = false;
         state.arrived.clear();
         state.reported = 0;
+        state.let_go = 0;
         self.gate.changed.notify_all();
     }
 }

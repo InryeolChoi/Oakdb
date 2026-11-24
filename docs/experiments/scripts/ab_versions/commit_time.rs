@@ -14,9 +14,13 @@
 //!                                   another commits nonstop: how long a
 //!                                   reader waits for others' commits
 //!                                   (issue #27)
-//! `commit_time <dir> threads <n>`   n commits of new small keys from 4
-//!                                   threads at once, after a warm-up
-//!                                   (issue #27)
+//! `commit_time <dir> threads <n> [t]` n commits of new small keys from
+//!                                   t threads at once (4 if not given),
+//!                                   after a warm-up (issue #27)
+//! `commit_time <dir> threads_tput <n> [t]` n commits of new small keys
+//!                                   from each of t threads at once (4 if
+//!                                   not given), after a warm-up: how many
+//!                                   commits a second (issue #28)
 //!
 //! Prints the mean and the median commit time in microseconds, or for
 //! `reopen` the time opening took, twice; for `begin_busy`, the mean and
@@ -24,6 +28,8 @@
 //! median time of one commit, from asking to answer, over every thread.
 //! `ab_versions.py` compares `threads` by the median: one slow sync that
 //! every waiting thread sits through moves the mean of a round a lot.
+//! For `threads_tput`, it prints commits a second, from the moment every
+//! thread is let go to the last answer, twice: higher is better.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Barrier, Mutex};
@@ -83,15 +89,46 @@ fn main() {
         println!("{mean:.1} {:.1}", times[times.len() / 2]);
         return;
     }
+    let threads: u32 = args.get(4).map_or(4, |t| t.parse().unwrap());
+    if mode == "threads_tput" {
+        const WARM_UP: u32 = 10;
+        // The threads and this one, which starts the clock.
+        let start = Barrier::new(threads as usize + 1);
+        let mut began = Instant::now();
+        std::thread::scope(|s| {
+            for t in 0..threads {
+                let (db, start) = (&db, &start);
+                s.spawn(move || {
+                    for i in 0..WARM_UP {
+                        let mut txn = db.begin();
+                        txn.put(&[0xff, t as u8, i as u8], b"warm").unwrap();
+                        txn.commit().unwrap();
+                    }
+                    start.wait();
+                    for i in 0..n {
+                        let mut txn = db.begin();
+                        txn.put(&[&t.to_be_bytes()[..], &i.to_be_bytes()].concat(), b"v")
+                            .unwrap();
+                        txn.commit().unwrap();
+                    }
+                });
+            }
+            start.wait();
+            began = Instant::now();
+        });
+        let per_second = f64::from(n * threads) / began.elapsed().as_secs_f64();
+        println!("{per_second:.1} {per_second:.1}");
+        return;
+    }
     if mode == "threads" {
-        const THREADS: u32 = 4;
+        let threads_n = threads;
         // Untimed commits per thread first, so every thread is running and
         // the WAL file has grown before timing starts.
         const WARM_UP: u32 = 10;
-        let start = Barrier::new(THREADS as usize);
+        let start = Barrier::new(threads_n as usize);
         let times = Mutex::new(Vec::with_capacity(n as usize));
         std::thread::scope(|s| {
-            for t in 0..THREADS {
+            for t in 0..threads_n {
                 let (db, start, times) = (&db, &start, &times);
                 s.spawn(move || {
                     for i in 0..WARM_UP {
@@ -101,7 +138,7 @@ fn main() {
                     }
                     start.wait();
                     let mut mine = Vec::new();
-                    for i in (t..n).step_by(THREADS as usize) {
+                    for i in (t..n).step_by(threads_n as usize) {
                         let mut txn = db.begin();
                         txn.put(&i.to_be_bytes(), b"v").unwrap();
                         let started = Instant::now();
@@ -124,7 +161,7 @@ fn main() {
         match mode {
             "grow" => txn.put(&i.to_be_bytes(), &[i as u8; 1000]).unwrap(),
             "overwrite" => txn.put(b"k", &i.to_be_bytes()).unwrap(),
-            _ => panic!("mode is grow, overwrite, reopen, closed, begin_busy or threads"),
+            _ => panic!("mode is grow, overwrite, reopen, closed, begin_busy, threads or threads_tput"),
         }
         let start = Instant::now();
         txn.commit().unwrap();

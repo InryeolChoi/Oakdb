@@ -373,9 +373,10 @@ fn commits_waiting_behind_a_failed_commit_write_nothing() {
 type Outcome = (Vec<u8>, Result<(), Error>);
 
 #[test]
-fn after_a_disk_failure_among_threads_only_one_commit_is_in_doubt() {
-    // One write or sync fails part way through; every commit after it is
-    // told the engine stopped, and opening again finds every acknowledged
+fn after_a_disk_failure_among_threads_only_one_batch_is_in_doubt() {
+    // One write or sync fails part way through. The commits of the batch
+    // it was for are in doubt, at most one per thread (each waits for its
+    // answer); every commit after it is told the engine stopped, and opening again finds every acknowledged
     // commit and none that was refused.
     let fs = SimFs::new();
     let db = open(&fs);
@@ -415,7 +416,7 @@ fn after_a_disk_failure_among_threads_only_one_commit_is_in_doubt() {
             }
         }
     }
-    assert_eq!(in_doubt, 1);
+    assert!((1..=4).contains(&in_doubt), "{in_doubt} commits in doubt");
 
     let db = open(&fs);
     for (key, result) in results.iter().flatten() {
