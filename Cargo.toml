@@ -6,3 +6,6 @@ members = ["crates/oakdb", "crates/oakdb-sql", "crates/oakdb-server"]
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/InryeolChoi/Oakdb"
+
+[profile.dev.package.oakdb-sql]
+opt-level = 1

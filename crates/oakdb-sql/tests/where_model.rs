@@ -276,7 +276,11 @@ fn int_value() -> impl Strategy<Value = i64> {
 }
 
 fn text_value() -> impl Strategy<Value = String> {
-    prop::sample::select(vec!["", "a", "ab", "abc", "b", "B", "é", "it's"]).prop_map(str::to_owned)
+    // "a\0" and "a\0b" sit between "a" and "ab" (review P2).
+    prop::sample::select(vec![
+        "", "a", "a\0", "a\0b", "ab", "abc", "b", "B", "é", "it's",
+    ])
+    .prop_map(str::to_owned)
 }
 
 /// An integer expression over `columns` integer columns; with none, a

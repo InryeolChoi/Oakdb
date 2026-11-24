@@ -529,3 +529,118 @@ fn a_primary_key_longer_than_any_key_finds_nothing() {
     let long = "x".repeat(10_000);
     assert!(rows(&db, &format!("SELECT * FROM t WHERE k = '{long}'")).is_empty());
 }
+
+// ------------------------------------------------- PR #69 review gaps
+
+#[test]
+fn unary_minus_on_text_is_a_type_error_even_with_rows() {
+    // Review P5 (mutant V11): without the type check, `-name` would fail
+    // only on a row, as corrupt data.
+    let db = people();
+    for sql in [
+        "SELECT * FROM people WHERE -name = 1",
+        "SELECT * FROM people WHERE -(name) IS NULL",
+    ] {
+        assert!(matches!(fail(&db, sql), SqlError::Type(_)), "{sql}");
+    }
+}
+
+#[test]
+fn between_stops_at_a_false_lower_bound() {
+    // Review P5 (mutant V16): `0 BETWEEN 1 AND 1 / 0` is false without
+    // computing the upper bound (design 0019, section 2-1).
+    let db = people();
+    assert!(ids(&db, "SELECT * FROM people WHERE 0 BETWEEN 1 AND 1 / 0").is_empty());
+    assert_eq!(
+        ids(
+            &db,
+            "SELECT * FROM people WHERE id < 3 AND 0 NOT BETWEEN 1 AND 1 / 0"
+        ),
+        vec![1, 2]
+    );
+    assert!(matches!(
+        fail(&db, "SELECT * FROM people WHERE 5 BETWEEN 1 AND 1 / 0"),
+        SqlError::Arithmetic(_)
+    ));
+}
+
+#[test]
+fn null_divided_by_zero_is_null() {
+    // Design 0019, section 2-2: NULL in arithmetic is NULL before the
+    // divisor is looked at, so NULL / 0 and NULL % 0 are NULL, not errors.
+    let db = people();
+    let all: Vec<i64> = (1..=10).collect();
+    assert_eq!(
+        ids(&db, "SELECT * FROM people WHERE (NULL / 0) IS NULL"),
+        all
+    );
+    assert_eq!(
+        ids(&db, "SELECT * FROM people WHERE (NULL % 0) IS NULL"),
+        all
+    );
+    assert_eq!(
+        ids(
+            &db,
+            // The IN range reads ids 3 to 7; AND stops at a false left
+            // side, so only the ages of 3 and 7, both NULL, are divided.
+            "SELECT * FROM people WHERE id IN (3, 7) AND (age / 0) IS NULL"
+        ),
+        vec![3, 7]
+    );
+    // A row with an age divides by zero.
+    assert!(matches!(
+        fail(&db, "SELECT * FROM people WHERE (age / 0) IS NULL"),
+        SqlError::Arithmetic(_)
+    ));
+}
+
+#[test]
+fn text_keys_with_a_zero_byte_and_keys_that_start_others_range_exactly() {
+    // Review P2: the end marker and the escaped 0x00 (design 0017, 2-1).
+    let db = new_db();
+    run(&db, "CREATE TABLE s (k TEXT PRIMARY KEY, n INTEGER)");
+    run(
+        &db,
+        "INSERT INTO s VALUES ('a', 1), ('a\0', 2), ('a\0b', 3), ('ab', 4), ('abc', 5), ('b', 6)",
+    );
+    let ns = |condition: &str| -> Vec<i64> {
+        rows(&db, &format!("SELECT n FROM s WHERE {condition}"))
+            .into_iter()
+            .map(|row| match row[0] {
+                Value::Integer(i) => i,
+                ref other => panic!("{other:?}"),
+            })
+            .collect()
+    };
+    assert_eq!(ns("k > 'a'"), vec![2, 3, 4, 5, 6]);
+    assert_eq!(ns("k >= 'a\0'"), vec![2, 3, 4, 5, 6]);
+    assert_eq!(ns("k > 'a\0'"), vec![3, 4, 5, 6]);
+    assert_eq!(ns("k < 'ab'"), vec![1, 2, 3]);
+    assert_eq!(ns("k <= 'ab'"), vec![1, 2, 3, 4]);
+    assert_eq!(ns("k > 'ab' AND k < 'b'"), vec![5]);
+    assert_eq!(ns("k = 'a\0'"), vec![2]);
+    assert_eq!(ns("k BETWEEN 'a' AND 'a\0b'"), vec![1, 2, 3]);
+}
+
+#[test]
+fn an_open_end_stops_before_the_next_table() {
+    // Review P2: `id > v` runs to the end of its table, not into the next.
+    let db = new_db();
+    run(&db, "CREATE TABLE first (id INTEGER PRIMARY KEY)");
+    run(&db, "CREATE TABLE second (id INTEGER PRIMARY KEY)");
+    run(&db, "INSERT INTO first VALUES (1), (2), (3)");
+    run(
+        &db,
+        "INSERT INTO second VALUES (-5), (0), (4), (9223372036854775807)",
+    );
+    assert_eq!(ids(&db, "SELECT * FROM first WHERE id > 1"), vec![2, 3]);
+    assert_eq!(
+        ids(&db, "SELECT * FROM first WHERE id >= -100"),
+        vec![1, 2, 3]
+    );
+    assert_eq!(ids(&db, "SELECT * FROM second WHERE id < 1"), vec![-5, 0]);
+    assert_eq!(
+        ids(&db, "SELECT * FROM second WHERE id > 0"),
+        vec![4, i64::MAX]
+    );
+}

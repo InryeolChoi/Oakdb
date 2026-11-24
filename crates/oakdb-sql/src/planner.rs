@@ -7,7 +7,13 @@
 //! without reading. The range only narrows where to look; the whole
 //! condition is still checked on every row, so a range wider than needed
 //! is slow but never wrong ("generous range, exact filter").
+//!
+//! The functions that recurse over the tree keep only the recursive cases
+//! and hand each leaf to a function of its own, so that their stack frames
+//! stay small: the parser bounds the tree's height (PR #69 review S1), and
+//! small frames keep that height within a server thread's stack.
 
+use std::cmp::Ordering;
 use std::ops::Bound;
 
 use crate::catalog::Table;
@@ -49,59 +55,16 @@ pub(crate) fn plan(table: &Table, filter: Option<Expr>) -> Result<Plan, SqlError
 
 // ------------------------------------------------------------ types
 
+/// A checked value expression and its type: `None` for a NULL literal,
+/// which fits any type.
+struct Typed {
+    scalar: Scalar,
+    column_type: Option<ColumnType>,
+}
+
 /// `expr` as a condition, or a type error if it is a value.
 fn condition(table: &Table, expr: Expr) -> Result<Pred, SqlError> {
     Ok(match expr {
-        Expr::Compare { op, left, right } => {
-            let left = value(table, *left)?;
-            let right = value(table, *right)?;
-            same_type(table, &[&left, &right])?;
-            Pred::Compare {
-                op,
-                left: left.0,
-                right: right.0,
-            }
-        }
-        Expr::IsNull { operand, negated } => Pred::IsNull {
-            operand: value(table, *operand)?.0,
-            negated,
-        },
-        Expr::Between {
-            operand,
-            low,
-            high,
-            negated,
-        } => {
-            let operand = value(table, *operand)?;
-            let low = value(table, *low)?;
-            let high = value(table, *high)?;
-            same_type(table, &[&operand, &low, &high])?;
-            Pred::Between {
-                operand: operand.0,
-                low: low.0,
-                high: high.0,
-                negated,
-            }
-        }
-        Expr::In {
-            operand,
-            list,
-            negated,
-        } => {
-            let operand = value(table, *operand)?;
-            let list = list
-                .into_iter()
-                .map(|item| value(table, item))
-                .collect::<Result<Vec<_>, _>>()?;
-            let mut all = vec![&operand];
-            all.extend(&list);
-            same_type(table, &all)?;
-            Pred::In {
-                operand: operand.0,
-                list: list.into_iter().map(|(item, _)| item).collect(),
-                negated,
-            }
-        }
         Expr::Not(inner) => Pred::Not(Box::new(condition(table, *inner)?)),
         Expr::And(left, right) => Pred::And(
             Box::new(condition(table, *left)?),
@@ -111,9 +74,69 @@ fn condition(table: &Table, expr: Expr) -> Result<Pred, SqlError> {
             Box::new(condition(table, *left)?),
             Box::new(condition(table, *right)?),
         ),
-        value_expr @ (Expr::Literal(_) | Expr::Column(_) | Expr::Neg(_) | Expr::Arith { .. }) => {
+        leaf => return predicate(table, leaf),
+    })
+}
+
+/// A condition that is not NOT, AND or OR: a comparison, IS NULL, BETWEEN
+/// or IN, or a type error for a value.
+#[inline(never)]
+fn predicate(table: &Table, expr: Expr) -> Result<Pred, SqlError> {
+    Ok(match expr {
+        Expr::Compare { op, left, right } => {
+            let left = scalar(table, *left)?;
+            let right = scalar(table, *right)?;
+            same_type(table, &[&left, &right])?;
+            Pred::Compare {
+                op,
+                left: left.scalar,
+                right: right.scalar,
+            }
+        }
+        Expr::IsNull { operand, negated } => Pred::IsNull {
+            operand: scalar(table, *operand)?.scalar,
+            negated,
+        },
+        Expr::Between {
+            operand,
+            low,
+            high,
+            negated,
+        } => {
+            let operand = scalar(table, *operand)?;
+            let low = scalar(table, *low)?;
+            let high = scalar(table, *high)?;
+            same_type(table, &[&operand, &low, &high])?;
+            Pred::Between {
+                operand: operand.scalar,
+                low: low.scalar,
+                high: high.scalar,
+                negated,
+            }
+        }
+        Expr::In {
+            operand,
+            list,
+            negated,
+        } => {
+            let operand = scalar(table, *operand)?;
+            let list = list
+                .into_iter()
+                .map(|item| scalar(table, item))
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut all = vec![&operand];
+            all.extend(&list);
+            same_type(table, &all)?;
+            Pred::In {
+                operand: operand.scalar,
+                list: list.into_iter().map(|item| item.scalar).collect(),
+                negated,
+            }
+        }
+        Expr::Not(_) | Expr::And(..) | Expr::Or(..) => condition(table, expr)?,
+        value => {
             // Look its columns up first, so an unknown one says so.
-            value(table, value_expr)?;
+            scalar(table, value)?;
             return Err(SqlError::Type(
                 "a value where a true-or-false condition belongs; compare it with something".into(),
             ));
@@ -121,52 +144,59 @@ fn condition(table: &Table, expr: Expr) -> Result<Pred, SqlError> {
     })
 }
 
-/// `expr` as a value, with its type: `None` for a NULL literal, which
-/// fits any type. A type error if it is a condition, or if arithmetic
-/// meets a non-integer.
-fn value(table: &Table, expr: Expr) -> Result<(Scalar, Option<ColumnType>), SqlError> {
-    Ok(match expr {
-        Expr::Literal(v) => {
-            let column_type = v.column_type();
-            (Scalar::Literal(v), column_type)
+/// `expr` as a value with its type. A type error if it is a condition, or
+/// if arithmetic meets a non-integer.
+fn scalar(table: &Table, expr: Expr) -> Result<Typed, SqlError> {
+    match expr {
+        Expr::Neg(inner) => {
+            let inner = scalar(table, *inner)?;
+            integer_operand("-", inner.column_type)?;
+            Ok(Typed {
+                scalar: Scalar::Neg(Box::new(inner.scalar)),
+                column_type: Some(ColumnType::Integer),
+            })
         }
+        Expr::Arith { op, left, right } => {
+            let left = scalar(table, *left)?;
+            let right = scalar(table, *right)?;
+            integer_operand(op.symbol(), left.column_type)?;
+            integer_operand(op.symbol(), right.column_type)?;
+            Ok(Typed {
+                scalar: Scalar::Arith {
+                    op,
+                    left: Box::new(left.scalar),
+                    right: Box::new(right.scalar),
+                },
+                column_type: Some(ColumnType::Integer),
+            })
+        }
+        leaf => leaf_scalar(table, leaf),
+    }
+}
+
+/// A value that is not arithmetic: a literal or a column, or a type error
+/// for a condition.
+#[inline(never)]
+fn leaf_scalar(table: &Table, expr: Expr) -> Result<Typed, SqlError> {
+    match expr {
+        Expr::Literal(v) => Ok(Typed {
+            column_type: v.column_type(),
+            scalar: Scalar::Literal(v),
+        }),
         Expr::Column(name) => {
             let i = table
                 .column(&name)
                 .ok_or_else(|| table.no_such_column(&name))?;
-            (Scalar::Column(i), Some(table.columns[i].column_type))
+            Ok(Typed {
+                scalar: Scalar::Column(i),
+                column_type: Some(table.columns[i].column_type),
+            })
         }
-        Expr::Neg(inner) => {
-            let (inner, column_type) = value(table, *inner)?;
-            integer_operand("-", column_type)?;
-            (Scalar::Neg(Box::new(inner)), Some(ColumnType::Integer))
-        }
-        Expr::Arith { op, left, right } => {
-            let (left, left_type) = value(table, *left)?;
-            let (right, right_type) = value(table, *right)?;
-            integer_operand(op.symbol(), left_type)?;
-            integer_operand(op.symbol(), right_type)?;
-            (
-                Scalar::Arith {
-                    op,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                },
-                Some(ColumnType::Integer),
-            )
-        }
-        Expr::Compare { .. }
-        | Expr::IsNull { .. }
-        | Expr::Between { .. }
-        | Expr::In { .. }
-        | Expr::Not(_)
-        | Expr::And(..)
-        | Expr::Or(..) => {
-            return Err(SqlError::Type(
-                "a true-or-false condition where a value belongs".into(),
-            ))
-        }
-    })
+        Expr::Neg(_) | Expr::Arith { .. } => scalar(table, expr),
+        _ => Err(SqlError::Type(
+            "a true-or-false condition where a value belongs".into(),
+        )),
+    }
 }
 
 /// Checks that an operand of arithmetic is an integer or NULL.
@@ -183,16 +213,16 @@ fn integer_operand(op: &str, found: Option<ColumnType>) -> Result<(), SqlError> 
 /// NULL literals aside. If a bare column takes part, the error names it as
 /// [`SqlError::TypeMismatch`], as a value of the wrong type for a column
 /// did before (design 0017); otherwise it is a [`SqlError::Type`].
-fn same_type(table: &Table, operands: &[&(Scalar, Option<ColumnType>)]) -> Result<(), SqlError> {
-    let types = || operands.iter().filter_map(|(_, t)| *t);
+fn same_type(table: &Table, operands: &[&Typed]) -> Result<(), SqlError> {
+    let types = || operands.iter().filter_map(|operand| operand.column_type);
     let Some(first) = types().next() else {
         return Ok(());
     };
     if types().all(|t| t == first) {
         return Ok(());
     }
-    let column = operands.iter().find_map(|(scalar, t)| match scalar {
-        Scalar::Column(i) => Some((*i, (*t)?)),
+    let column = operands.iter().find_map(|operand| match operand.scalar {
+        Scalar::Column(i) => Some((i, operand.column_type?)),
         _ => None,
     });
     if let Some((i, expected)) = column {
@@ -217,12 +247,20 @@ fn same_type(table: &Table, operands: &[&(Scalar, Option<ColumnType>)]) -> Resul
 /// section 4). Conditions under OR or NOT, and `!=`, NOT BETWEEN and NOT
 /// IN, which would need more than one range, leave it as it is.
 fn narrow(table: &Table, pred: &Pred, range: &mut KeyRange) {
-    let is_key = |scalar: &Scalar| matches!(scalar, Scalar::Column(i) if *i == table.primary_key);
     match pred {
         Pred::And(left, right) => {
             narrow(table, left, range);
             narrow(table, right, range);
         }
+        leaf => narrow_by(table, leaf, range),
+    }
+}
+
+/// Narrows `range` by one condition joined by AND at the top level.
+#[inline(never)]
+fn narrow_by(table: &Table, pred: &Pred, range: &mut KeyRange) {
+    let is_key = |scalar: &Scalar| matches!(scalar, Scalar::Column(i) if *i == table.primary_key);
+    match pred {
         Pred::Compare { op, left, right } => {
             let (op, constant) = if is_key(left) {
                 (*op, right)
@@ -231,7 +269,9 @@ fn narrow(table: &Table, pred: &Pred, range: &mut KeyRange) {
             } else {
                 return;
             };
-            let Some(v) = fold(constant) else { return };
+            let Folded::Value(v) = fold(constant) else {
+                return;
+            };
             match op {
                 CompareOp::Eq => {
                     raise_start(range, Bound::Included(v.clone()));
@@ -251,10 +291,10 @@ fn narrow(table: &Table, pred: &Pred, range: &mut KeyRange) {
             negated: false,
         } if is_key(operand) => {
             // Each end alone is needed for the row to match.
-            if let Some(low) = fold(low) {
+            if let Folded::Value(low) = fold(low) {
                 raise_start(range, Bound::Included(low));
             }
-            if let Some(high) = fold(high) {
+            if let Folded::Value(high) = fold(high) {
                 lower_end(range, Bound::Included(high));
             }
         }
@@ -268,14 +308,10 @@ fn narrow(table: &Table, pred: &Pred, range: &mut KeyRange) {
             // matches nothing, so it does not widen the range.
             let mut values = Vec::with_capacity(list.len());
             for item in list {
-                if !item.is_constant() {
-                    return;
-                }
-                match item.eval(&[]) {
-                    Ok(v) if *v == Value::Null => {}
-                    Ok(v) => values.push((key(&v), v.into_owned())),
-                    // Not folded: the filter meets the error on a row.
-                    Err(_) => return,
+                match fold(item) {
+                    Folded::Value(v) => values.push((key(&v), v)),
+                    Folded::Null => {}
+                    Folded::Not => return,
                 }
             }
             let by_key = |a: &&(Vec<u8>, Value), b: &&(Vec<u8>, Value)| a.0.cmp(&b.0);
@@ -292,17 +328,29 @@ fn narrow(table: &Table, pred: &Pred, range: &mut KeyRange) {
     }
 }
 
-/// The value of `scalar` if it reads no column and computes to a non-NULL
-/// value. A constant that overflows is not folded: planning would then
-/// fail even on an empty table, where the statement reads no row and so
-/// computes nothing (design 0019, section 4).
-fn fold(scalar: &Scalar) -> Option<Value> {
+/// What a value expression folds to while planning.
+enum Folded {
+    /// It reads no column and computes to this value, never NULL.
+    Value(Value),
+    /// It reads no column and computes to NULL, which no key equals.
+    Null,
+    /// It reads a column, or computing it fails. A constant that
+    /// overflows is not folded: planning would then fail even on an empty
+    /// table, where the statement reads no row and so computes nothing
+    /// (design 0019, section 4).
+    Not,
+}
+
+/// Folds `scalar`, which the range may use only as [`Folded::Value`]. So
+/// NULL never reaches a range, where [`encode_key`] could not encode it.
+fn fold(scalar: &Scalar) -> Folded {
     if !scalar.is_constant() {
-        return None;
+        return Folded::Not;
     }
     match scalar.eval(&[]) {
-        Ok(v) if *v != Value::Null => Some(v.into_owned()),
-        _ => None,
+        Ok(v) if *v == Value::Null => Folded::Null,
+        Ok(v) => Folded::Value(v.into_owned()),
+        Err(_) => Folded::Not,
     }
 }
 
@@ -317,7 +365,7 @@ fn key(v: &Value) -> Vec<u8> {
 /// Moves the start of `range` up to `start` if that is later. At the same
 /// value, an excluded start is the later one.
 fn raise_start(range: &mut KeyRange, start: Bound<Value>) {
-    if tighter(&start, &range.0, std::cmp::Ordering::Greater) {
+    if tighter(&start, &range.0, Ordering::Greater) {
         range.0 = start;
     }
 }
@@ -325,14 +373,14 @@ fn raise_start(range: &mut KeyRange, start: Bound<Value>) {
 /// Moves the end of `range` down to `end` if that is earlier. At the same
 /// value, an excluded end is the earlier one.
 fn lower_end(range: &mut KeyRange, end: Bound<Value>) {
-    if tighter(&end, &range.1, std::cmp::Ordering::Less) {
+    if tighter(&end, &range.1, Ordering::Less) {
         range.1 = end;
     }
 }
 
 /// Whether bound `new` leaves fewer keys than `old` on its side: its value
 /// lies further in direction `inward`, or the same value is excluded.
-fn tighter(new: &Bound<Value>, old: &Bound<Value>, inward: std::cmp::Ordering) -> bool {
+fn tighter(new: &Bound<Value>, old: &Bound<Value>, inward: Ordering) -> bool {
     let (new_value, new_excluded) = match new {
         Bound::Unbounded => return false,
         Bound::Included(v) => (v, false),
@@ -470,9 +518,14 @@ mod tests {
             "id + 1 > 5",
             "id = age",
             "id IN (1, age)",
+            // NULL never reaches a range, where `encode_key` could not
+            // encode it (review S6).
             "id = NULL",
             "id > 1 + NULL",
             "id IN (NULL)",
+            "id IN (NULL, NULL / 0)",
+            "id BETWEEN NULL AND NULL",
+            "NULL < id",
             "id IS NOT NULL",
             // A constant that overflows is left to the filter.
             "id > 9223372036854775807 + 1",
