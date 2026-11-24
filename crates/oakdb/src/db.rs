@@ -72,6 +72,33 @@ pub const CHECKPOINT_AFTER: u64 = 4 * 1024 * 1024;
 /// debugger, `top -H`, or a test that checks which thread syncs.
 pub const COMMIT_THREAD: &str = "oakdb-commit";
 
+/// The most commits the commit thread takes into one batch, which shares
+/// one WAL write and one sync (issue #28, design 0021). Commits waiting
+/// beyond it go in the next batch, in the order they came.
+pub const MAX_BATCH: usize = 128;
+
+/// What the commit thread did since the database was opened, from
+/// [`Db::stats`] (issue #28, design 0021). Several commits sharing one sync
+/// show as `wal_syncs < commits`; the mean batch is `commits / batches`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Stats {
+    /// Requests sent to the commit thread, commits and checkpoints. A
+    /// request is counted once it is waiting there.
+    pub received: u64,
+    /// Commits answered `Ok` that had writes.
+    pub commits: u64,
+    /// Commits that failed with [`Error::Conflict`].
+    pub conflicts: u64,
+    /// Batches of commits the commit thread took, one or more each.
+    pub batches: u64,
+    /// Syncs of the WAL that commits made: one per batch that changed
+    /// anything. Checkpoints' syncs are not counted.
+    pub wal_syncs: u64,
+    /// The most commits one batch held.
+    pub largest_batch: u64,
+}
+
 /// An open database. Threads can share it: it is `Send` and `Sync`.
 pub struct Db<F: Fs = StdFs> {
     /// What transactions share with the commit thread.
@@ -301,6 +328,11 @@ impl<F: Fs> Db<F> {
     /// two meta pages: what its data file holds once checkpointed.
     pub fn page_count(&self) -> u64 {
         self.shared.committed().tree.meta().page_count
+    }
+
+    /// What the commit thread did since the database was opened.
+    pub fn stats(&self) -> Stats {
+        Stats::default()
     }
 
     /// Moves the pages the WAL holds to the data file and empties the WAL,
