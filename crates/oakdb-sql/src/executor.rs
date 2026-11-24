@@ -1,14 +1,16 @@
 //! The executor: runs a parsed statement as one engine transaction
 //! (design 0017, section 5).
 
+use std::collections::HashSet;
+
 use oakdb::fs::Fs;
-use oakdb::{Db, Txn};
+use oakdb::{Db, Txn, MAX_KEY_LEN, MAX_VALUE_LEN};
 
 use crate::catalog::{self, Column, Table};
 use crate::encoding::{decode_row, encode_row, row_key, row_range};
-use crate::expr::{Expr, Truth};
+use crate::expr::{Expr, Scalar, Truth};
 use crate::parser::{ColumnDef, Statement};
-use crate::planner;
+use crate::planner::{self, Plan};
 use crate::{Output, SqlError, Value};
 
 /// Runs `statement` in a transaction of its own, committing it if the
@@ -17,22 +19,33 @@ use crate::{Output, SqlError, Value};
 /// statement takes effect whole or not at all.
 pub(crate) fn run<F: Fs>(db: &Db<F>, statement: Statement) -> Result<Output, SqlError> {
     let mut txn = db.begin();
-    let output = match statement {
-        Statement::CreateTable { name, columns } => create_table(&mut txn, name, columns)?,
+    let output = apply(&mut txn, statement)?;
+    // A SELECT wrote nothing, so its commit writes nothing either.
+    txn.commit()?;
+    Ok(output)
+}
+
+/// Runs `statement` inside `txn`, which the caller commits or drops.
+fn apply<F: Fs>(txn: &mut Txn<'_, F>, statement: Statement) -> Result<Output, SqlError> {
+    Ok(match statement {
+        Statement::CreateTable { name, columns } => create_table(txn, name, columns)?,
         Statement::Insert {
             table,
             columns,
             rows,
-        } => insert(&mut txn, &table, columns, rows)?,
+        } => insert(txn, &table, columns, rows)?,
         Statement::Select {
             table,
             columns,
             filter,
-        } => select(&txn, &table, columns, filter)?,
-    };
-    // A SELECT wrote nothing, so its commit writes nothing either.
-    txn.commit()?;
-    Ok(output)
+        } => select(txn, &table, columns, filter)?,
+        Statement::Update {
+            table,
+            assignments,
+            filter,
+        } => update(txn, &table, assignments, filter)?,
+        Statement::Delete { table, filter } => delete(txn, &table, filter)?,
+    })
 }
 
 fn create_table<F: Fs>(
@@ -184,9 +197,166 @@ fn select<F: Fs>(
     };
     // Unknown columns and type errors fail here, before any row is read.
     let plan = planner::plan(&table, filter)?;
+    let rows = matching(txn, &table, &plan)?
+        .into_iter()
+        .map(|(_, row)| selected.iter().map(|&i| row[i].clone()).collect())
+        .collect();
+    Ok(Output::Rows {
+        columns: selected
+            .iter()
+            .map(|&i| table.columns[i].name.clone())
+            .collect(),
+        rows,
+    })
+}
+
+/// Changes the rows WHERE matches (design 0022), in two steps. The first
+/// reads every matched row, computes its new value from the old one and
+/// checks everything that can fail; the second only writes. Collecting
+/// first is what the borrows ask anyway (a scan borrows the transaction
+/// shared, a write exclusively), and it changes each row once even when
+/// its new primary key lies ahead of the scan (the Halloween problem,
+/// section 1).
+fn update<F: Fs>(
+    txn: &mut Txn<'_, F>,
+    table: &str,
+    assignments: Vec<(String, Expr)>,
+    filter: Option<Expr>,
+) -> Result<Output, SqlError> {
+    let table = catalog::get(txn, table)?;
+    // Unknown columns and type errors fail here, before any row is read.
+    let assignments = planner::assignments(&table, assignments)?;
+    let plan = planner::plan(&table, filter)?;
+    let matched = matching(txn, &table, &plan)?;
+
+    // Step 1: the new rows, each computed from its old row only (U7).
+    let mut changes = Vec::with_capacity(matched.len());
+    for (key, old) in &matched {
+        let new = assign(&assignments, old)?;
+        check_row(&table, &new)?;
+        let new_key = row_key(table.id, &new[table.primary_key]);
+        if new_key.len() > MAX_KEY_LEN {
+            return Err(oakdb::Error::KeyTooLarge {
+                len: new_key.len(),
+                max: MAX_KEY_LEN,
+            }
+            .into());
+        }
+        let value = encode_row(&new)?;
+        if value.len() > MAX_VALUE_LEN {
+            return Err(oakdb::Error::ValueTooLarge {
+                len: value.len(),
+                max: MAX_VALUE_LEN,
+            }
+            .into());
+        }
+        changes.push(Change {
+            key: key.as_slice(),
+            new_key,
+            value,
+        });
+    }
+    no_duplicate_keys(txn, &table, &changes)?;
+
+    // Step 2: nothing is left to fail but the engine itself (U10). The
+    // rows that move leave their old keys first, so that one may move
+    // onto a key another one leaves.
+    for change in &changes {
+        if change.moves() {
+            txn.delete(change.key)?;
+        }
+    }
+    for change in &changes {
+        txn.put(&change.new_key, &change.value)?;
+    }
+    Ok(Output::Affected(matched.len() as u64))
+}
+
+/// What UPDATE does to one matched row.
+struct Change<'a> {
+    /// The engine key the row was read under.
+    key: &'a [u8],
+    /// The key its new primary key gives.
+    new_key: Vec<u8>,
+    /// The new row, encoded.
+    value: Vec<u8>,
+}
+
+impl Change<'_> {
+    /// Whether the row's primary key changes, so that it moves.
+    fn moves(&self) -> bool {
+        self.key != self.new_key.as_slice()
+    }
+}
+
+/// The row `old` becomes under the SET list: every expression reads the
+/// old row, so `SET a = b, b = a` swaps them.
+fn assign(assignments: &[(usize, Scalar)], old: &[Value]) -> Result<Vec<Value>, SqlError> {
+    let mut new = old.to_vec();
+    for (column, value) in assignments {
+        new[*column] = value.eval(old)?.into_owned();
+    }
+    Ok(new)
+}
+
+/// Checks the primary keys after an UPDATE against the table as it will
+/// be once the whole statement has run (design 0022, section 3-1), not
+/// row by row: `SET id = id + 1` on 1, 2 and 3 gives 2, 3 and 4 and is
+/// fine, whatever order the rows move in. A new key is a duplicate if
+/// another changed row gets it too, or if a row stays under it: one the
+/// statement did not match, or one it did that keeps its key.
+fn no_duplicate_keys<F: Fs>(
+    txn: &Txn<'_, F>,
+    table: &Table,
+    changes: &[Change<'_>],
+) -> Result<(), SqlError> {
+    let leaving: HashSet<&[u8]> = changes
+        .iter()
+        .filter(|change| change.moves())
+        .map(|change| change.key)
+        .collect();
+    let mut taken: HashSet<&[u8]> = HashSet::with_capacity(changes.len());
+    for change in changes {
+        let new_key = change.new_key.as_slice();
+        // A row that keeps its key stays where it is: only another row
+        // getting the same key can clash with it, which `taken` sees.
+        let duplicate = !taken.insert(new_key)
+            || (change.moves() && !leaving.contains(new_key) && txn.get(new_key)?.is_some());
+        if duplicate {
+            return Err(SqlError::DuplicateKey {
+                table: table.name.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Deletes the rows WHERE matches, collected first as UPDATE does.
+fn delete<F: Fs>(
+    txn: &mut Txn<'_, F>,
+    table: &str,
+    filter: Option<Expr>,
+) -> Result<Output, SqlError> {
+    let table = catalog::get(txn, table)?;
+    let plan = planner::plan(&table, filter)?;
+    let matched = matching(txn, &table, &plan)?;
+    for (key, _) in &matched {
+        txn.delete(key)?;
+    }
+    Ok(Output::Affected(matched.len() as u64))
+}
+
+/// A row read, with the engine key it was read under.
+type Matched = (Vec<u8>, Vec<Value>);
+
+/// The rows in the plan's range that its filter makes true, each with the
+/// engine key it was read under, in key order. UPDATE and DELETE write to
+/// that key rather than one made again from the row, so that a row whose
+/// stored key and primary key disagree is never left behind.
+fn matching<F: Fs>(txn: &Txn<'_, F>, table: &Table, plan: &Plan) -> Result<Vec<Matched>, SqlError> {
     let mut rows = Vec::new();
-    for entry in txn.scan(row_range(table.id, plan.range)) {
-        let (_, bytes) = entry?;
+    for entry in txn.scan(row_range(table.id, plan.range.clone())) {
+        let (key, bytes) = entry?;
         let row = decode_row(&bytes)?;
         // The filter reads columns by position, so a short row would be
         // read out of bounds.
@@ -203,13 +373,44 @@ fn select<F: Fs>(
                 continue;
             }
         }
-        rows.push(selected.iter().map(|&i| row[i].clone()).collect());
+        rows.push((key, row));
     }
-    Ok(Output::Rows {
-        columns: selected
-            .iter()
-            .map(|&i| table.columns[i].name.clone())
-            .collect(),
-        rows,
-    })
+    Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use oakdb::fs::sim::SimFs;
+
+    use super::*;
+    use crate::{execute, parser};
+
+    /// An UPDATE writes every row it matches, even one whose value stays
+    /// the same (design 0022, U9), so a transaction that began before it
+    /// and writes the same row loses at commit; and the loser's conflict
+    /// reaches SQL as the engine's conflict error (U11).
+    #[test]
+    fn an_update_conflicts_with_a_transaction_writing_the_same_row() {
+        let db = Db::open_with(SimFs::new(), "/oak").unwrap();
+        execute(&db, "CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER)").unwrap();
+        execute(&db, "INSERT INTO t VALUES (1, 0), (2, 0)").unwrap();
+
+        let mut earlier = db.begin();
+        let statement = parser::parse("UPDATE t SET n = n + 1 WHERE id = 1").unwrap();
+        assert_eq!(apply(&mut earlier, statement).unwrap(), Output::Affected(1));
+        // Another statement commits a write to the same row first.
+        execute(&db, "UPDATE t SET n = n WHERE id = 1").unwrap();
+        let e = SqlError::from(earlier.commit().unwrap_err());
+        assert!(
+            matches!(e, SqlError::Engine(oakdb::Error::Conflict { .. })),
+            "{e:?}"
+        );
+
+        // Different rows do not conflict.
+        let mut earlier = db.begin();
+        let statement = parser::parse("DELETE FROM t WHERE id = 2").unwrap();
+        apply(&mut earlier, statement).unwrap();
+        execute(&db, "UPDATE t SET n = 5 WHERE id = 1").unwrap();
+        earlier.commit().unwrap();
+    }
 }

@@ -474,8 +474,8 @@ fn unsupported_statements_say_unsupported() {
     users(&db);
     ok(&db, "INSERT INTO users VALUES (1, 'a', NULL)");
     for sql in [
-        "UPDATE users SET name = 'b' WHERE id = 1",
-        "DELETE FROM users WHERE id = 1",
+        "TRUNCATE users",
+        "REPLACE INTO users VALUES (1, NULL, NULL)",
         "BEGIN",
         "COMMIT",
         "ROLLBACK",

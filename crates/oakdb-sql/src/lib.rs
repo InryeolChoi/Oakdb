@@ -1,5 +1,5 @@
 //! The SQL layer of Oakdb (issue #31, design 0017; WHERE: issue #32,
-//! design 0019).
+//! design 0019; UPDATE and DELETE: issue #33, design 0022).
 //!
 //! It turns a SQL string into calls on the key-value engine: the lexer cuts
 //! the string into tokens, the parser turns the tokens into a statement,
@@ -65,7 +65,9 @@ pub enum Output {
         /// The rows found.
         rows: Vec<Vec<Value>>,
     },
-    /// How many rows an INSERT added.
+    /// How many rows an INSERT added, or an UPDATE or DELETE matched:
+    /// every matched row counts, even one an UPDATE leaves as it was
+    /// (design 0022, U9).
     Affected(u64),
     /// The statement produced nothing to show (CREATE TABLE).
     Done,
