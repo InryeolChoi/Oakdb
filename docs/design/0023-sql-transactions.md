@@ -31,21 +31,21 @@ Java/Spring으로 치면, 지금의 Oakdb는 JDBC의 **`autoCommit = true`** 상
 
 | # | 질문 | 상태 |
 |---|---|---|
-| T1 | 열린 트랜잭션을 누가 들고 있나 | 결정 대기 (추천: `Session<'db>`이 `&Db`를 빌리고 `Option<Txn<'db>>`를 들고 있음, `Session::execute(&mut self, sql)`) (1절) |
-| T2 | 문법과 범위 | 결정 대기 (추천: `BEGIN [TRANSACTION]`, `COMMIT [TRANSACTION]`, `ROLLBACK [TRANSACTION]`만. `START TRANSACTION`, `END`, 격리 수준, `SAVEPOINT`는 "지원 안 함") (2절) |
-| T3 | 파서가 내는 모양 | 결정 대기 (추천: `Statement`와 따로 `Command { Begin, Commit, Rollback, Run(Statement) }`. 실행기 `apply`는 BEGIN을 받을 수 없게 타입으로 막음) (2절) |
-| T4 | BEGIN 안의 BEGIN, 트랜잭션 밖의 COMMIT/ROLLBACK | 결정 대기 (추천: **오류**, 열린 트랜잭션은 그대로. SQLite와 같음. PostgreSQL은 경고) (4절) |
-| T5 | 트랜잭션 안에서 문장 하나가 도중에 실패하면 | 결정 대기 (추천: **그 문장만 없던 일**(문장 단위 원자성), 방법은 **쓰기 전에 모든 검사를 끝내기**. INSERT를 0022처럼 두 단계로 고침) (3절) |
-| T6 | 무엇이 트랜잭션을 끝내나 | 결정 대기 (추천: **COMMIT과 ROLLBACK뿐**. COMMIT은 실패해도(Conflict, OutcomeUnknown, Stopped) 트랜잭션을 끝내고 세션은 자동 커밋으로 돌아감. 문장 오류는 끝내지 않음) (5절) |
-| T7 | 엔진 트랜잭션은 언제 시작하나 | 결정 대기 (추천: **BEGIN 때** 바로 `db.begin()`) (7절) |
-| T8 | 트랜잭션 안의 읽기 | 결정 대기 (추천: BEGIN 때의 스냅샷 + 자기 쓰기. 엔진이 이미 그렇게 함. 다른 세션의 커밋은 COMMIT/ROLLBACK 뒤에야 보임) (7절) |
-| T9 | 트랜잭션 안의 CREATE TABLE | 결정 대기 (추천: **허용**. 같은 트랜잭션의 뒤 문장은 새 표를 봄. 동시에 표를 만드는 두 트랜잭션은 표 번호 카운터에서 충돌함을 받아들이고 문서로 남김) (8절) |
-| T10 | 열린 트랜잭션을 가진 세션을 버리면 | 결정 대기 (추천: **롤백**. `Txn`의 `Drop`이 이미 쓰기를 버림. 따로 할 일 없음) (6절) |
-| T11 | 충돌 오류가 SQL로 오는 모양 (#34와의 경계) | 결정 대기 (추천: 지금의 `SqlError::Engine(Conflict)`와 서버 코드 `0x20`을 그대로 씀. 트랜잭션 상태 오류(T4)는 새 종류 하나. 이름 정리는 #34) (9절) |
-| T12 | 한 번에 하나 실행하는 `execute(&db, sql)`는 | 결정 대기 (추천: 남겨 두되 BEGIN/COMMIT/ROLLBACK은 "세션을 쓰라"는 오류) (1-3절) |
-| T13 | 어떻게 검증하나 | 결정 대기 (추천: 세션 하나에 BEGIN/COMMIT/ROLLBACK을 섞은 무작위 문장 열을 모델과 비교 + 세션 둘의 동시성 테스트) (10절) |
+| T1 | 열린 트랜잭션을 누가 들고 있나 | 사용자 결정 (추천안): `Session<'db>`이 `&Db`를 빌리고 `Option<Txn<'db>>`를 들고 있음, `Session::execute(&mut self, sql)` (1절) |
+| T2 | 문법과 범위 | 사용자 결정 (추천안): `BEGIN [TRANSACTION]`, `COMMIT [TRANSACTION]`, `ROLLBACK [TRANSACTION]`만. `START TRANSACTION`, `END`, 격리 수준, `SAVEPOINT`는 "지원 안 함" (2절) |
+| T3 | 파서가 내는 모양 | 사용자 결정 (추천안): `Statement`와 따로 `Command { Begin, Commit, Rollback, Run(Statement) }`. 실행기 `apply`는 BEGIN을 받을 수 없게 타입으로 막음 (2절) |
+| T4 | BEGIN 안의 BEGIN, 트랜잭션 밖의 COMMIT/ROLLBACK | 사용자 결정 (추천안): **오류**, 열린 트랜잭션은 그대로. SQLite와 같음. PostgreSQL은 경고 (4절) |
+| T5 | 트랜잭션 안에서 문장 하나가 도중에 실패하면 | 사용자 결정 (추천안): **그 문장만 없던 일**(문장 단위 원자성), 방법은 **쓰기 전에 모든 검사를 끝내기**. INSERT를 0022처럼 두 단계로 고침 (3절) |
+| T6 | 무엇이 트랜잭션을 끝내나 | 사용자 결정 (추천안): **COMMIT과 ROLLBACK뿐**. COMMIT은 실패해도(Conflict, OutcomeUnknown, Stopped) 트랜잭션을 끝내고 세션은 자동 커밋으로 돌아감. 문장 오류는 끝내지 않음 (5절) |
+| T7 | 엔진 트랜잭션은 언제 시작하나 | 사용자 결정 (추천안): **BEGIN 때** 바로 `db.begin()` (7절) |
+| T8 | 트랜잭션 안의 읽기 | 사용자 결정 (추천안): BEGIN 때의 스냅샷 + 자기 쓰기. 엔진이 이미 그렇게 함. 다른 세션의 커밋은 COMMIT/ROLLBACK 뒤에야 보임 (7절) |
+| T9 | 트랜잭션 안의 CREATE TABLE | 사용자 결정 (추천안): **허용**. 같은 트랜잭션의 뒤 문장은 새 표를 봄. 동시에 표를 만드는 두 트랜잭션은 표 번호 카운터에서 충돌함을 받아들이고 문서로 남김 (8절) |
+| T10 | 열린 트랜잭션을 가진 세션을 버리면 | 사용자 결정 (추천안): **롤백**. `Txn`의 `Drop`이 이미 쓰기를 버림. 따로 할 일 없음 (6절) |
+| T11 | 충돌 오류가 SQL로 오는 모양 (#34와의 경계) | 사용자 결정 (추천안): 지금의 `SqlError::Engine(Conflict)`와 서버 코드 `0x20`을 그대로 씀. 트랜잭션 상태 오류(T4)는 새 종류 하나. 이름 정리는 #34 (9절) |
+| T12 | 한 번에 하나 실행하는 `execute(&db, sql)`는 | 사용자 결정 (추천안): 남겨 두되 BEGIN/COMMIT/ROLLBACK은 "세션을 쓰라"는 오류 (1-3절) |
+| T13 | 어떻게 검증하나 | 사용자 결정 (추천안): 세션 하나에 BEGIN/COMMIT/ROLLBACK을 섞은 무작위 문장 열을 모델과 비교 + 세션 둘의 동시성 테스트 (10절) |
 
-T1~T13 밖의 작은 질문은 11절 표에 모았다.
+T1~T13 밖의 작은 질문은 11절 표에 모았다. 사용자가 T1~T13과 Q1~Q10 모두 추천안대로 정했다.
 
 ## 1. 세션: 열린 트랜잭션을 들고 있는 것 (T1)
 
@@ -303,7 +303,7 @@ ADR 0006의 스냅샷 격리 그대로다: 같은 키를 쓴 두 트랜잭션 �
 
 ## 11. 작은 질문
 
-| # | 질문 | 추천 | 이유 |
+| # | 질문 | 결정 (추천안) | 이유 |
 |---|---|---|---|
 | Q1 | `TRANSACTION`을 예약어로 할까 | 안 함. `BEGIN`/`COMMIT`/`ROLLBACK` 뒤에서만 낱말로 비교 | 선택 낱말이라 이름으로 쓰는 것을 막을 이유가 없음 |
 | Q2 | BEGIN/COMMIT/ROLLBACK이 돌려주는 것 | `Output::Done` | 서버 `DONE`, CLI가 이미 앎. 새 갈래를 만들 만큼의 정보가 없음 |
