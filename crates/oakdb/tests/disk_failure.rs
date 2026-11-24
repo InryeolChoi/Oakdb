@@ -398,7 +398,9 @@ fn a_commit_whose_checkpoint_fails_is_kept_and_stops_the_engine() {
             }
             // The commit is answered before its checkpoint runs (design
             // 0021 G6): a checkpoint asked for now runs after that one.
-            let _ = db.checkpoint();
+            // The engine stopped either way: at the commit or at its
+            // checkpoint.
+            assert!(is_stopped(db.checkpoint()), "{what}: checkpoint");
             assert_stopped(&db, &what);
             drop(db);
             let acked = if fail < 2 { &model } else { &landed };

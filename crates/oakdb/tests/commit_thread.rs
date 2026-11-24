@@ -376,8 +376,9 @@ type Outcome = (Vec<u8>, Result<(), Error>);
 fn after_a_disk_failure_among_threads_only_one_batch_is_in_doubt() {
     // One write or sync fails part way through. The commits of the batch
     // it was for are in doubt, at most one per thread (each waits for its
-    // answer); every commit after it is told the engine stopped, and opening again finds every acknowledged
-    // commit and none that was refused.
+    // answer); every commit after it is told the engine stopped, and
+    // opening again finds every acknowledged commit and none that was
+    // refused.
     let fs = SimFs::new();
     let db = open(&fs);
     fs.fail_once_after(25);
@@ -399,6 +400,8 @@ fn after_a_disk_failure_among_threads_only_one_batch_is_in_doubt() {
             .collect();
         threads.into_iter().map(|t| t.join().unwrap()).collect()
     });
+    // The commits that passed in the batch whose write failed.
+    let failed_batch = db.stats().in_doubt;
     drop(db);
 
     let mut in_doubt = 0;
@@ -416,7 +419,10 @@ fn after_a_disk_failure_among_threads_only_one_batch_is_in_doubt() {
             }
         }
     }
+    // One batch, at most one commit per thread, and every commit that
+    // passed in it is in doubt.
     assert!((1..=4).contains(&in_doubt), "{in_doubt} commits in doubt");
+    assert_eq!(in_doubt, failed_batch);
 
     let db = open(&fs);
     for (key, result) in results.iter().flatten() {
