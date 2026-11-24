@@ -65,6 +65,8 @@ struct GateState {
     arrived: Vec<Option<String>>,
     /// How many of `arrived` [`HeldSyncs::wait_for_sync`] has reported.
     reported: usize,
+    /// Whether the next sync panics ([`SimFs::panic_at_next_sync`]).
+    panic_next: bool,
 }
 
 impl Gate {
@@ -72,9 +74,14 @@ impl Gate {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Waits while the gate is held, noting the calling thread.
+    /// Waits while the gate is held, noting the calling thread. Panics
+    /// instead if [`SimFs::panic_at_next_sync`] asked for it.
     fn pass(&self) {
         let mut state = self.state();
+        if std::mem::take(&mut state.panic_next) {
+            drop(state);
+            panic!("a sync panicked, as the test asked");
+        }
         if !state.held {
             return;
         }
@@ -134,7 +141,9 @@ impl HeldSyncs {
 impl Drop for HeldSyncs {
     fn drop(&mut self) {
         let mut state = self.gate.state();
-        *state = GateState::default();
+        state.held = false;
+        state.arrived.clear();
+        state.reported = 0;
         self.gate.changed.notify_all();
     }
 }
@@ -312,6 +321,13 @@ impl SimFs {
         HeldSyncs {
             gate: Arc::clone(&self.gate),
         }
+    }
+
+    /// Makes the next [`FsFile::sync_data`] panic before it does anything,
+    /// as a bug in the code that called it would. A test uses it to see
+    /// what the engine does when its commit thread panics (design 0018).
+    pub fn panic_at_next_sync(&self) {
+        self.gate.state().panic_next = true;
     }
 
     /// Cuts the power after `ops` more operations that change the disk:
