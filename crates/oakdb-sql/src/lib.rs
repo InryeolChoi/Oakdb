@@ -1,11 +1,13 @@
 //! The SQL layer of Oakdb (issue #31, design 0017; WHERE: issue #32,
-//! design 0019; UPDATE and DELETE: issue #33, design 0022).
+//! design 0019; UPDATE and DELETE: issue #33, design 0022; BEGIN, COMMIT
+//! and ROLLBACK: issue #35, design 0023).
 //!
 //! It turns a SQL string into calls on the key-value engine: the lexer cuts
 //! the string into tokens, the parser turns the tokens into a statement,
 //! the planner turns a WHERE clause into a range of primary keys and a
-//! condition, and the executor runs the statement as one engine
-//! transaction. The engine knows nothing about SQL; everything about
+//! condition, and the executor runs the statement in an engine
+//! transaction: one of its own, or the one a [`Session`] keeps open from
+//! BEGIN to COMMIT. The engine knows nothing about SQL; everything about
 //! tables, columns and rows lives here, stored in the engine as keys and
 //! values that sort in the right order (design 0017, sections 1 and 2).
 //!
@@ -34,13 +36,15 @@ mod expr;
 mod lexer;
 mod parser;
 mod planner;
+mod session;
 
 use std::fmt;
 
 use oakdb::fs::Fs;
 use oakdb::Db;
 
-pub use error::SqlError;
+pub use error::{SqlError, TransactionError};
+pub use session::Session;
 
 /// Runs one SQL statement on `db` and returns what it produced.
 ///
@@ -49,9 +53,15 @@ pub use error::SqlError;
 /// of it fails, so a three-row INSERT whose third row is rejected inserts
 /// nothing. An optional trailing semicolon is allowed; a second statement
 /// is not.
+///
+/// BEGIN, COMMIT and ROLLBACK fail with
+/// [`TransactionError::NeedsSession`]: a transaction this call opened
+/// would end with it. Use a [`Session`] to keep one open.
 pub fn execute<F: Fs>(db: &Db<F>, sql: &str) -> Result<Output, SqlError> {
-    let statement = parser::parse(sql)?;
-    executor::run(db, statement)
+    match parser::parse_command(sql)? {
+        parser::Command::Run(statement) => executor::run(db, statement),
+        _ => Err(SqlError::Transaction(TransactionError::NeedsSession)),
+    }
 }
 
 /// What a statement produced.

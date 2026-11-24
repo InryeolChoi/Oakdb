@@ -26,7 +26,13 @@ pub(crate) fn run<F: Fs>(db: &Db<F>, statement: Statement) -> Result<Output, Sql
 }
 
 /// Runs `statement` inside `txn`, which the caller commits or drops.
-fn apply<F: Fs>(txn: &mut Txn<'_, F>, statement: Statement) -> Result<Output, SqlError> {
+///
+/// A statement that fails leaves `txn` as it was (design 0023, T5): each
+/// one checks everything that can fail before it writes, so that inside
+/// BEGIN only the failed statement is undone. The writes themselves can
+/// then fail only if the engine stopped, and a stopped engine commits
+/// nothing.
+pub(crate) fn apply<F: Fs>(txn: &mut Txn<'_, F>, statement: Statement) -> Result<Output, SqlError> {
     Ok(match statement {
         Statement::CreateTable { name, columns } => create_table(txn, name, columns)?,
         Statement::Insert {
@@ -130,7 +136,11 @@ fn insert<F: Fs>(
             targets
         }
     };
+    // Step 1: every row is checked before any is written, so a row that
+    // fails leaves none of the statement's rows behind (design 0023, T5).
     let count = rows.len();
+    let mut checked: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(count);
+    let mut keys: HashSet<Vec<u8>> = HashSet::with_capacity(count);
     for values in rows {
         if values.len() != targets.len() {
             return Err(SqlError::ValueCount {
@@ -145,14 +155,26 @@ fn insert<F: Fs>(
         }
         check_row(&table, &row)?;
         let key = row_key(table.id, &row[table.primary_key]);
-        // The transaction sees its own writes, so this also catches a key
-        // that an earlier row of the same INSERT used.
-        if txn.get(&key)?.is_some() {
+        // `get` refuses a key too long. The rows of this INSERT are not
+        // written yet, so `keys` catches one it adds twice.
+        if txn.get(&key)?.is_some() || !keys.insert(key.clone()) {
             return Err(SqlError::DuplicateKey {
                 table: table.name.clone(),
             });
         }
-        txn.put(&key, &encode_row(&row)?)?;
+        let value = encode_row(&row)?;
+        if value.len() > MAX_VALUE_LEN {
+            return Err(oakdb::Error::ValueTooLarge {
+                len: value.len(),
+                max: MAX_VALUE_LEN,
+            }
+            .into());
+        }
+        checked.push((key, value));
+    }
+    // Step 2: nothing is left to fail but the engine itself.
+    for (key, value) in &checked {
+        txn.put(key, value)?;
     }
     Ok(Output::Affected(count as u64))
 }

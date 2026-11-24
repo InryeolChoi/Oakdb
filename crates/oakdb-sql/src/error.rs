@@ -72,8 +72,44 @@ pub enum SqlError {
     /// What the SQL layer stored in the engine could not be read back. The
     /// text says what is wrong.
     Corrupt(String),
-    /// The engine failed: a key too long, a failed disk, a stopped engine.
+    /// A transaction command does not fit the session's state (design
+    /// 0023, section 4). The session's transaction, if one is open, is
+    /// left as it was.
+    Transaction(TransactionError),
+    /// The engine failed: a key too long, a failed disk, a stopped engine,
+    /// or a conflict with a transaction that committed first
+    /// ([`oakdb::Error::Conflict`]), which ends the transaction: run it
+    /// again.
     Engine(oakdb::Error),
+}
+
+/// How a transaction command does not fit the session's state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TransactionError {
+    /// BEGIN while a transaction is already open.
+    AlreadyBegun,
+    /// COMMIT or ROLLBACK with no transaction open.
+    NotBegun,
+    /// BEGIN, COMMIT or ROLLBACK given to [`crate::execute`], which runs
+    /// each statement in a transaction of its own; a
+    /// [`crate::Session`] keeps one open between statements.
+    NeedsSession,
+}
+
+impl fmt::Display for TransactionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            TransactionError::AlreadyBegun => {
+                "a transaction is already open; COMMIT or ROLLBACK it first"
+            }
+            TransactionError::NotBegun => "no transaction is open",
+            TransactionError::NeedsSession => {
+                "BEGIN, COMMIT and ROLLBACK need a session, which keeps the transaction open \
+                 between statements"
+            }
+        })
+    }
 }
 
 impl fmt::Display for SqlError {
@@ -109,6 +145,15 @@ impl fmt::Display for SqlError {
             SqlError::Type(what) => write!(f, "type error: {what}"),
             SqlError::Arithmetic(what) => write!(f, "arithmetic error: {what}"),
             SqlError::Corrupt(reason) => write!(f, "stored SQL data is corrupt: {reason}"),
+            SqlError::Transaction(e) => write!(f, "transaction error: {e}"),
+            // The engine's text says to begin again; a transaction that
+            // failed at COMMIT has to run again from BEGIN, all of it
+            // (design 0023, Q4).
+            SqlError::Engine(e @ oakdb::Error::Conflict { .. }) => write!(
+                f,
+                "conflict: {e}; the transaction wrote nothing (if it began with BEGIN, \
+                 run it again from BEGIN)"
+            ),
             SqlError::Engine(e) => write!(f, "engine error: {e}"),
         }
     }

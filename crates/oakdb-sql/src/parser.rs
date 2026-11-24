@@ -51,6 +51,22 @@ pub(crate) enum Statement {
     },
 }
 
+/// A parsed command: a transaction command, which a session handles, or a
+/// statement, which runs inside a transaction (design 0023, T3). Keeping
+/// them apart means the executor, which only takes a [`Statement`], has
+/// no BEGIN to run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Command {
+    /// `BEGIN [TRANSACTION]`.
+    Begin,
+    /// `COMMIT [TRANSACTION]`.
+    Commit,
+    /// `ROLLBACK [TRANSACTION]`.
+    Rollback,
+    /// Any other statement.
+    Run(Statement),
+}
+
 /// A column in CREATE TABLE.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ColumnDef {
@@ -59,25 +75,36 @@ pub(crate) struct ColumnDef {
     pub(crate) primary_key: bool,
 }
 
-/// Parses one statement, with an optional trailing semicolon.
-pub(crate) fn parse(sql: &str) -> Result<Statement, SqlError> {
+/// Parses one command, with an optional trailing semicolon.
+pub(crate) fn parse_command(sql: &str) -> Result<Command, SqlError> {
     let mut parser = Parser {
         tokens: tokenize(sql)?,
         at: 0,
         depth: 0,
     };
-    let statement = parser.statement()?;
+    let command = parser.command()?;
     parser.finish()?;
-    Ok(statement)
+    Ok(command)
+}
+
+/// Parses one statement that is not a transaction command.
+#[cfg(test)]
+pub(crate) fn parse(sql: &str) -> Result<Statement, SqlError> {
+    match parse_command(sql)? {
+        Command::Run(statement) => Ok(statement),
+        other => panic!("{other:?} is not a statement"),
+    }
 }
 
 /// Words that shape the grammar, so they cannot name a table or column.
 /// Type names are not among them: `text TEXT` is a fine column.
 /// `BETWEEN`, `IN` and `LIKE` are not among them: they are only read where
 /// an operator stands, so they can still name a column (design 0019, Q1).
-const RESERVED: [&str; 18] = [
+/// `TRANSACTION` is not among them either: it is optional, and only read
+/// right after BEGIN, COMMIT or ROLLBACK (design 0023, Q1).
+const RESERVED: [&str; 21] = [
     "CREATE", "TABLE", "INSERT", "INTO", "VALUES", "SELECT", "FROM", "WHERE", "PRIMARY", "KEY",
-    "NULL", "AND", "OR", "NOT", "IS", "UPDATE", "SET", "DELETE",
+    "NULL", "AND", "OR", "NOT", "IS", "UPDATE", "SET", "DELETE", "BEGIN", "COMMIT", "ROLLBACK",
 ];
 
 /// Operators of real SQL that Oakdb does not support, where an operator
@@ -192,6 +219,27 @@ impl Parser {
         }
     }
 
+    /// command := (BEGIN | COMMIT | ROLLBACK) [TRANSACTION] | statement
+    ///
+    /// Whatever else follows, such as SQLite's `BEGIN IMMEDIATE` or
+    /// `ROLLBACK TO`, is left for [`Parser::finish`] to call unsupported.
+    fn command(&mut self) -> Result<Command, SqlError> {
+        for (keyword, command) in [
+            ("BEGIN", Command::Begin),
+            ("COMMIT", Command::Commit),
+            ("ROLLBACK", Command::Rollback),
+        ] {
+            if self.at_keyword(keyword) {
+                self.next();
+                if self.at_keyword("TRANSACTION") {
+                    self.next();
+                }
+                return Ok(command);
+            }
+        }
+        self.statement().map(Command::Run)
+    }
+
     /// statement := create | insert | select | update | delete
     fn statement(&mut self) -> Result<Statement, SqlError> {
         match &self.peek().token {
@@ -201,8 +249,8 @@ impl Parser {
             Token::Word(word) if word.eq_ignore_ascii_case("UPDATE") => self.update(),
             Token::Word(word) if word.eq_ignore_ascii_case("DELETE") => self.delete(),
             Token::Word(word) => Err(SqlError::Unsupported(format!(
-                "statement `{word}`; only CREATE TABLE, INSERT, SELECT, UPDATE and DELETE are \
-                 supported"
+                "statement `{word}`; only CREATE TABLE, INSERT, SELECT, UPDATE, DELETE, BEGIN, \
+                 COMMIT and ROLLBACK are supported"
             ))),
             _ => Err(self.expected("a statement")),
         }
