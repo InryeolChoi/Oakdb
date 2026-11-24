@@ -5,10 +5,9 @@
 //! the string into tokens, the parser turns the tokens into a statement,
 //! the planner turns a WHERE clause into a range of primary keys and a
 //! condition, and the executor runs the statement as one engine
-//! transaction. The
-//! engine knows nothing about SQL; everything about tables, columns and
-//! rows lives here, stored in the engine as keys and values that sort in
-//! the right order (design 0017, sections 1 and 2).
+//! transaction. The engine knows nothing about SQL; everything about
+//! tables, columns and rows lives here, stored in the engine as keys and
+//! values that sort in the right order (design 0017, sections 1 and 2).
 //!
 //! ```
 //! use oakdb::{fs::sim::SimFs, Db};

@@ -39,7 +39,8 @@ pub(crate) fn encode_key(value: &Value, out: &mut Vec<u8>) {
         Value::Blob(bytes) => escape(bytes, out),
         // The executor rejects a NULL primary key before it makes a key,
         // and the planner never puts NULL in a range (design 0019,
-        // section 4).
+        // section 4; pinned by the planner test
+        // `what_needs_more_than_one_range_or_a_row_scans_the_table`).
         Value::Null => unreachable!("NULL is never a primary key"),
     }
 }
