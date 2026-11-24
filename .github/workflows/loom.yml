@@ -1,0 +1,33 @@
+name: Loom
+
+# The commit queue's loom models at a size chosen by hand (design 0024
+# V10): too slow for every push. Results go to docs/experiments/0017-loom.md.
+on:
+  workflow_dispatch:
+    inputs:
+      clients:
+        description: Client threads (2 or 3)
+        default: "3"
+      preemptions:
+        description: Most preemptions per run
+        default: "3"
+
+jobs:
+  loom:
+    name: loom (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      RUSTFLAGS: --cfg loom
+      LOOM_CLIENTS: ${{ inputs.clients }}
+      LOOM_MAX_PREEMPTIONS: ${{ inputs.preemptions }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: loom
+      - run: cargo test -p oakdb --release --lib loom -- --nocapture --test-threads 1

@@ -47,17 +47,19 @@ use std::ops::{Bound, RangeBounds};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{Arc, OnceLock, PoisonError};
 use std::thread::JoinHandle;
 
 use crate::checkpoint;
 use crate::checksum;
+use crate::commit_queue::{self, Handler, Queue};
 use crate::conflict::RecentWrites;
 use crate::error::{Error, Result, MAX_KEY_LEN, MAX_VALUE_LEN};
 use crate::fs::{Fs, FsFile, StdFs};
 use crate::meta::{Meta, Slot, META_LEN};
 use crate::page::{Page, PAGE_SIZE};
+use crate::planted::PlantedBug;
+use crate::sync::{mpsc, Mutex, MutexGuard};
 use crate::tree::{Cursor, Tree};
 use crate::wal::{self, Replayed, Tail, Wal, CUT_FILE, HEADER_LEN, WAL_FILE};
 
@@ -114,9 +116,9 @@ pub struct Stats {
 pub struct Db<F: Fs = StdFs> {
     /// What transactions share with the commit thread.
     shared: Arc<Shared>,
-    /// Where commits and checkpoints go, to the commit thread. `None` only
-    /// while the database is dropped.
-    requests: Option<Sender<Request>>,
+    /// Where commits and checkpoints go, to the commit thread. Closed when
+    /// the database is dropped.
+    requests: Arc<Queue<Request>>,
     /// The commit thread, which holds the files. Joined when the database
     /// is dropped. `None` only then.
     thread: Option<JoinHandle<()>>,
@@ -132,6 +134,9 @@ struct Shared {
     /// A transaction keeps the tree it began on, so commits never change
     /// it under it.
     committed: Mutex<Committed>,
+    /// The bug planted, if any (issue #29).
+    #[cfg(feature = "planted-bugs")]
+    bug: Option<PlantedBug>,
     /// Why the engine stopped, once a write or sync failed. Set at most
     /// once, by the commit thread, and never cleared: this process does
     /// not trust the files again (design 0012).
@@ -172,18 +177,12 @@ impl Counters {
 /// put, `None` for a delete.
 type Writes = BTreeMap<Vec<u8>, Option<Vec<u8>>>;
 
-/// Work for the commit thread, with where to send the answer.
-enum Request {
-    Commit {
-        writes: Writes,
-        /// The number of the last commit in the transaction's snapshot.
-        begun_after: u64,
-        answer: SyncSender<Result<()>>,
-    },
-    Checkpoint {
-        answer: SyncSender<Result<()>>,
-    },
-}
+/// Where the commit thread answers a request.
+type Answer = mpsc::Sender<Result<()>>;
+
+/// Work for the commit thread: a commit, or a checkpoint with where to
+/// answer it.
+type Request = commit_queue::Request<Waiting, Answer>;
 
 /// The commit thread's own state: the files, and the latest tree.
 struct Committer<File: FsFile> {
@@ -223,7 +222,17 @@ impl<F: Fs> Db<F> {
     /// Opens the database in directory `path`, doing all file access through
     /// `fs`.
     pub fn open_with(fs: F, path: impl AsRef<Path>) -> Result<Self> {
-        let dir = path.as_ref();
+        Self::open_planted(fs, path.as_ref(), None)
+    }
+
+    /// Opens the database as [`Db::open_with`] does, with `bug` planted in
+    /// it, for a test to see the history checker find it (issue #29).
+    #[cfg(feature = "planted-bugs")]
+    pub fn open_with_bug(fs: F, path: impl AsRef<Path>, bug: PlantedBug) -> Result<Self> {
+        Self::open_planted(fs, path.as_ref(), Some(bug))
+    }
+
+    fn open_planted(fs: F, dir: &Path, bug: Option<PlantedBug>) -> Result<Self> {
         fs.create_dir_all(dir)?;
         let file = fs.open(&dir.join(DATA_FILE))?;
         file.try_lock().map_err(|e| match e.kind() {
@@ -325,12 +334,16 @@ impl<F: Fs> Db<F> {
             }
         };
         let tree = Arc::new(tree);
+        #[cfg(not(feature = "planted-bugs"))]
+        let _ = bug;
         let shared = Arc::new(Shared {
             committed: Mutex::new(Committed {
                 tree: Arc::clone(&tree),
                 recent: RecentWrites::default(),
             }),
             stopped: OnceLock::new(),
+            #[cfg(feature = "planted-bugs")]
+            bug,
             counters: Counters::default(),
         });
         let committer = Committer {
@@ -339,13 +352,14 @@ impl<F: Fs> Db<F> {
             wal,
             tree,
         };
-        let (requests, received) = mpsc::channel();
+        let requests = Arc::new(Queue::new());
+        let queue = Arc::clone(&requests);
         let thread = std::thread::Builder::new()
             .name(COMMIT_THREAD.into())
-            .spawn(move || committer.run(&received))?;
+            .spawn(move || committer.run(&queue))?;
         Ok(Db {
             shared,
-            requests: Some(requests),
+            requests,
             thread: Some(thread),
             fs: PhantomData,
         })
@@ -392,7 +406,7 @@ impl<F: Fs> Db<F> {
     /// It runs on the commit thread, after the commits that came before it.
     pub fn checkpoint(&self) -> Result<()> {
         self.check_running()?;
-        self.ask(|answer| Request::Checkpoint { answer })
+        self.ask(Request::Checkpoint)
     }
 
     /// Checkpoints and closes the database. Every committed transaction is
@@ -412,12 +426,9 @@ impl<F: Fs> Db<F> {
     /// answer, and waits for the answer. The commit thread answers every
     /// request until the database is dropped, even after it panicked
     /// ([`Committer::guarded`]).
-    fn ask(&self, request: impl FnOnce(SyncSender<Result<()>>) -> Request) -> Result<()> {
-        let (answer, answered) = mpsc::sync_channel(1);
-        let requests = self.requests.as_ref().expect("set until dropped");
-        requests
-            .send(request(answer))
-            .expect("the commit thread runs until the database is dropped");
+    fn ask(&self, request: impl FnOnce(Answer) -> Request) -> Result<()> {
+        let (answer, answered) = mpsc::channel();
+        self.requests.send(request(answer));
         // Counted once it waits there, so a test that sees the count knows
         // the request is queued (design 0021 Q6).
         bump(&self.shared.counters.received, 1);
@@ -432,7 +443,7 @@ impl<F: Fs> Drop for Db<F> {
     /// and their lock is free when this returns. No request can be under
     /// way: each waits for its answer holding a borrow of the database.
     fn drop(&mut self) {
-        drop(self.requests.take());
+        self.requests.close();
         if let Some(thread) = self.thread.take() {
             // A commit thread that panicked already made its requester
             // panic; another panic here, perhaps while unwinding, helps no
@@ -443,6 +454,19 @@ impl<F: Fs> Drop for Db<F> {
 }
 
 impl Shared {
+    /// Whether `bug` is planted. Always false without the `planted-bugs`
+    /// feature, so the code it guards is compiled out.
+    #[inline(always)]
+    fn planted(&self, bug: PlantedBug) -> bool {
+        #[cfg(feature = "planted-bugs")]
+        return self.bug == Some(bug);
+        #[cfg(not(feature = "planted-bugs"))]
+        {
+            let _ = bug;
+            false
+        }
+    }
+
     /// Fails with [`Error::Stopped`] if the engine stopped.
     fn check_running(&self) -> Result<()> {
         match self.stopped.get() {
@@ -475,11 +499,11 @@ impl Shared {
 struct Waiting {
     writes: Writes,
     begun_after: u64,
-    answer: Option<SyncSender<Result<()>>>,
+    answer: Option<Answer>,
 }
 
 impl Waiting {
-    fn new(writes: Writes, begun_after: u64, answer: SyncSender<Result<()>>) -> Self {
+    fn new(writes: Writes, begun_after: u64, answer: Answer) -> Self {
         Waiting {
             writes,
             begun_after,
@@ -510,41 +534,9 @@ enum Verdict {
 impl<File: FsFile> Committer<File> {
     /// Answers requests in the order they came until the database is
     /// dropped. Commits go in batches (issue #28, design 0021): see
-    /// [`take_batch`]. A checkpoint request ends a batch, so it runs after
-    /// the commits sent before it and before those sent after it.
-    fn run(mut self, requests: &Receiver<Request>) {
-        let mut next = requests.recv().ok();
-        while let Some(request) = next.take() {
-            match request {
-                Request::Checkpoint { answer } => {
-                    let result = self.guarded(Self::checkpoint, Error::Io).and_then(|r| r);
-                    let _ = answer.send(result);
-                }
-                Request::Commit {
-                    writes,
-                    begun_after,
-                    answer,
-                } => {
-                    let first = Waiting::new(writes, begun_after, answer);
-                    let (mut batch, after) = take_batch(first, requests);
-                    next = after;
-                    if let Err(e) =
-                        self.guarded(|c| c.commit_batch(&mut batch), Error::OutcomeUnknown)
-                    {
-                        // It panicked, a bug: whoever it did not answer
-                        // may be in the WAL.
-                        let left = batch.iter().filter(|w| w.answer.is_some()).count();
-                        bump(&self.shared.counters.in_doubt, left as u64);
-                        for waiting in &mut batch {
-                            waiting.answer(Err(e.clone()));
-                        }
-                    }
-                }
-            }
-            if next.is_none() {
-                next = requests.recv().ok();
-            }
-        }
+    /// [`commit_queue::serve`].
+    fn run(mut self, requests: &Queue<Request>) {
+        commit_queue::serve(&mut self, requests, MAX_BATCH);
     }
 
     /// Runs `work`, the request being answered. If it panics, a bug, it
@@ -610,6 +602,11 @@ impl<File: FsFile> Committer<File> {
             }
         }
         if let Some(mut next) = next {
+            let early = self.shared.planted(PlantedBug::PublishBeforeSync);
+            if early {
+                let commits = passed.iter().map(|&at| batch[at].writes.clone()).collect();
+                self.publish(Tree::clone(&next), commits);
+            }
             if let Err(e) = self.write(&mut next) {
                 bump(&self.shared.counters.in_doubt, passed.len() as u64);
                 for &at in &passed {
@@ -618,11 +615,19 @@ impl<File: FsFile> Committer<File> {
                 answer_later(batch, later);
                 return;
             }
-            let commits: Vec<Writes> = passed
-                .iter()
-                .map(|&at| std::mem::take(&mut batch[at].writes))
-                .collect();
-            self.publish(next, commits);
+            if self.shared.planted(PlantedBug::AnswerBeforePublish) {
+                for &at in &passed {
+                    batch[at].answer(Ok(()));
+                }
+                std::thread::yield_now();
+            }
+            if !early {
+                let commits: Vec<Writes> = passed
+                    .iter()
+                    .map(|&at| std::mem::take(&mut batch[at].writes))
+                    .collect();
+                self.publish(next, commits);
+            }
             bump(&self.shared.counters.commits, passed.len() as u64);
             for &at in &passed {
                 batch[at].answer(Ok(()));
@@ -654,8 +659,15 @@ impl<File: FsFile> Committer<File> {
         let mut verdicts = Vec::with_capacity(batch.len());
         for waiting in batch {
             let keys = || waiting.writes.keys().map(Vec::as_slice);
-            let in_batch = keys().find(|key| written.contains(key));
+            let skip = self.shared.planted(PlantedBug::SkipConflictCheck);
+            let in_batch = match skip || self.shared.planted(PlantedBug::SkipInBatchConflict) {
+                true => None,
+                false => keys().find(|key| written.contains(key)),
+            };
             let recorded = || {
+                if skip {
+                    return None;
+                }
                 self.shared
                     .committed()
                     .recent
@@ -705,6 +717,19 @@ impl<File: FsFile> Committer<File> {
     /// none of it.
     fn publish(&mut self, next: Tree, commits: Vec<Writes>) {
         let next = Arc::new(next);
+        if self.shared.planted(PlantedBug::SplitPublish) {
+            {
+                let mut committed = self.shared.committed();
+                for writes in commits {
+                    committed.recent.record(writes.into_keys());
+                }
+            }
+            // Wide enough for a transaction to begin in it.
+            std::thread::sleep(std::time::Duration::from_micros(50));
+            self.shared.committed().tree = Arc::clone(&next);
+            self.tree = next;
+            return;
+        }
         {
             let mut committed = self.shared.committed();
             // The keys go down before the new tree goes in: were anything
@@ -742,6 +767,28 @@ impl<File: FsFile> Committer<File> {
     }
 }
 
+impl<File: FsFile> Handler for Committer<File> {
+    type Commit = Waiting;
+    type Checkpoint = Answer;
+
+    fn commit(&mut self, mut batch: Vec<Waiting>) {
+        if let Err(e) = self.guarded(|c| c.commit_batch(&mut batch), Error::OutcomeUnknown) {
+            // It panicked, a bug: whoever it did not answer may be in the
+            // WAL.
+            let left = batch.iter().filter(|w| w.answer.is_some()).count();
+            bump(&self.shared.counters.in_doubt, left as u64);
+            for waiting in &mut batch {
+                waiting.answer(Err(e.clone()));
+            }
+        }
+    }
+
+    fn checkpoint(&mut self, answer: Answer) {
+        let result = self.guarded(Self::checkpoint, Error::Io).and_then(|r| r);
+        let _ = answer.send(result);
+    }
+}
+
 /// Makes a transaction's `writes` in `tree`.
 fn apply(tree: &mut Tree, writes: &Writes) {
     // Take out every key the transaction writes before putting any back,
@@ -762,25 +809,6 @@ fn answer_later(batch: &mut [Waiting], later: Vec<(usize, Error)>) {
     for (at, e) in later {
         batch[at].answer(Err(e));
     }
-}
-
-/// Takes `first` and every commit waiting behind it, without waiting for
-/// more, up to [`MAX_BATCH`]. Returns them, and the request that ended the
-/// batch if it was not a commit.
-fn take_batch(first: Waiting, requests: &Receiver<Request>) -> (Vec<Waiting>, Option<Request>) {
-    let mut batch = vec![first];
-    while batch.len() < MAX_BATCH {
-        match requests.try_recv() {
-            Ok(Request::Commit {
-                writes,
-                begun_after,
-                answer,
-            }) => batch.push(Waiting::new(writes, begun_after, answer)),
-            Ok(other) => return (batch, Some(other)),
-            Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
-        }
-    }
-    (batch, None)
 }
 
 /// Adds `n` to `counter`, one of [`Counters`].
@@ -834,11 +862,15 @@ impl<F: Fs> Txn<'_, F> {
         if let Some(write) = self.writes.get(key) {
             return Ok(write.clone());
         }
+        let latest;
+        let tree = if self.db.shared.planted(PlantedBug::ReadLatest) {
+            latest = Arc::clone(&self.db.shared.committed().tree);
+            &latest
+        } else {
+            &self.snapshot
+        };
         // No lock: the snapshot is the transaction's own.
-        Ok(self
-            .snapshot
-            .find(key)
-            .map(|value| self.snapshot.value(value).into_owned()))
+        Ok(tree.find(key).map(|value| tree.value(value).into_owned()))
     }
 
     /// The entries whose keys are in `range`, in key order, including this
@@ -853,7 +885,13 @@ impl<F: Fs> Txn<'_, F> {
     /// began, or while the scan runs, do not change what it yields. If the
     /// engine stopped, its only item is [`Error::Stopped`].
     pub fn scan<K: AsRef<[u8]>>(&self, range: impl RangeBounds<K>) -> Scan<'_> {
-        let tree = Arc::clone(&self.snapshot);
+        let shared = &self.db.shared;
+        let tree =
+            if shared.planted(PlantedBug::ReadLatest) || shared.planted(PlantedBug::ScanLatest) {
+                Arc::clone(&shared.committed().tree)
+            } else {
+                Arc::clone(&self.snapshot)
+            };
         if let Err(e) = self.db.check_running() {
             return Scan::stopped(tree, e);
         }
@@ -929,11 +967,8 @@ impl<F: Fs> Txn<'_, F> {
         }
         let writes = std::mem::take(&mut self.writes);
         let begun_after = self.begun_after;
-        self.db.ask(|answer| Request::Commit {
-            writes,
-            begun_after,
-            answer,
-        })
+        self.db
+            .ask(|answer| Request::Commit(Waiting::new(writes, begun_after, answer)))
     }
 
     /// Throws away the writes.
