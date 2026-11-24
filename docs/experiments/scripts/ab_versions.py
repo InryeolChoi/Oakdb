@@ -11,7 +11,9 @@ instead, without and with closing first; `begin_busy` times read-only
 transactions while another thread commits, and `threads` commits from 4
 threads at once (issue #27). Each run prints a mean and a median; the
 test uses the mean, except for `threads`, whose median is steadier (see
-`commit_time.rs`).
+`commit_time.rs`). `threads_tput` measures commits a second from several
+threads (issue #28); `commits` is then per thread, at least 300. A mode
+can name its thread count after a colon: `threads:8`, `threads_tput:16`.
 
 Builds `ab_versions/commit_time.rs` as an example against each revision (in
 a temporary git worktree), then runs the two binaries in ABBA order, each
@@ -42,10 +44,22 @@ def build(rev, root):
     return tree, binary
 
 
+MIN_PER_THREAD = 300
+
+
 def once(binary, mode, commits):
+    name, _, threads = mode.partition(":")
+    if name == "threads_tput":
+        commits = max(commits, MIN_PER_THREAD)
+    args = [binary, None, name, str(commits)] + ([threads] if threads else [])
     with tempfile.TemporaryDirectory() as d:
-        out = subprocess.run([binary, d, mode, str(commits)], capture_output=True, text=True, check=True)
-    return float(out.stdout.split()[1 if mode == "threads" else 0])
+        args[1] = d
+        out = subprocess.run(args, capture_output=True, text=True, check=True)
+    return float(out.stdout.split()[1 if name == "threads" else 0])
+
+
+def unit(mode):
+    return "c/s" if mode.startswith("threads_tput") else "us"
 
 
 def mann_whitney(a, b):
@@ -81,7 +95,7 @@ def compare(name, a_bin, b_bin, mode, rounds, commits):
     u, z, p = mann_whitney(a, b)
     lo, hi = ratio_ci(a, b, random.Random(1))
     ratio = statistics.median(b) / statistics.median(a)
-    print(f"{name:<22} {mode:<9} A {statistics.median(a):8.1f} us  B {statistics.median(b):8.1f} us  "
+    print(f"{name:<22} {mode:<15} A {statistics.median(a):8.1f} {unit(mode)}  B {statistics.median(b):8.1f} {unit(mode)}  "
           f"B/A {ratio:.3f} [{lo:.3f}, {hi:.3f}]  U={u:.0f} z={z:.2f} p={p:.2e}")
 
 
