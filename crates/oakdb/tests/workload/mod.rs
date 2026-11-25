@@ -201,6 +201,11 @@ pub fn run<F: Fs>(db: &Db<F>, plan: &Plan) -> History {
             .collect()
     });
     txns.sort_by_key(|t| t.begin);
+    // The commit thread runs a checkpoint after every request queued
+    // before it, so once it is answered every batch has shown, even with
+    // a bug that answers commits before they show: the reads at the end
+    // see every write answered `Ok`.
+    db.checkpoint().unwrap();
     History {
         txns,
         last: Some(last_reads(db, plan.keys)),

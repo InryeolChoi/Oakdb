@@ -20,6 +20,8 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    # 3 clients, 3 preemptions took about 15 minutes on an M3.
+    timeout-minutes: 90
     env:
       RUSTFLAGS: --cfg loom
       LOOM_CLIENTS: ${{ inputs.clients }}
