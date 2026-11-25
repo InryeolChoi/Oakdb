@@ -609,6 +609,97 @@ fn an_open_transaction_is_gone_after_reopening() {
     assert_eq!(committed(&db), vec![]);
 }
 
+/// Fault experiment 0018, part B: the power is cut at every point of a
+/// BEGIN ... COMMIT transaction's commit, and before COMMIT, on the
+/// simulated disk, with torn sectors keeping their old bytes or garbled.
+/// Reopened, the transaction is there whole or not at all, and whole if
+/// COMMIT said so.
+#[test]
+fn a_power_cut_anywhere_in_a_begin_transaction_leaves_it_whole_or_absent() {
+    use oakdb::fs::sim::TornSector;
+
+    const ROWS: i64 = 300;
+    let before = vec![(1, Some(1)), (2, Some(2))];
+    let mut after = vec![(1, Some(100))];
+    after.extend((100..100 + ROWS).map(|id| (id, Some(id))));
+
+    // One transaction of several statements, big enough to split pages.
+    // Returns what COMMIT said, or `None` if the power went before it.
+    let run_one = |fs: &SimFs, cut: Option<u64>, commit: bool| -> Option<bool> {
+        let db = Db::open_with(fs.clone(), "/oak").unwrap();
+        execute(&db, "CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER)").unwrap();
+        execute(&db, "INSERT INTO t VALUES (1, 1), (2, 2)").unwrap();
+        let mut session = Session::new(&db);
+        run(&mut session, "BEGIN");
+        for chunk in (100..100 + ROWS).collect::<Vec<_>>().chunks(100) {
+            let values: Vec<String> = chunk.iter().map(|id| format!("({id}, {id})")).collect();
+            run(
+                &mut session,
+                &format!("INSERT INTO t VALUES {}", values.join(", ")),
+            );
+        }
+        run(&mut session, "UPDATE t SET n = 100 WHERE id = 1");
+        run(&mut session, "DELETE FROM t WHERE id = 2");
+        if let Some(cut) = cut {
+            fs.fail_after(cut);
+        }
+        commit.then(|| session.execute("COMMIT").is_ok())
+    };
+
+    // How many disk operations a whole commit takes.
+    let probe = SimFs::new();
+    let ops_before = {
+        let db = Db::open_with(probe.clone(), "/oak").unwrap();
+        execute(&db, "CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER)").unwrap();
+        execute(&db, "INSERT INTO t VALUES (1, 1), (2, 2)").unwrap();
+        probe.ops()
+    };
+    let probe = SimFs::new();
+    assert_eq!(run_one(&probe, None, true), Some(true));
+    let commit_ops = probe.ops() - ops_before;
+    assert!(commit_ops > 0);
+
+    let mut outcomes = [0usize; 3]; // [absent, whole after Ok, whole without Ok]
+    for seed in 0..6u64 {
+        let torn = if seed % 2 == 0 {
+            TornSector::KeepsOld
+        } else {
+            TornSector::Garbled
+        };
+        // `None` cuts the power while the transaction is still open.
+        let cuts = std::iter::once(None).chain((0..=commit_ops).map(Some));
+        for cut in cuts {
+            let fs = SimFs::new();
+            fs.set_torn_sector(torn);
+            let said = run_one(&fs, cut, cut.is_some());
+            fs.crash(seed);
+            let db = Db::open_with(fs, "/oak").unwrap();
+            let found = committed(&db);
+            let whole = found == after;
+            assert!(
+                whole || found == before,
+                "seed {seed} cut {cut:?}: {} rows",
+                found.len()
+            );
+            if said == Some(true) {
+                assert!(whole, "seed {seed} cut {cut:?}: COMMIT said Ok");
+            }
+            if cut.is_none() {
+                assert!(!whole, "seed {seed}: open transaction survived");
+            }
+            outcomes[match (whole, said) {
+                (false, _) => 0,
+                (true, Some(true)) => 1,
+                (true, _) => 2,
+            }] += 1;
+        }
+    }
+    eprintln!(
+        "commit ops {commit_ops}; absent {}, whole after Ok {}, whole without Ok {}",
+        outcomes[0], outcomes[1], outcomes[2]
+    );
+}
+
 // ------------------------------------------------------- disk failure
 
 #[test]

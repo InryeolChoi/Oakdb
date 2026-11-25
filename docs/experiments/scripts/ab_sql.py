@@ -16,6 +16,10 @@ binaries in ABBA order, each round on a fresh database, and tests per-round
 mean statement times with a two-sided Mann-Whitney U test (normal
 approximation), as `ab_versions.py` does for commits. The A/A control runs
 revision A against itself.
+
+`AB_SQL_EXAMPLE=sql_insert` builds and runs `ab_versions/sql_insert.rs`
+instead, mode `insert`: one INSERT of `statements` rows, its time in
+microseconds (issue #35; docs/benchmarks/0008-two-phase-insert.md).
 """
 import math
 import os
@@ -27,17 +31,18 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SOURCE = os.path.join(HERE, "ab_versions", "sql_point.rs")
+EXAMPLE = os.environ.get("AB_SQL_EXAMPLE", "sql_point")
+SOURCE = os.path.join(HERE, "ab_versions", EXAMPLE + ".rs")
 
 
 def build(rev, root):
     tree = os.path.join(root, rev)
     subprocess.run(["git", "worktree", "add", "-q", "--detach", tree, rev], check=True)
     os.makedirs(os.path.join(tree, "crates/oakdb-sql/examples"), exist_ok=True)
-    shutil.copy(SOURCE, os.path.join(tree, "crates/oakdb-sql/examples/sql_point.rs"))
-    subprocess.run(["cargo", "build", "-q", "--release", "--example", "sql_point", "-p", "oakdb-sql"],
+    shutil.copy(SOURCE, os.path.join(tree, "crates/oakdb-sql/examples", EXAMPLE + ".rs"))
+    subprocess.run(["cargo", "build", "-q", "--release", "--example", EXAMPLE, "-p", "oakdb-sql"],
                    cwd=tree, check=True, env={**os.environ, "CARGO_TARGET_DIR": os.path.join(root, "target-" + rev)})
-    binary = os.path.join(root, "target-" + rev, "release/examples/sql_point")
+    binary = os.path.join(root, "target-" + rev, "release/examples", EXAMPLE)
     return tree, binary
 
 
