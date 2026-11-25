@@ -76,11 +76,30 @@ pub enum SqlError {
     /// 0023, section 4). The session's transaction, if one is open, is
     /// left as it was.
     Transaction(TransactionError),
+    /// The COMMIT of a transaction BEGIN opened lost a conflict with a
+    /// transaction that committed first (design 0023, 5-2): the whole
+    /// transaction was rolled back and has to run again from BEGIN. It
+    /// holds the engine's [`oakdb::Error::Conflict`]. A statement that ran
+    /// on its own gets [`SqlError::Engine`] with that conflict instead;
+    /// [`SqlError::is_conflict`] is true for both.
+    TransactionConflict(oakdb::Error),
     /// The engine failed: a key too long, a failed disk, a stopped engine,
     /// or a conflict with a transaction that committed first
-    /// ([`oakdb::Error::Conflict`]), which ends the transaction: run it
-    /// again.
+    /// ([`oakdb::Error::Conflict`]) in a statement that ran on its own,
+    /// which rolls it back: run it again.
     Engine(oakdb::Error),
+}
+
+impl SqlError {
+    /// Whether this is a conflict with a transaction that committed first:
+    /// nothing was written, and running the statement again, or the
+    /// transaction again from BEGIN, may succeed.
+    pub fn is_conflict(&self) -> bool {
+        matches!(
+            self,
+            SqlError::TransactionConflict(_) | SqlError::Engine(oakdb::Error::Conflict { .. })
+        )
+    }
 }
 
 /// How a transaction command does not fit the session's state.
@@ -146,13 +165,15 @@ impl fmt::Display for SqlError {
             SqlError::Arithmetic(what) => write!(f, "arithmetic error: {what}"),
             SqlError::Corrupt(reason) => write!(f, "stored SQL data is corrupt: {reason}"),
             SqlError::Transaction(e) => write!(f, "transaction error: {e}"),
-            // The engine's text says to begin again; a transaction that
-            // failed at COMMIT has to run again from BEGIN, all of it
-            // (design 0023, Q4).
-            SqlError::Engine(e @ oakdb::Error::Conflict { .. }) => write!(
-                f,
-                "conflict: {e}; the transaction wrote nothing (if it began with BEGIN, \
-                 run it again from BEGIN)"
+            // Not the engine's text, which names an internal key and says
+            // to "begin again" (PR #78 review S2, P3).
+            SqlError::TransactionConflict(_) => f.write_str(
+                "conflict: another transaction changed the same data first, so the whole \
+                 transaction was rolled back; run it again from BEGIN",
+            ),
+            SqlError::Engine(oakdb::Error::Conflict { .. }) => f.write_str(
+                "conflict: another transaction changed the same data first, so this \
+                 statement was rolled back; run it again",
             ),
             SqlError::Engine(e) => write!(f, "engine error: {e}"),
         }
@@ -162,7 +183,7 @@ impl fmt::Display for SqlError {
 impl std::error::Error for SqlError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            SqlError::Engine(e) => Some(e),
+            SqlError::Engine(e) | SqlError::TransactionConflict(e) => Some(e),
             _ => None,
         }
     }

@@ -421,7 +421,10 @@ fn a_create_table_that_fails_inside_begin_leaves_no_trace() {
     run(&mut a, "BEGIN");
     run(&mut a, "INSERT INTO t VALUES (1, 1)");
     let long = "x".repeat(oakdb::MAX_KEY_LEN + 1);
-    let e = fail(&mut a, &format!("CREATE TABLE {long} (id INTEGER PRIMARY KEY)"));
+    let e = fail(
+        &mut a,
+        &format!("CREATE TABLE {long} (id INTEGER PRIMARY KEY)"),
+    );
     assert!(
         matches!(e, SqlError::Engine(oakdb::Error::KeyTooLarge { .. })),
         "{e:?}"

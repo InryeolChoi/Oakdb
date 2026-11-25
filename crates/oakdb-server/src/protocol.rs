@@ -292,6 +292,7 @@ pub fn error_code(e: &SqlError) -> u8 {
         SqlError::DuplicateKey { .. } => code::DUPLICATE_KEY,
         SqlError::TypeMismatch { .. } => code::TYPE_MISMATCH,
         SqlError::Corrupt(_) => code::SQL_CORRUPT,
+        SqlError::TransactionConflict(_) => code::CONFLICT,
         SqlError::Engine(e) => match e {
             oakdb::Error::Conflict { .. } => code::CONFLICT,
             oakdb::Error::KeyTooLarge { .. } => code::KEY_TOO_LARGE,

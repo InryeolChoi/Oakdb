@@ -143,15 +143,15 @@ fn insert<F: Fs>(
         }
         check_row(&table, &row)?;
         let key = row_key(table.id, &row[table.primary_key]);
-        // `get` refuses a key too long. The rows of this INSERT are not
-        // written yet, so `keys` catches one it adds twice.
+        let value = encode_row(&row)?;
+        check_fits(&key, &value)?;
+        // The rows of this INSERT are not written yet, so `keys` catches
+        // one it adds twice.
         if txn.get(&key)?.is_some() || !keys.insert(key.clone()) {
             return Err(SqlError::DuplicateKey {
                 table: table.name.clone(),
             });
         }
-        let value = encode_row(&row)?;
-        oakdb::check_value_len(value.len())?;
         checked.push((key, value));
     }
     // Step 2: nothing is left to fail but the engine itself.
@@ -159,6 +159,15 @@ fn insert<F: Fs>(
         txn.put(key, value)?;
     }
     Ok(Output::Affected(count as u64))
+}
+
+/// Checks a row's key and encoded value against the engine's size rules
+/// before anything is written, so that the writes after cannot fail on
+/// them (design 0023 T5, design 0022 U10). INSERT and UPDATE share it.
+fn check_fits(key: &[u8], value: &[u8]) -> Result<(), SqlError> {
+    oakdb::check_key(key)?;
+    oakdb::check_value_len(value.len())?;
+    Ok(())
 }
 
 /// Checks that each value fits its column: of the column's type or NULL,
@@ -228,11 +237,8 @@ fn update<F: Fs>(
         let new = assign(&assignments, old)?;
         check_row(&table, &new)?;
         let new_key = row_key(table.id, &new[table.primary_key]);
-        // The engine's own size rules, checked now so that the writes
-        // below cannot fail on them (U10).
-        oakdb::check_key(&new_key)?;
         let value = encode_row(&new)?;
-        oakdb::check_value_len(value.len())?;
+        check_fits(&new_key, &value)?;
         changes.push(Change {
             key: key.as_slice(),
             new_key,
@@ -375,7 +381,7 @@ mod tests {
     use crate::execute;
     use crate::parser::{parse_command, Command};
 
-    fn statement(sql: &str) -> Statement {
+    fn parsed(sql: &str) -> Statement {
         match parse_command(sql).unwrap() {
             Command::Run(statement) => statement,
             other => panic!("{other:?} is not a statement"),
@@ -393,7 +399,7 @@ mod tests {
         execute(&db, "INSERT INTO t VALUES (1, 0), (2, 0)").unwrap();
 
         let mut earlier = db.begin();
-        let statement = statement("UPDATE t SET n = n + 1 WHERE id = 1");
+        let statement = parsed("UPDATE t SET n = n + 1 WHERE id = 1");
         assert_eq!(apply(&mut earlier, statement).unwrap(), Output::Affected(1));
         // Another statement commits a write to the same row first.
         execute(&db, "UPDATE t SET n = n WHERE id = 1").unwrap();
@@ -405,7 +411,7 @@ mod tests {
 
         // Different rows do not conflict.
         let mut earlier = db.begin();
-        let statement = statement("DELETE FROM t WHERE id = 2");
+        let statement = parsed("DELETE FROM t WHERE id = 2");
         apply(&mut earlier, statement).unwrap();
         execute(&db, "UPDATE t SET n = 5 WHERE id = 1").unwrap();
         earlier.commit().unwrap();

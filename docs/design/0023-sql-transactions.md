@@ -110,7 +110,7 @@ rollback := ROLLBACK [TRANSACTION]
 | `START TRANSACTION`, `END`, `COMMIT WORK` | "지원 안 함" | 같은 뜻의 다른 이름. 필요하면 나중에 한 줄로 추가 |
 | `BEGIN DEFERRED/IMMEDIATE/EXCLUSIVE` (SQLite), `BEGIN ISOLATION LEVEL ...` (PostgreSQL), `READ ONLY` | "지원 안 함" | Oakdb의 격리 수준은 스냅샷 격리 하나(ADR 0006) |
 | `SAVEPOINT`, `RELEASE`, `ROLLBACK TO` | "지원 안 함" | 3절 선택지 A를 고르면 나중에 열 수 있음 |
-| `BEGIN; INSERT ...` (한 문자열에 둘) | 기존 규칙대로 문법 오류 | 0017: 문자열 하나에 문장 하나 |
+| `BEGIN; INSERT ...` (한 문자열에 둘) | 기존 규칙대로 "지원 안 함"(`Unsupported`, "more than one statement") | 0017·0019: 문자열 하나에 문장 하나. (처음엔 "문법 오류"라고 적었으나 구현과 0019의 규칙은 `Unsupported`다. PR #78 블라인드 테스트가 찾음) |
 
 예약어에 `BEGIN`, `COMMIT`, `ROLLBACK`, `TRANSACTION`을 더한다. 0019 Q1처럼 문법을 가르는 낱말만 예약하는 원칙이고, `TRANSACTION`은 선택이라 예약하지 않고 BEGIN 뒤에서만 낱말로 비교해도 된다(11절 Q1).
 
@@ -197,7 +197,7 @@ B의 약점(규율)은 **테스트로 계약을 만든다**: 10절 모델 테스
 | 문장 오류 (문법, 타입, 중복 키, 넘침, 없는 표…) | 트랜잭션 중 아무 문장 | **계속 열림**, 그 문장만 없던 일 (T5) | 트랜잭션 중 | 고쳐서 다시, 또는 ROLLBACK |
 | `Conflict` | **COMMIT 때만** (엔진은 커밋할 때 충돌을 판정, 0016) | 끝남, 아무것도 안 씀 | 자동 커밋 | **BEGIN부터 다시** (재시도할 만함) |
 | `Conflict` | 자동 커밋 문장 | 그 문장의 txn이 끝남 | 자동 커밋 | 그 문장을 다시 |
-| `OutcomeUnknown` | COMMIT 때 (디스크 실패, 0012·0021 G4) | 끝남, **남았는지 모름** | 자동 커밋. 엔진이 멈춰 다음 문장은 모두 `Stopped` | 서버를 다시 띄우고 확인 |
+| `OutcomeUnknown` | COMMIT 때 (디스크 실패, 0012·0021 G4) | 끝남, **남았는지 모름** | 자동 커밋. 엔진이 멈춰 다음 문장은 모두 `Stopped` (BEGIN도. 엔진의 `Db::check_running`을 먼저 물음, PR #78 리뷰 P4) | 서버를 다시 띄우고 확인 |
 | `Stopped` | 엔진이 멈춘 뒤의 아무 문장, 또는 COMMIT | 문장: 열린 채(어차피 커밋 불가). COMMIT: 끝남 | 문장: 트랜잭션 중. COMMIT: 자동 커밋 | 서버를 다시 띄움 |
 | `Corrupt` (저장된 것을 못 읽음) | 문장 1단계 | 열린 채 (문장 오류와 같음) | 트랜잭션 중 | 대개 ROLLBACK |
 
@@ -208,6 +208,15 @@ SQLite는 일부 오류(디스크 가득 참, I/O 오류, 메모리 부족)에�
 ### 5-2. COMMIT 실패 뒤의 오류 메시지
 
 엔진의 `Conflict` 메시지는 "begin again and retry"다. 트랜잭션 안의 COMMIT에서 났다면 "트랜잭션 전체가 롤백되었으니 **BEGIN부터** 다시"라는 뜻이 분명해야 한다. 오류의 종류는 같게 두고(9절), 세션이 COMMIT에서 난 충돌임을 알 수 있게 메시지만 덧붙일지는 11절 Q4.
+
+> **검증 뒤 바뀜 (PR #78 리뷰 S2·P3, 사용자 결정).** 처음 구현은 모든 `Engine(Conflict)`에 엔진 문장을 그대로 붙이고 "BEGIN으로 시작했다면 BEGIN부터"라고 얼버무렸다. 내부 키(`0x00`, 표 번호 카운터)도 SQL 사용자에게 보였다. 지금은 SQL 문장 하나로 말한다.
+>
+> | 어디서 난 충돌 | 종류 | 메시지 |
+> |---|---|---|
+> | 세션의 COMMIT (BEGIN으로 연 트랜잭션) | `SqlError::TransactionConflict` (새 종류) | `conflict: another transaction changed the same data first, so the whole transaction was rolled back; run it again from BEGIN` |
+> | 자동 커밋 문장 | `SqlError::Engine(Conflict)` (그대로) | `conflict: another transaction changed the same data first, so this statement was rolled back; run it again` |
+>
+> `Display`는 오류 값만 보므로, COMMIT에서만 안내를 붙이려면 값이 그 사실을 들고 있어야 한다. 그래서 종류가 하나 늘었다(Q4의 "종류는 그대로"에서 바뀐 점). 둘 다 `SqlError::is_conflict()`가 참이고 서버 코드는 둘 다 `0x20`이다.
 
 ## 6. 세션을 버리면 (T10)
 
@@ -276,7 +285,7 @@ ADR 0006의 스냅샷 격리 그대로다: 같은 키를 쓴 두 트랜잭션 �
 
 | 오류 | 지금 | 이번 추천 | #34가 정할 것 |
 |---|---|---|---|
-| 충돌 | `SqlError::Engine(Conflict)`, 코드 `0x20` | 그대로 | 독립 종류로 꺼낼지, "다시 시도할 만함" 분류에 넣을지 |
+| 충돌 | `SqlError::Engine(Conflict)`, 코드 `0x20` | 그대로. (검증 뒤: 세션 COMMIT의 충돌만 `SqlError::TransactionConflict`로 나눔, 코드는 같은 `0x20`. 5-2절) | 독립 종류로 꺼낼지, "다시 시도할 만함" 분류에 넣을지 |
 | 트랜잭션 상태에 안 맞는 명령 (4절) | 없음 | **새 종류 하나** (예: `SqlError::Transaction(…)`: 이미 트랜잭션 중 / 트랜잭션이 없음 / `execute`에 BEGIN), 서버 코드는 `0x01–0x1F` 범위에 새로 하나 (#37에서 docs/protocol.md에 추가) | 이름과 세분 |
 | 같은 기본 키 동시 INSERT | 트랜잭션 안이면 COMMIT 때 `Conflict` (#34 이슈 댓글의 W2와 같은 현상) | 그대로 | "중복"과 "충돌"을 어떻게 보여 줄지 |
 
@@ -312,6 +321,6 @@ ADR 0006의 스냅샷 격리 그대로다: 같은 키를 쓴 두 트랜잭션 �
 | Q5 | 2단계에서 `Stopped`가 아닌 오류가 나면 (버그) 트랜잭션을 "실패" 표시해 COMMIT을 막을까 | 안 함, 모델 테스트로 막음 | 3절 2번: 지금 그런 길이 없음. 생기면 그때 A(세이브포인트)로 |
 | Q6 | 오래 열린 트랜잭션(idle in transaction)의 시간 제한 | 이번엔 안 함, #37 이후 | 6절 끝. 접속 쪽 정책이라 서버에서 정할 일 |
 | Q7 | CLI의 프롬프트가 트랜잭션 중임을 보여 줄까 | #37에서 (`in_transaction()`을 이미 냄) | 서버가 상태를 응답에 실어야 함 → 프로토콜 변경이라 #37 몫 |
-| Q8 | 세션이 `Send`여야 하나 | 요구하지 않음 | 접속 스레드 안에서 만들고 버림(ADR 0010). `Txn`이 `Send`면 저절로 따라옴 |
+| Q8 | 세션이 `Send`여야 하나 | 요구하지 않음 | 접속 스레드 안에서 만들고 버림(ADR 0010). `Txn`이 `Send`면 저절로 따라옴. (검증 뒤: 그 사실이 깨지면 바로 알도록 컴파일 시간 확인 테스트 하나를 둠, 리뷰 S5) |
 | Q9 | 트랜잭션 중인 세션이 CREATE TABLE한 표를 `execute(&db, …)`(다른 트랜잭션)에서 쓰면 | `NoSuchTable` | 미커밋이라 안 보임. 7절 표와 같은 규칙 |
-| Q10 | `docs/protocol.md`의 "QUERY 하나 = 트랜잭션 하나" 문장 | #37에서 고침 | 서버가 세션을 쓰기 시작하는 티켓. 이번엔 서버를 건드리지 않음 |
+| Q10 | `docs/protocol.md`의 "QUERY 하나 = 트랜잭션 하나" 문장 | #37에서 고침 | 서버가 세션을 쓰기 시작하는 티켓. 이번엔 서버를 건드리지 않음. (검증 뒤: 새 `TransactionConflict`를 `0x20`에 잇는 한 줄만 더함) |

@@ -18,8 +18,8 @@ use crate::{Output, SqlError};
 ///
 /// Only COMMIT and ROLLBACK end a transaction (T6). A statement that fails
 /// inside one is undone alone and the transaction stays open (T5). COMMIT
-/// ends it even when it fails: on [`oakdb::Error::Conflict`] nothing was
-/// written and the transaction has to run again from BEGIN. Dropping the
+/// ends it even when it fails: on [`SqlError::TransactionConflict`]
+/// nothing was written and the transaction has to run again from BEGIN. Dropping the
 /// session rolls an open transaction back (T10).
 ///
 /// ```
@@ -59,6 +59,10 @@ impl<'db, F: Fs> Session<'db, F> {
                 if self.txn.is_some() {
                     return Err(SqlError::Transaction(TransactionError::AlreadyBegun));
                 }
+                // A stopped engine can commit nothing, so BEGIN says so
+                // at once, as every statement after it would (design 0023,
+                // section 5).
+                self.db.check_running()?;
                 // The transaction reads the database as committed now
                 // (T7).
                 self.txn = Some(self.db.begin());
@@ -66,7 +70,11 @@ impl<'db, F: Fs> Session<'db, F> {
             }
             Command::Commit => {
                 let txn = self.take_open()?;
-                txn.commit()?;
+                txn.commit().map_err(|e| match e {
+                    // All of it, from BEGIN, has to run again (5-2).
+                    e @ oakdb::Error::Conflict { .. } => SqlError::TransactionConflict(e),
+                    e => SqlError::Engine(e),
+                })?;
                 Ok(Output::Done)
             }
             Command::Rollback => {
