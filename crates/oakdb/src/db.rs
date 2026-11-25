@@ -1007,7 +1007,11 @@ impl Iterator for Scan<'_> {
     }
 }
 
-fn check_value_len(len: usize) -> Result<()> {
+/// Checks that a value of `len` bytes fits: at most [`MAX_VALUE_LEN`],
+/// or [`Error::ValueTooLarge`]. [`Txn::put`] checks this itself; a caller
+/// that wants to refuse a value before writing anything (the SQL layer,
+/// which checks a whole statement first) calls it to apply the same rule.
+pub fn check_value_len(len: usize) -> Result<()> {
     if len > MAX_VALUE_LEN {
         return Err(Error::ValueTooLarge {
             len,
@@ -1017,7 +1021,11 @@ fn check_value_len(len: usize) -> Result<()> {
     Ok(())
 }
 
-fn check_key(key: &[u8]) -> Result<()> {
+/// Checks that `key` fits: at most [`MAX_KEY_LEN`] bytes, or
+/// [`Error::KeyTooLarge`]. [`Txn::get`], [`Txn::put`] and [`Txn::delete`]
+/// check this themselves; it is public so that a caller can apply the
+/// same rule before writing anything.
+pub fn check_key(key: &[u8]) -> Result<()> {
     if key.len() > MAX_KEY_LEN {
         return Err(Error::KeyTooLarge {
             len: key.len(),
