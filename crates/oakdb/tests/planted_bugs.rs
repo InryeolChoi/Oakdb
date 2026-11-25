@@ -113,7 +113,9 @@ fn recording_keys_and_swapping_the_tree_apart_is_found_as_lost_updates() {
 fn answering_before_the_batch_shows_is_found_as_stale_reads() {
     // Only a thread that begins again before the batch shows makes it.
     let seeds = seeds(&(1..=10).collect::<Vec<_>>());
-    let also = [Kind::NonRepeatableRead];
+    // The last commit's answer can come before it shows, and the reads at
+    // the end then miss it: a write answered `Ok` that is not there.
+    let also = [Kind::NonRepeatableRead, Kind::LostUpdate];
     let found = detections(
         PlantedBug::AnswerBeforePublish,
         &[Kind::StaleRead],
