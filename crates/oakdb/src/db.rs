@@ -110,6 +110,15 @@ pub struct Stats {
     /// Commits answered [`Error::OutcomeUnknown`]: those that passed the
     /// conflict check in the batch whose write or sync failed.
     pub in_doubt: u64,
+    /// Transactions open now: begun and not yet committed, rolled back or
+    /// dropped (issue #37, design 0025 Q7). Each holds the tree it began
+    /// on in memory.
+    pub open_transactions: u64,
+    /// Commits whose written keys are kept now because a transaction open
+    /// now began before them: the size of the table conflicts are checked
+    /// against. It grows with every commit while the oldest open
+    /// transaction lives, and falls back once it ends.
+    pub kept_commits: u64,
 }
 
 /// An open database. Threads can share it: it is `Send` and `Sync`.
@@ -169,6 +178,8 @@ impl Counters {
             wal_syncs: self.wal_syncs.load(Ordering::Relaxed),
             largest_batch: self.largest_batch.load(Ordering::Relaxed),
             in_doubt: self.in_doubt.load(Ordering::Relaxed),
+            open_transactions: 0,
+            kept_commits: 0,
         }
     }
 }
@@ -386,9 +397,15 @@ impl<F: Fs> Db<F> {
         self.shared.committed().tree.meta().page_count
     }
 
-    /// What the commit thread did since the database was opened.
+    /// What the commit thread did since the database was opened, and how
+    /// many transactions are open now with the commits kept for them. The
+    /// last two are read under the tree's lock, taken for a moment.
     pub fn stats(&self) -> Stats {
-        self.shared.counters.stats()
+        let mut stats = self.shared.counters.stats();
+        let committed = self.shared.committed();
+        stats.open_transactions = committed.recent.open_transactions() as u64;
+        stats.kept_commits = committed.recent.kept_commits() as u64;
+        stats
     }
 
     /// Moves the pages the WAL holds to the data file and empties the WAL,

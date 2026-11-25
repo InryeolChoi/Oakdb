@@ -844,3 +844,46 @@ fn a_session_can_move_to_another_thread() {
     assert_send::<Session<'static, SimFs>>();
     assert_send::<Session<'static, oakdb::fs::StdFs>>();
 }
+
+#[test]
+fn transaction_command_names_only_what_a_session_would_run_as_one() {
+    // A client works out whether it is in a transaction from what it sent
+    // (issue #37, design 0025 Q3): only a statement the session would run
+    // as BEGIN, COMMIT or ROLLBACK counts, so one the parser refuses does
+    // not end the transaction on the client while it stays open on the
+    // server.
+    use oakdb_sql::{transaction_command, TransactionCommand};
+    assert_eq!(transaction_command("BEGIN"), Some(TransactionCommand::Begin));
+    assert_eq!(
+        transaction_command("  begin transaction ;"),
+        Some(TransactionCommand::Begin)
+    );
+    assert_eq!(
+        transaction_command("Commit"),
+        Some(TransactionCommand::Commit)
+    );
+    assert_eq!(
+        transaction_command("ROLLBACK TRANSACTION;"),
+        Some(TransactionCommand::Rollback)
+    );
+    for not_one in [
+        "COMMIT now",
+        "ROLLBACK TO s",
+        "BEGIN IMMEDIATE",
+        "BEGIN; COMMIT",
+        "SELECT 1",
+        "INSERT INTO t VALUES (1, 2)",
+        "",
+        "'unterminated",
+    ] {
+        assert_eq!(transaction_command(not_one), None, "{not_one}");
+    }
+    // The same strings, run on a session in a transaction, keep it open.
+    let db = with_t();
+    let mut session = Session::new(&db);
+    run(&mut session, "BEGIN");
+    for not_one in ["COMMIT now", "ROLLBACK TO s", "BEGIN IMMEDIATE"] {
+        fail(&mut session, not_one);
+        assert!(session.in_transaction(), "{not_one}");
+    }
+}
