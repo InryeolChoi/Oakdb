@@ -4,13 +4,13 @@
 use std::collections::HashSet;
 
 use oakdb::fs::Fs;
-use oakdb::{Db, Txn, MAX_KEY_LEN, MAX_VALUE_LEN};
+use oakdb::{Db, Txn};
 
 use crate::catalog::{self, Column, Table};
 use crate::encoding::{decode_row, encode_row, row_key, row_range};
-use crate::expr::{Expr, Scalar, Truth};
+use crate::expr::{Expr, Truth};
 use crate::parser::{ColumnDef, Statement};
-use crate::planner::{self, Plan};
+use crate::planner::{self, Assignment, Plan};
 use crate::{Output, SqlError, Value};
 
 /// Runs `statement` in a transaction of its own, committing it if the
@@ -122,19 +122,7 @@ fn insert<F: Fs>(
     // Which column each value of a row goes to.
     let targets: Vec<usize> = match columns {
         None => (0..table.columns.len()).collect(),
-        Some(names) => {
-            let mut targets = Vec::with_capacity(names.len());
-            for name in &names {
-                let column = table
-                    .column(name)
-                    .ok_or_else(|| table.no_such_column(name))?;
-                if targets.contains(&column) {
-                    return Err(SqlError::DuplicateColumn(name.clone()));
-                }
-                targets.push(column);
-            }
-            targets
-        }
+        Some(names) => table.resolve_columns(names.iter().map(String::as_str))?,
     };
     // Step 1: every row is checked before any is written, so a row that
     // fails leaves none of the statement's rows behind (design 0023, T5).
@@ -163,13 +151,7 @@ fn insert<F: Fs>(
             });
         }
         let value = encode_row(&row)?;
-        if value.len() > MAX_VALUE_LEN {
-            return Err(oakdb::Error::ValueTooLarge {
-                len: value.len(),
-                max: MAX_VALUE_LEN,
-            }
-            .into());
-        }
+        oakdb::check_value_len(value.len())?;
         checked.push((key, value));
     }
     // Step 2: nothing is left to fail but the engine itself.
@@ -183,19 +165,8 @@ fn insert<F: Fs>(
 /// and never NULL in the primary key. Also refuses a value the row
 /// encoding cannot hold, which the engine would refuse anyway.
 fn check_row(table: &Table, row: &[Value]) -> Result<(), SqlError> {
-    for (i, (column, value)) in table.columns.iter().zip(row).enumerate() {
-        let found = value.column_type();
-        let fits = match found {
-            None => i != table.primary_key,
-            Some(found) => found == column.column_type,
-        };
-        if !fits {
-            return Err(SqlError::TypeMismatch {
-                column: column.name.clone(),
-                expected: column.column_type,
-                found,
-            });
-        }
+    for (column, value) in row.iter().enumerate() {
+        table.check_fits(column, value.column_type())?;
     }
     Ok(())
 }
@@ -221,7 +192,7 @@ fn select<F: Fs>(
     let plan = planner::plan(&table, filter)?;
     let rows = matching(txn, &table, &plan)?
         .into_iter()
-        .map(|(_, row)| selected.iter().map(|&i| row[i].clone()).collect())
+        .map(|matched| selected.iter().map(|&i| matched.row[i].clone()).collect())
         .collect();
     Ok(Output::Rows {
         columns: selected
@@ -253,25 +224,15 @@ fn update<F: Fs>(
 
     // Step 1: the new rows, each computed from its old row only (U7).
     let mut changes = Vec::with_capacity(matched.len());
-    for (key, old) in &matched {
+    for Matched { key, row: old } in &matched {
         let new = assign(&assignments, old)?;
         check_row(&table, &new)?;
         let new_key = row_key(table.id, &new[table.primary_key]);
-        if new_key.len() > MAX_KEY_LEN {
-            return Err(oakdb::Error::KeyTooLarge {
-                len: new_key.len(),
-                max: MAX_KEY_LEN,
-            }
-            .into());
-        }
+        // The engine's own size rules, checked now so that the writes
+        // below cannot fail on them (U10).
+        oakdb::check_key(&new_key)?;
         let value = encode_row(&new)?;
-        if value.len() > MAX_VALUE_LEN {
-            return Err(oakdb::Error::ValueTooLarge {
-                len: value.len(),
-                max: MAX_VALUE_LEN,
-            }
-            .into());
-        }
+        oakdb::check_value_len(value.len())?;
         changes.push(Change {
             key: key.as_slice(),
             new_key,
@@ -313,9 +274,9 @@ impl Change<'_> {
 
 /// The row `old` becomes under the SET list: every expression reads the
 /// old row, so `SET a = b, b = a` swaps them.
-fn assign(assignments: &[(usize, Scalar)], old: &[Value]) -> Result<Vec<Value>, SqlError> {
+fn assign(assignments: &[Assignment], old: &[Value]) -> Result<Vec<Value>, SqlError> {
     let mut new = old.to_vec();
-    for (column, value) in assignments {
+    for Assignment { column, value } in assignments {
         new[*column] = value.eval(old)?.into_owned();
     }
     Ok(new)
@@ -362,19 +323,25 @@ fn delete<F: Fs>(
     let table = catalog::get(txn, table)?;
     let plan = planner::plan(&table, filter)?;
     let matched = matching(txn, &table, &plan)?;
-    for (key, _) in &matched {
+    for Matched { key, .. } in &matched {
         txn.delete(key)?;
     }
     Ok(Output::Affected(matched.len() as u64))
 }
 
-/// A row read, with the engine key it was read under.
-type Matched = (Vec<u8>, Vec<Value>);
+/// A row WHERE matched.
+struct Matched {
+    /// The engine key it was read under.
+    key: Vec<u8>,
+    /// Its values, one per column.
+    row: Vec<Value>,
+}
 
 /// The rows in the plan's range that its filter makes true, each with the
 /// engine key it was read under, in key order. UPDATE and DELETE write to
 /// that key rather than one made again from the row, so that a row whose
-/// stored key and primary key disagree is never left behind.
+/// stored key and primary key disagree is never left behind. They are all
+/// held in memory at once (design 0022, section 1-1).
 fn matching<F: Fs>(txn: &Txn<'_, F>, table: &Table, plan: &Plan) -> Result<Vec<Matched>, SqlError> {
     let mut rows = Vec::new();
     for entry in txn.scan(row_range(table.id, plan.range.clone())) {
@@ -395,7 +362,7 @@ fn matching<F: Fs>(txn: &Txn<'_, F>, table: &Table, plan: &Plan) -> Result<Vec<M
                 continue;
             }
         }
-        rows.push((key, row));
+        rows.push(Matched { key, row });
     }
     Ok(rows)
 }

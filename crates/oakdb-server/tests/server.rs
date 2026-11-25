@@ -721,3 +721,31 @@ fn a_where_nested_twenty_thousand_deep_gets_an_error_on_a_connection_thread_and_
     ));
     raw(addr);
 }
+
+#[test]
+fn update_and_delete_return_their_row_counts_over_the_connection() {
+    // Issue #33, PR #73 review P4: the count goes through as Affected.
+    let dir = tempfile::tempdir().unwrap();
+    let mut client = connect(start_on(dir.path()));
+    client
+        .query("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
+        .unwrap();
+    client
+        .query("INSERT INTO t VALUES (1, 'a'), (2, 'b'), (3, 'c')")
+        .unwrap();
+    assert_eq!(
+        client.query("UPDATE t SET id = id + 1, v = 'x'").unwrap(),
+        Output::Affected(3)
+    );
+    assert_eq!(
+        client.query("DELETE FROM t WHERE id >= 3").unwrap(),
+        Output::Affected(2)
+    );
+    assert_eq!(
+        client.query("SELECT * FROM t").unwrap(),
+        Output::Rows {
+            columns: vec!["id".into(), "v".into()],
+            rows: vec![vec![Value::Integer(2), Value::Text("x".into())]],
+        }
+    );
+}
