@@ -5,7 +5,7 @@
 //!     cargo build --release -p oakdb-server --bin oakdb --example multi_client_faults
 //!     target/release/examples/multi_client_faults kill [rounds]
 //!     target/release/examples/multi_client_faults sigstop
-//!     target/release/examples/multi_client_faults memory [commits]
+//!     target/release/examples/multi_client_faults memory held|none [commits]
 //!     target/release/examples/multi_client_faults write-set [mib]
 //!
 //! `kill` runs a real `oakdb serve` on a real directory and SIGKILLs it
@@ -34,9 +34,9 @@ fn main() {
     match args.first().map(String::as_str) {
         Some("kill") => kill(n(1, 20)),
         Some("sigstop") => sigstop(),
-        Some("memory") => memory(n(1, 100_000)),
+        Some("memory") => memory(args.get(1).map(String::as_str) == Some("held"), n(2, 100_000)),
         Some("write-set") => write_set(n(1, 64)),
-        _ => eprintln!("usage: multi_client_faults kill [rounds] | sigstop | memory [commits] | write-set [mib]"),
+        _ => eprintln!("usage: multi_client_faults kill [rounds] | sigstop | memory held|none [commits] | write-set [mib]"),
     }
 }
 
@@ -120,8 +120,8 @@ const ROWS_PER_TXN: u64 = 10;
 /// a random moment and started again on the same directory.
 fn kill(rounds: u64) {
     let mut rng = Rng(0x0025);
-    let mut totals = [0u64; 4];
-    println!("round | acked | +1 in flight present | partial | open txn rows | ok");
+    let mut totals = [0u64; 5];
+    println!("round | acked | in flight | of those present | partial | open txn rows | ok");
     for round in 0..rounds {
         let dir = tempfile::tempdir().unwrap();
         let (mut server, port) = spawn_server(dir.path(), &[]);
@@ -188,11 +188,13 @@ fn kill(rounds: u64) {
         let (mut server, port) = spawn_server(dir.path(), &[]);
         let mut client = connect(("127.0.0.1", port));
         let mut acked = 0;
+        let mut flying = 0;
         let mut extra = 0;
         let mut partial = 0;
         for (w, p) in progress.iter().enumerate() {
             let p = *p.lock().unwrap();
             acked += p.acknowledged;
+            flying += u64::from(p.in_flight);
             // Rows of each transaction this writer may have committed.
             let mut k = 0u64;
             loop {
@@ -217,17 +219,20 @@ fn kill(rounds: u64) {
         }
         let open_rows = count(&mut client, "SELECT id FROM t WHERE w = -1");
         let ok = partial == 0 && open_rows == 0;
-        println!("{round:>5} | {acked:>5} | {extra:>20} | {partial:>7} | {open_rows:>13} | {ok}");
+        println!(
+            "{round:>5} | {acked:>5} | {flying:>9} | {extra:>16} | {partial:>7} | {open_rows:>13} | {ok}"
+        );
         totals[0] += acked;
-        totals[1] += extra;
-        totals[2] += partial;
-        totals[3] += open_rows as u64;
+        totals[1] += flying;
+        totals[2] += extra;
+        totals[3] += partial;
+        totals[4] += open_rows as u64;
         let _ = server.kill();
         let _ = server.wait();
     }
     println!(
-        "total | {:>5} | {:>20} | {:>7} | {:>13} |",
-        totals[0], totals[1], totals[2], totals[3]
+        "total | {:>5} | {:>9} | {:>16} | {:>7} | {:>13} |",
+        totals[0], totals[1], totals[2], totals[3], totals[4]
     );
 }
 
@@ -333,12 +338,12 @@ fn rss_kib() -> u64 {
     String::from_utf8_lossy(&out.stdout).trim().parse().unwrap()
 }
 
-/// One transaction stays open while another connection commits
-/// `commits` single-row UPDATEs spread over 10 000 rows; then it ends.
-/// The same again with no transaction open, for comparison.
-fn memory(commits: u64) {
-    println!("case | step | RSS MiB | open | kept commits");
-    for hold in [true, false] {
+/// One transaction stays open (`hold`) or none does while another
+/// connection commits `commits` single-row UPDATEs spread over 10 000
+/// rows; then it ends. The in-memory file system grows with the WAL in
+/// both cases, so the two runs, each a process of its own, are compared.
+fn memory(hold: bool, commits: u64) {
+    {
         let (addr, monitor) = in_process(Config::default());
         let mut writer = connect(addr);
         writer
