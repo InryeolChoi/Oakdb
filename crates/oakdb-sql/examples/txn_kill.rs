@@ -49,8 +49,14 @@ fn run(session: &mut Session<'_>, sql: &str) {
 fn insert_rows(session: &mut Session<'_>, ids: std::ops::Range<i64>, n: impl Fn(i64) -> i64) {
     let ids: Vec<i64> = ids.collect();
     for chunk in ids.chunks(1000) {
-        let values: Vec<String> = chunk.iter().map(|&id| format!("({id}, {})", n(id))).collect();
-        run(session, &format!("INSERT INTO t VALUES {}", values.join(", ")));
+        let values: Vec<String> = chunk
+            .iter()
+            .map(|&id| format!("({id}, {})", n(id)))
+            .collect();
+        run(
+            session,
+            &format!("INSERT INTO t VALUES {}", values.join(", ")),
+        );
     }
 }
 
@@ -85,7 +91,11 @@ fn pairs(db: &Db, sql: &str) -> Vec<(i64, i64)> {
 fn check_open(dir: &str) {
     let db = Db::open(dir).expect("reopen");
     let found = pairs(&db, "SELECT id, n FROM t");
-    assert_eq!(found, vec![(1, 1), (2, 2)], "a trace of the open transaction");
+    assert_eq!(
+        found,
+        vec![(1, 1), (2, 2)],
+        "a trace of the open transaction"
+    );
     println!("ok: t holds rows 1 and 2 as committed, nothing of the open transaction");
 }
 
@@ -95,7 +105,7 @@ fn run_loop(dir: &str) {
     execute(&db, "CREATE TABLE c (id INTEGER PRIMARY KEY, n INTEGER)").expect("CREATE");
     execute(&db, "INSERT INTO c VALUES (0, -1)").expect("INSERT");
     let mut session = Session::new(&db);
-    for k in 0.. {
+    for k in 0..=i64::MAX {
         run(&mut session, "BEGIN");
         insert_rows(&mut session, k * PER_TXN..(k + 1) * PER_TXN, |_| k);
         run(&mut session, &format!("UPDATE c SET n = {k} WHERE id = 0"));
@@ -116,5 +126,8 @@ fn check_loop(dir: &str, last: i64) {
     for (id, n) in &rows {
         assert_eq!(*n, id / PER_TXN, "row {id}");
     }
-    println!("ok: {} transactions whole (last acknowledged {last}), none partial", m + 1);
+    println!(
+        "ok: {} transactions whole (last acknowledged {last}), none partial",
+        m + 1
+    );
 }
