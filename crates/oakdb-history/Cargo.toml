@@ -1,0 +1,11 @@
+[package]
+name = "oakdb-history"
+version = "0.1.0"
+description = "Checks a history of transactions for snapshot isolation anomalies"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]

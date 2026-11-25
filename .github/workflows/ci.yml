@@ -20,4 +20,30 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy -p oakdb --all-targets --features planted-bugs -- -D warnings
       - run: cargo test --all
+      # The history checker finds each bug planted in the engine (#29).
+      - run: cargo test -p oakdb --features planted-bugs --test planted_bugs
+
+  # Every order the commit queue's threads can take, in a small model:
+  # 2 clients, at most 2 preemptions (design 0024 V10). The larger model
+  # runs by hand in loom.yml.
+  loom:
+    name: loom (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    env:
+      RUSTFLAGS: --cfg loom
+      LOOM_CLIENTS: 2
+      LOOM_MAX_PREEMPTIONS: 2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: loom
+      - run: cargo test -p oakdb --release --lib loom -- --nocapture

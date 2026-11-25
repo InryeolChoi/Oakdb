@@ -6,12 +6,15 @@
 
 mod checkpoint;
 mod checksum;
+mod commit_queue;
 mod conflict;
 mod db;
 mod error;
 pub mod fs;
 mod meta;
 mod page;
+mod planted;
+mod sync;
 mod tree;
 mod wal;
 
@@ -20,4 +23,6 @@ pub use db::{
     MAX_BATCH,
 };
 pub use error::{Error, Result, MAX_ENTRY_LEN, MAX_KEY_LEN, MAX_VALUE_LEN};
+#[cfg(feature = "planted-bugs")]
+pub use planted::PlantedBug;
 pub use wal::WAL_FILE;
