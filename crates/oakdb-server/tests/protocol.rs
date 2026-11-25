@@ -4,10 +4,10 @@
 //! decoder panic.
 
 use oakdb_server::protocol::{
-    closes, code, command, read_frame, write_frame, DecodeError, Frame, FrameError, Request,
-    Response, MAX_FRAME_LEN, VERSION,
+    closes, code, command, error_code, read_frame, write_frame, DecodeError, Frame, FrameError,
+    Request, Response, MAX_FRAME_LEN, VERSION,
 };
-use oakdb_sql::{Output, Value};
+use oakdb_sql::{Output, SqlError, Value};
 use proptest::prelude::*;
 
 fn bytes_of(frame: &Frame) -> Vec<u8> {
@@ -285,4 +285,17 @@ fn only_codes_that_break_the_conversation_close_the_connection() {
     ] {
         assert!(!closes(c), "0x{c:02x}");
     }
+}
+
+/// A conflict is code 0x20 ("run it again") whether a statement that ran on
+/// its own lost it or the COMMIT of a transaction BEGIN opened did (PR #78
+/// review S2).
+#[test]
+fn both_kinds_of_conflict_carry_the_conflict_code() {
+    let conflict = || oakdb::Error::Conflict { key: vec![0] };
+    assert_eq!(error_code(&SqlError::Engine(conflict())), code::CONFLICT);
+    assert_eq!(
+        error_code(&SqlError::TransactionConflict(conflict())),
+        code::CONFLICT
+    );
 }
