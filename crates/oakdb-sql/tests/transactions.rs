@@ -853,7 +853,10 @@ fn transaction_command_names_only_what_a_session_would_run_as_one() {
     // not end the transaction on the client while it stays open on the
     // server.
     use oakdb_sql::{transaction_command, TransactionCommand};
-    assert_eq!(transaction_command("BEGIN"), Some(TransactionCommand::Begin));
+    assert_eq!(
+        transaction_command("BEGIN"),
+        Some(TransactionCommand::Begin)
+    );
     assert_eq!(
         transaction_command("  begin transaction ;"),
         Some(TransactionCommand::Begin)

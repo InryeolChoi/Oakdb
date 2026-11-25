@@ -1048,6 +1048,7 @@ fn a_strict_allowlist_turns_a_loopback_client_away_with_0x46_before_hello() {
             port: 0,
             allow: Allowlist::strict(vec![]),
             max_connections: 8,
+            ..Config::default()
         },
     )
     .unwrap();

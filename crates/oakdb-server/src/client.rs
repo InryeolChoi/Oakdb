@@ -5,9 +5,9 @@ use std::io::{self, BufReader};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
-use oakdb_sql::Output;
+use oakdb_sql::{transaction_command, Output, TransactionCommand};
 
-use crate::protocol::{read_frame, write_frame, FrameError, Request, Response, VERSION};
+use crate::protocol::{closes, read_frame, write_frame, FrameError, Request, Response, VERSION};
 
 /// Why a request got no result.
 #[derive(Debug)]
@@ -51,6 +51,9 @@ impl From<io::Error> for ClientError {
 pub struct Client {
     reader: BufReader<TcpStream>,
     writer: TcpStream,
+    /// Whether the server's session for this connection has a transaction
+    /// open, worked out from what was sent and answered.
+    in_transaction: bool,
 }
 
 impl Client {
@@ -63,6 +66,7 @@ impl Client {
         let mut client = Client {
             reader: BufReader::new(writer.try_clone()?),
             writer,
+            in_transaction: false,
         };
         match client.call(&Request::Hello { version: VERSION })? {
             Response::Ready { version: VERSION } => Ok(client),
@@ -79,14 +83,39 @@ impl Client {
         self.writer.set_write_timeout(timeout)
     }
 
-    /// Runs one SQL statement on the server.
+    /// Runs one SQL statement on the server. BEGIN, COMMIT and ROLLBACK
+    /// open and end a transaction that lasts across calls; see
+    /// [`Client::in_transaction`].
     pub fn query(&mut self, sql: &str) -> Result<Output, ClientError> {
-        match self.call(&Request::Query(sql.to_string()))? {
+        let result = self.call(&Request::Query(sql.to_string()));
+        self.in_transaction = match (&result, transaction_command(sql)) {
+            // The connection is over, and with it the transaction.
+            (Err(ClientError::Server { code, .. }), _) if closes(*code) => false,
+            (Err(ClientError::Io(_) | ClientError::Closed | ClientError::Protocol(_)), _) => false,
+            (Ok(Response::Done), Some(TransactionCommand::Begin)) => true,
+            // COMMIT and ROLLBACK end it whatever the answer: a conflict
+            // or a failed sync ends it too, and one sent with none open
+            // found none.
+            (_, Some(TransactionCommand::Commit | TransactionCommand::Rollback)) => false,
+            // A BEGIN refused, or any other statement: no change.
+            _ => self.in_transaction,
+        };
+        match result? {
             Response::Rows { columns, rows } => Ok(Output::Rows { columns, rows }),
             Response::Affected(n) => Ok(Output::Affected(n)),
             Response::Done => Ok(Output::Done),
             other => Err(unexpected(&other)),
         }
+    }
+
+    /// Whether this connection has a transaction open on the server: a
+    /// BEGIN was answered `DONE`, and no COMMIT or ROLLBACK was sent since
+    /// (issue #37, design 0025 Q3). The client works it out from what it
+    /// sent and what came back, by the protocol's rule; it asks the server
+    /// nothing. Once the connection breaks, it is `false`: the server
+    /// rolls back the transaction of a connection that ends.
+    pub fn in_transaction(&self) -> bool {
+        self.in_transaction
     }
 
     /// Sends `request` and reads its response; an `ERROR` response becomes
