@@ -4,16 +4,21 @@
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use oakdb::Db;
 use oakdb_server::allow::{Allowlist, Ipv4Net};
 use oakdb_server::client::Client;
-use oakdb_server::server::{Config, Server, DEFAULT_MAX_CONNECTIONS, DEFAULT_PORT};
+use oakdb_server::server::{
+    Config, Server, DEFAULT_IDLE_IN_TRANSACTION_TIMEOUT, DEFAULT_LONG_TRANSACTION_WARNING,
+    DEFAULT_MAX_CONNECTIONS, DEFAULT_PORT,
+};
 
 const USAGE: &str = "\
 usage:
   oakdb serve --data <dir> [--port <n>] [--allow <ip or cidr>]... [--allow-file <file>]
-              [--max-connections <n>]
+              [--max-connections <n>] [--idle-in-transaction-timeout <s>]
+              [--idle-timeout <s>] [--warn-transaction-age <s>]
   oakdb cli [--host <host>] [--port <n>]
 
 serve
@@ -22,6 +27,14 @@ serve
   --allow <ip or cidr>     let clients from this IPv4 address or block in; repeatable
   --allow-file <file>      the same, one entry per line, # starts a comment
   --max-connections <n>    connections taken at once (default 512)
+  --idle-in-transaction-timeout <s>
+                           roll back and close a connection that waits this
+                           many seconds for its next statement inside a
+                           transaction (default 60, 0 for never)
+  --idle-timeout <s>       the same outside a transaction (default 0, never)
+  --warn-transaction-age <s>
+                           log a warning when a transaction stays open this
+                           many seconds (default 300, 0 for never)
 
   With no allowlist the server listens on 127.0.0.1 and only local clients
   connect. Loopback clients are always let in. An entry outside loopback
@@ -92,16 +105,31 @@ fn number<T: std::str::FromStr>(flag: &str, value: &str) -> Result<T, Usage> {
         .map_err(|_| Usage(format!("{flag} {value:?} is not a number")))
 }
 
+/// A number of seconds, fractions allowed (`0.5`).
+fn seconds(flag: &str, value: &str) -> Result<Duration, Usage> {
+    value
+        .parse::<f64>()
+        .ok()
+        .and_then(|s| Duration::try_from_secs_f64(s).ok())
+        .ok_or_else(|| Usage(format!("{flag} {value:?} is not a number of seconds")))
+}
+
 fn serve(args: &[String]) -> Result<ExitCode, Usage> {
     let mut data: Option<PathBuf> = None;
     let mut port = DEFAULT_PORT;
     let mut max_connections = DEFAULT_MAX_CONNECTIONS;
     let mut nets: Vec<Ipv4Net> = Vec::new();
+    let mut idle_in_transaction = DEFAULT_IDLE_IN_TRANSACTION_TIMEOUT;
+    let mut idle = Duration::ZERO;
+    let mut warn_age = DEFAULT_LONG_TRANSACTION_WARNING;
     for (flag, value) in flags(args)? {
         match flag {
             "--data" => data = Some(PathBuf::from(value)),
             "--port" => port = number(flag, value)?,
             "--max-connections" => max_connections = number(flag, value)?,
+            "--idle-in-transaction-timeout" => idle_in_transaction = seconds(flag, value)?,
+            "--idle-timeout" => idle = seconds(flag, value)?,
+            "--warn-transaction-age" => warn_age = seconds(flag, value)?,
             "--allow" => match value.parse() {
                 Ok(net) => nets.push(net),
                 Err(reason) => return fail(format!("--allow {reason}")),
@@ -136,6 +164,10 @@ fn serve(args: &[String]) -> Result<ExitCode, Usage> {
         port,
         allow,
         max_connections,
+        // Zero is no limit; the server reads it so.
+        idle_in_transaction_timeout: Some(idle_in_transaction),
+        idle_timeout: Some(idle),
+        long_transaction_warning: Some(warn_age),
     };
     let server = match Server::bind(db, config) {
         Ok(server) => server,

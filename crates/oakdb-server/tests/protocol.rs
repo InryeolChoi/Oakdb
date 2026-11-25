@@ -272,12 +272,15 @@ fn only_codes_that_break_the_conversation_close_the_connection() {
         code::HANDSHAKE,
         code::TOO_MANY_CONNECTIONS,
         code::NOT_ALLOWED,
+        code::IDLE_IN_TRANSACTION,
+        code::IDLE,
         code::INTERNAL,
     ] {
         assert!(closes(c), "0x{c:02x}");
     }
     for c in [
         code::SYNTAX,
+        code::TRANSACTION_STATE,
         code::CONFLICT,
         code::STOPPED,
         code::NOT_UTF8,
@@ -297,5 +300,23 @@ fn both_kinds_of_conflict_carry_the_conflict_code() {
     assert_eq!(
         error_code(&SqlError::TransactionConflict(conflict())),
         code::CONFLICT
+    );
+}
+
+/// BEGIN twice, or COMMIT or ROLLBACK with nothing open, has a code of its
+/// own (issue #37, design 0025 Q2); the session-only error a lone
+/// statement gives stays a plain statement error.
+#[test]
+fn transaction_state_errors_carry_0x0b() {
+    use oakdb_sql::TransactionError;
+    for e in [TransactionError::AlreadyBegun, TransactionError::NotBegun] {
+        assert_eq!(
+            error_code(&SqlError::Transaction(e)),
+            code::TRANSACTION_STATE
+        );
+    }
+    assert_eq!(
+        error_code(&SqlError::Transaction(TransactionError::NeedsSession)),
+        code::OTHER_STATEMENT
     );
 }

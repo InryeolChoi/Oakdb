@@ -92,6 +92,17 @@ impl RecentWrites {
         }
     }
 
+    /// How many transactions are open: begun and not yet ended.
+    pub(crate) fn open_transactions(&self) -> usize {
+        self.open.values().sum()
+    }
+
+    /// How many commits are kept because an open transaction began before
+    /// them (issue #37, design 0025 Q7).
+    pub(crate) fn kept_commits(&self) -> usize {
+        self.commits.len()
+    }
+
     /// How many keys are kept, for tests of pruning.
     #[cfg(test)]
     fn kept(&self) -> usize {

@@ -87,6 +87,33 @@ pub(crate) fn parse_command(sql: &str) -> Result<Command, SqlError> {
     Ok(command)
 }
 
+/// Which transaction command `sql` is, if the parser takes it as one
+/// whole: what a [`crate::Session`] would run as BEGIN, COMMIT or
+/// ROLLBACK. Anything else, a statement or SQL that fails to parse, is
+/// `None`. Only a statement that starts with one of the three words is
+/// parsed past its first token.
+pub(crate) fn transaction_command(sql: &str) -> Option<crate::TransactionCommand> {
+    let mut parser = Parser {
+        tokens: tokenize(sql).ok()?,
+        at: 0,
+        depth: 0,
+    };
+    if !["BEGIN", "COMMIT", "ROLLBACK"]
+        .iter()
+        .any(|keyword| parser.at_keyword(keyword))
+    {
+        return None;
+    }
+    let command = parser.command().ok()?;
+    parser.finish().ok()?;
+    match command {
+        Command::Begin => Some(crate::TransactionCommand::Begin),
+        Command::Commit => Some(crate::TransactionCommand::Commit),
+        Command::Rollback => Some(crate::TransactionCommand::Rollback),
+        Command::Run(_) => None,
+    }
+}
+
 /// Words that shape the grammar, so they cannot name a table or column.
 /// Type names are not among them: `text TEXT` is a fine column.
 /// `BETWEEN`, `IN` and `LIKE` are not among them: they are only read where
