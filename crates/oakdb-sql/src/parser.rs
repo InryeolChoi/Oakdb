@@ -51,6 +51,22 @@ pub(crate) enum Statement {
     },
 }
 
+/// A parsed command: a transaction command, which a session handles, or a
+/// statement, which runs inside a transaction (design 0023, T3). Keeping
+/// them apart means the executor, which only takes a [`Statement`], has
+/// no BEGIN to run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Command {
+    /// `BEGIN [TRANSACTION]`.
+    Begin,
+    /// `COMMIT [TRANSACTION]`.
+    Commit,
+    /// `ROLLBACK [TRANSACTION]`.
+    Rollback,
+    /// Any other statement.
+    Run(Statement),
+}
+
 /// A column in CREATE TABLE.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ColumnDef {
@@ -59,25 +75,27 @@ pub(crate) struct ColumnDef {
     pub(crate) primary_key: bool,
 }
 
-/// Parses one statement, with an optional trailing semicolon.
-pub(crate) fn parse(sql: &str) -> Result<Statement, SqlError> {
+/// Parses one command, with an optional trailing semicolon.
+pub(crate) fn parse_command(sql: &str) -> Result<Command, SqlError> {
     let mut parser = Parser {
         tokens: tokenize(sql)?,
         at: 0,
         depth: 0,
     };
-    let statement = parser.statement()?;
+    let command = parser.command()?;
     parser.finish()?;
-    Ok(statement)
+    Ok(command)
 }
 
 /// Words that shape the grammar, so they cannot name a table or column.
 /// Type names are not among them: `text TEXT` is a fine column.
 /// `BETWEEN`, `IN` and `LIKE` are not among them: they are only read where
 /// an operator stands, so they can still name a column (design 0019, Q1).
-const RESERVED: [&str; 18] = [
+/// `TRANSACTION` is not among them either: it is optional, and only read
+/// right after BEGIN, COMMIT or ROLLBACK (design 0023, Q1).
+const RESERVED: [&str; 21] = [
     "CREATE", "TABLE", "INSERT", "INTO", "VALUES", "SELECT", "FROM", "WHERE", "PRIMARY", "KEY",
-    "NULL", "AND", "OR", "NOT", "IS", "UPDATE", "SET", "DELETE",
+    "NULL", "AND", "OR", "NOT", "IS", "UPDATE", "SET", "DELETE", "BEGIN", "COMMIT", "ROLLBACK",
 ];
 
 /// Operators of real SQL that Oakdb does not support, where an operator
@@ -192,6 +210,27 @@ impl Parser {
         }
     }
 
+    /// command := (BEGIN | COMMIT | ROLLBACK) [TRANSACTION] | statement
+    ///
+    /// Whatever else follows, such as SQLite's `BEGIN IMMEDIATE` or
+    /// `ROLLBACK TO`, is left for [`Parser::finish`] to call unsupported.
+    fn command(&mut self) -> Result<Command, SqlError> {
+        for (keyword, command) in [
+            ("BEGIN", Command::Begin),
+            ("COMMIT", Command::Commit),
+            ("ROLLBACK", Command::Rollback),
+        ] {
+            if self.at_keyword(keyword) {
+                self.next();
+                if self.at_keyword("TRANSACTION") {
+                    self.next();
+                }
+                return Ok(command);
+            }
+        }
+        self.statement().map(Command::Run)
+    }
+
     /// statement := create | insert | select | update | delete
     fn statement(&mut self) -> Result<Statement, SqlError> {
         match &self.peek().token {
@@ -201,8 +240,8 @@ impl Parser {
             Token::Word(word) if word.eq_ignore_ascii_case("UPDATE") => self.update(),
             Token::Word(word) if word.eq_ignore_ascii_case("DELETE") => self.delete(),
             Token::Word(word) => Err(SqlError::Unsupported(format!(
-                "statement `{word}`; only CREATE TABLE, INSERT, SELECT, UPDATE and DELETE are \
-                 supported"
+                "statement `{word}`; only CREATE TABLE, INSERT, SELECT, UPDATE, DELETE, BEGIN, \
+                 COMMIT and ROLLBACK are supported"
             ))),
             _ => Err(self.expected("a statement")),
         }
@@ -927,11 +966,11 @@ mod tests {
 
     /// The WHERE clause of `SELECT * FROM t WHERE <condition>`.
     fn filter(condition: &str) -> Expr {
-        match parse(&format!("SELECT * FROM t WHERE {condition}")).unwrap() {
-            Statement::Select {
+        match parse_command(&format!("SELECT * FROM t WHERE {condition}")).unwrap() {
+            Command::Run(Statement::Select {
                 filter: Some(filter),
                 ..
-            } => filter,
+            }) => filter,
             other => panic!("{other:?}"),
         }
     }
@@ -1048,45 +1087,45 @@ mod tests {
     #[test]
     fn a_select_without_where_has_no_filter() {
         assert!(matches!(
-            parse("SELECT * FROM t;").unwrap(),
-            Statement::Select { filter: None, .. }
+            parse_command("SELECT * FROM t;").unwrap(),
+            Command::Run(Statement::Select { filter: None, .. })
         ));
     }
 
     #[test]
     fn update_reads_its_assignments_in_order_and_an_optional_where() {
         assert_eq!(
-            parse("UPDATE t SET a = a + 1, b = 'x' WHERE id = 1").unwrap(),
-            Statement::Update {
+            parse_command("UPDATE t SET a = a + 1, b = 'x' WHERE id = 1").unwrap(),
+            Command::Run(Statement::Update {
                 table: "t".into(),
                 assignments: vec![
                     ("a".into(), *arith(ArithOp::Add, col("a"), int(1))),
                     ("b".into(), Expr::Literal(Value::Text("x".into()))),
                 ],
                 filter: Some(*cmp(CompareOp::Eq, col("id"), int(1))),
-            }
+            })
         );
         assert!(matches!(
-            parse("update t set a = 1;").unwrap(),
-            Statement::Update { filter: None, .. }
+            parse_command("update t set a = 1;").unwrap(),
+            Command::Run(Statement::Update { filter: None, .. })
         ));
     }
 
     #[test]
     fn delete_reads_its_table_and_an_optional_where() {
         assert_eq!(
-            parse("DELETE FROM t WHERE id > 1").unwrap(),
-            Statement::Delete {
+            parse_command("DELETE FROM t WHERE id > 1").unwrap(),
+            Command::Run(Statement::Delete {
                 table: "t".into(),
                 filter: Some(*cmp(CompareOp::Gt, col("id"), int(1))),
-            }
+            })
         );
         assert_eq!(
-            parse("delete from t").unwrap(),
-            Statement::Delete {
+            parse_command("delete from t").unwrap(),
+            Command::Run(Statement::Delete {
                 table: "t".into(),
                 filter: None,
-            }
+            })
         );
     }
 
@@ -1097,6 +1136,6 @@ mod tests {
             "(".repeat(MAX_DEPTH + 1),
             ")".repeat(MAX_DEPTH + 1)
         );
-        assert!(matches!(parse(&deep), Err(SqlError::Syntax { .. })));
+        assert!(matches!(parse_command(&deep), Err(SqlError::Syntax { .. })));
     }
 }

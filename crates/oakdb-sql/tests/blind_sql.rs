@@ -476,9 +476,9 @@ fn unsupported_statements_say_unsupported() {
     for sql in [
         "TRUNCATE users",
         "REPLACE INTO users VALUES (1, NULL, NULL)",
-        "BEGIN",
-        "COMMIT",
-        "ROLLBACK",
+        "VACUUM",
+        "START TRANSACTION",
+        "SAVEPOINT a",
         "SELECT * FROM users JOIN users WHERE id = 1",
         // #32 made a WHERE on another column, `>`, `<` and a SELECT
         // without WHERE work; these are still out of scope.

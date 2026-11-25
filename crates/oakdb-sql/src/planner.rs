@@ -433,7 +433,7 @@ fn tighter(new: &Bound<Value>, old: &Bound<Value>, inward: Ordering) -> bool {
 mod tests {
     use super::*;
     use crate::catalog::Column;
-    use crate::parser::{parse, Statement};
+    use crate::parser::{parse_command, Command, Statement};
 
     /// `t (id INTEGER PRIMARY KEY, age INTEGER, name TEXT)`.
     fn table() -> Table {
@@ -474,8 +474,8 @@ mod tests {
 
     fn plan_of(table: &Table, condition: &str) -> Plan {
         let sql = format!("SELECT * FROM {} WHERE {condition}", table.name);
-        match parse(&sql).unwrap() {
-            Statement::Select { filter, .. } => plan(table, filter).unwrap(),
+        match parse_command(&sql).unwrap() {
+            Command::Run(Statement::Select { filter, .. }) => plan(table, filter).unwrap(),
             other => panic!("{other:?}"),
         }
     }
@@ -610,8 +610,8 @@ mod tests {
     }
 
     fn checked_assignments(set: &str) -> Result<Vec<Assignment>, SqlError> {
-        match parse(&format!("UPDATE t SET {set}")).unwrap() {
-            Statement::Update { assignments: a, .. } => assignments(&table(), a),
+        match parse_command(&format!("UPDATE t SET {set}")).unwrap() {
+            Command::Run(Statement::Update { assignments: a, .. }) => assignments(&table(), a),
             other => panic!("{other:?}"),
         }
     }

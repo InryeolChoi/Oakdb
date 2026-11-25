@@ -26,7 +26,13 @@ pub(crate) fn run<F: Fs>(db: &Db<F>, statement: Statement) -> Result<Output, Sql
 }
 
 /// Runs `statement` inside `txn`, which the caller commits or drops.
-fn apply<F: Fs>(txn: &mut Txn<'_, F>, statement: Statement) -> Result<Output, SqlError> {
+///
+/// A statement that fails leaves `txn` as it was (design 0023, T5): each
+/// one checks everything that can fail before it writes, so that inside
+/// BEGIN only the failed statement is undone. The writes themselves can
+/// then fail only if the engine stopped, and a stopped engine commits
+/// nothing.
+pub(crate) fn apply<F: Fs>(txn: &mut Txn<'_, F>, statement: Statement) -> Result<Output, SqlError> {
     Ok(match statement {
         Statement::CreateTable { name, columns } => create_table(txn, name, columns)?,
         Statement::Insert {
@@ -118,7 +124,11 @@ fn insert<F: Fs>(
         None => (0..table.columns.len()).collect(),
         Some(names) => table.resolve_columns(names.iter().map(String::as_str))?,
     };
+    // Step 1: every row is checked before any is written, so a row that
+    // fails leaves none of the statement's rows behind (design 0023, T5).
     let count = rows.len();
+    let mut checked: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(count);
+    let mut keys: HashSet<Vec<u8>> = HashSet::with_capacity(count);
     for values in rows {
         if values.len() != targets.len() {
             return Err(SqlError::ValueCount {
@@ -133,16 +143,31 @@ fn insert<F: Fs>(
         }
         check_row(&table, &row)?;
         let key = row_key(table.id, &row[table.primary_key]);
-        // The transaction sees its own writes, so this also catches a key
-        // that an earlier row of the same INSERT used.
-        if txn.get(&key)?.is_some() {
+        let value = encode_row(&row)?;
+        check_fits(&key, &value)?;
+        // The rows of this INSERT are not written yet, so `keys` catches
+        // one it adds twice.
+        if txn.get(&key)?.is_some() || !keys.insert(key.clone()) {
             return Err(SqlError::DuplicateKey {
                 table: table.name.clone(),
             });
         }
-        txn.put(&key, &encode_row(&row)?)?;
+        checked.push((key, value));
+    }
+    // Step 2: nothing is left to fail but the engine itself.
+    for (key, value) in &checked {
+        txn.put(key, value)?;
     }
     Ok(Output::Affected(count as u64))
+}
+
+/// Checks a row's key and encoded value against the engine's size rules
+/// before anything is written, so that the writes after cannot fail on
+/// them (design 0023 T5, design 0022 U10). INSERT and UPDATE share it.
+fn check_fits(key: &[u8], value: &[u8]) -> Result<(), SqlError> {
+    oakdb::check_key(key)?;
+    oakdb::check_value_len(value.len())?;
+    Ok(())
 }
 
 /// Checks that each value fits its column: of the column's type or NULL,
@@ -212,11 +237,8 @@ fn update<F: Fs>(
         let new = assign(&assignments, old)?;
         check_row(&table, &new)?;
         let new_key = row_key(table.id, &new[table.primary_key]);
-        // The engine's own size rules, checked now so that the writes
-        // below cannot fail on them (U10).
-        oakdb::check_key(&new_key)?;
         let value = encode_row(&new)?;
-        oakdb::check_value_len(value.len())?;
+        check_fits(&new_key, &value)?;
         changes.push(Change {
             key: key.as_slice(),
             new_key,
@@ -356,7 +378,15 @@ mod tests {
     use oakdb::fs::sim::SimFs;
 
     use super::*;
-    use crate::{execute, parser};
+    use crate::execute;
+    use crate::parser::{parse_command, Command};
+
+    fn parsed(sql: &str) -> Statement {
+        match parse_command(sql).unwrap() {
+            Command::Run(statement) => statement,
+            other => panic!("{other:?} is not a statement"),
+        }
+    }
 
     /// An UPDATE writes every row it matches, even one whose value stays
     /// the same (design 0022, U9), so a transaction that began before it
@@ -369,7 +399,7 @@ mod tests {
         execute(&db, "INSERT INTO t VALUES (1, 0), (2, 0)").unwrap();
 
         let mut earlier = db.begin();
-        let statement = parser::parse("UPDATE t SET n = n + 1 WHERE id = 1").unwrap();
+        let statement = parsed("UPDATE t SET n = n + 1 WHERE id = 1");
         assert_eq!(apply(&mut earlier, statement).unwrap(), Output::Affected(1));
         // Another statement commits a write to the same row first.
         execute(&db, "UPDATE t SET n = n WHERE id = 1").unwrap();
@@ -381,7 +411,7 @@ mod tests {
 
         // Different rows do not conflict.
         let mut earlier = db.begin();
-        let statement = parser::parse("DELETE FROM t WHERE id = 2").unwrap();
+        let statement = parsed("DELETE FROM t WHERE id = 2");
         apply(&mut earlier, statement).unwrap();
         execute(&db, "UPDATE t SET n = 5 WHERE id = 1").unwrap();
         earlier.commit().unwrap();

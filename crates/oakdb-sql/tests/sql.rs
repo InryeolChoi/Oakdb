@@ -552,7 +552,7 @@ fn statements_oakdb_does_not_support_name_what_they_found() {
     for (sql, named) in [
         ("TRUNCATE users", "TRUNCATE"),
         ("REPLACE INTO users VALUES (1, NULL, NULL)", "REPLACE"),
-        ("BEGIN", "BEGIN"),
+        ("VACUUM", "VACUUM"),
         ("DROP TABLE users", "DROP"),
         ("CREATE INDEX i ON users (name)", "INDEX"),
     ] {

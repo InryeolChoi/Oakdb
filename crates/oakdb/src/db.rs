@@ -403,8 +403,11 @@ impl<F: Fs> Db<F> {
         self.checkpoint()
     }
 
-    /// Fails with [`Error::Stopped`] if the engine stopped.
-    fn check_running(&self) -> Result<()> {
+    /// Fails with [`Error::Stopped`] if the engine stopped, as every
+    /// request after the failure does. [`Db::begin`] cannot fail, so a
+    /// caller that wants to refuse a transaction at its start (the SQL
+    /// layer's BEGIN) asks this first.
+    pub fn check_running(&self) -> Result<()> {
         self.shared.check_running()
     }
 
