@@ -601,7 +601,7 @@ fn disconnect_rolls_back(end: impl FnOnce(Raw)) {
 
 #[test]
 fn a_clean_close_mid_transaction_rolls_back() {
-    disconnect_rolls_back(|a| drop(a));
+    disconnect_rolls_back(drop);
 }
 
 #[test]
