@@ -12,6 +12,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    # About 5 minutes now; a test that hangs (say, a commit queue that
+    # misses a wakeup) fails here instead of after GitHub's 6 hours.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -27,7 +30,8 @@ jobs:
 
   # Every order the commit queue's threads can take, in a small model:
   # 2 clients, at most 2 preemptions (design 0024 V10). The larger model
-  # runs by hand in loom.yml.
+  # runs by hand in loom.yml. The `loom` filter picks the models; the lib's
+  # other tests that build a `Db` are compiled out under --cfg loom.
   loom:
     name: loom (${{ matrix.os }})
     strategy:
@@ -35,7 +39,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 20
     env:
       RUSTFLAGS: --cfg loom
       LOOM_CLIENTS: 2

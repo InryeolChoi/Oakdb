@@ -458,7 +458,9 @@ impl<F: Fs> Drop for Db<F> {
 
 impl Shared {
     /// Whether `bug` is planted. Always false without the `planted-bugs`
-    /// feature, so the code it guards is compiled out.
+    /// feature: the code it guards is still compiled, but the optimizer
+    /// removes it. Only the public API (`PlantedBug`, `Db::open_with_bug`)
+    /// is behind the feature.
     #[inline(always)]
     fn planted(&self, bug: PlantedBug) -> bool {
         #[cfg(feature = "planted-bugs")]
@@ -1271,7 +1273,9 @@ fn pages_len(pages: u64) -> u128 {
     u128::from(pages) * PAGE_SIZE as u128
 }
 
-#[cfg(test)]
+// Under `--cfg loom` the engine's locks are loom's, which panic outside a
+// loom model: only the models in `commit_queue` run then.
+#[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
     use crate::meta::encode_for_page_size;
