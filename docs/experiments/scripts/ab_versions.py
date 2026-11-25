@@ -101,7 +101,7 @@ def compare(name, a_bin, b_bin, mode, rounds, commits):
 
 def main():
     rev_a, rev_b = sys.argv[1], sys.argv[2]
-    rounds = int(sys.argv[3]) if len(sys.argv) > 3 else 20
+    rounds = int(sys.argv[3]) if len(sys.argv) > 3 else 30
     commits = int(sys.argv[4]) if len(sys.argv) > 4 else 200
     modes = sys.argv[5].split(",") if len(sys.argv) > 5 else ["overwrite", "grow"]
     root = tempfile.mkdtemp(prefix="ab_versions-")

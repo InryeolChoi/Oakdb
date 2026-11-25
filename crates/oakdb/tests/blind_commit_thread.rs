@@ -26,6 +26,24 @@ const WATCHDOG: Duration = Duration::from_secs(20);
 
 const DIR: &str = "db";
 
+/// How long a test may run before the whole run fails: a deadlock is a bug
+/// these tests look for, and it should fail, not hang (PR #74 review, P6).
+const DEADLINE: Duration = Duration::from_secs(120);
+
+/// Ends the test process with a failure if the calling test still runs
+/// after [`DEADLINE`]. Hold what it returns until the test ends.
+fn deadline() -> mpsc::Sender<()> {
+    let name = thread::current().name().unwrap_or("a test").to_string();
+    let (running, finished) = mpsc::channel::<()>();
+    thread::spawn(move || {
+        if let Err(mpsc::RecvTimeoutError::Timeout) = finished.recv_timeout(DEADLINE) {
+            eprintln!("{name} still runs after {DEADLINE:?}: it hangs");
+            std::process::exit(101);
+        }
+    });
+    running
+}
+
 fn open_sim() -> (SimFs, Db<SimFs>) {
     let fs = SimFs::new();
     let db = Db::open_with(fs.clone(), DIR).expect("open");
@@ -80,6 +98,7 @@ fn counter(v: Option<Vec<u8>>) -> u64 {
 
 #[test]
 fn the_database_is_send_and_sync_and_a_transaction_is_send() {
+    let _deadline = deadline();
     fn send_sync<T: Send + Sync>() {}
     fn send<T: Send>() {}
     send_sync::<Db<StdFs>>();
@@ -91,6 +110,7 @@ fn the_database_is_send_and_sync_and_a_transaction_is_send() {
 
 #[test]
 fn an_arc_database_can_be_shared_with_spawned_threads_that_each_commit() {
+    let _deadline = deadline();
     let dir = tempfile::tempdir().unwrap();
     let db = Arc::new(Db::open(dir.path()).unwrap());
     let handles: Vec<_> = (0..8u8)
@@ -117,6 +137,7 @@ fn an_arc_database_can_be_shared_with_spawned_threads_that_each_commit() {
 
 #[test]
 fn a_borrowed_database_can_be_shared_by_scoped_threads() {
+    let _deadline = deadline();
     let (_fs, db) = open_sim();
     thread::scope(|s| {
         for i in 0..6u8 {
@@ -133,6 +154,7 @@ fn a_borrowed_database_can_be_shared_by_scoped_threads() {
 
 #[test]
 fn a_transaction_begun_on_one_thread_can_be_committed_on_another() {
+    let _deadline = deadline();
     let (_fs, db) = open_sim();
     let mut t = db.begin();
     t.put(b"k", b"from main").unwrap();
@@ -144,6 +166,7 @@ fn a_transaction_begun_on_one_thread_can_be_committed_on_another() {
 
 #[test]
 fn a_commit_acknowledged_on_one_thread_is_seen_by_a_transaction_begun_after_on_another() {
+    let _deadline = deadline();
     let (_fs, db) = open_sim();
     let (tx, rx) = mpsc::channel();
     thread::scope(|s| {
@@ -174,6 +197,7 @@ fn a_commit_acknowledged_on_one_thread_is_seen_by_a_transaction_begun_after_on_a
 
 #[test]
 fn the_sync_of_a_commit_runs_on_the_commit_thread() {
+    let _deadline = deadline();
     let (fs, db) = open_sim();
     let held = fs.hold_syncs();
     thread::scope(|s| {
@@ -189,6 +213,7 @@ fn the_sync_of_a_commit_runs_on_the_commit_thread() {
 
 #[test]
 fn a_commit_held_in_its_sync_does_not_return_until_the_sync_is_let_go() {
+    let _deadline = deadline();
     let (fs, db) = open_sim();
     let held = fs.hold_syncs();
     let (tx, rx) = mpsc::channel();
@@ -216,6 +241,7 @@ fn a_commit_held_in_its_sync_does_not_return_until_the_sync_is_let_go() {
 
 #[test]
 fn while_a_commit_is_in_its_sync_other_threads_begin_read_write_and_end_transactions() {
+    let _deadline = deadline();
     let (fs, db) = open_sim();
     put_one(&db, b"a", b"1");
     put_one(&db, b"b", b"2");
@@ -267,6 +293,7 @@ fn while_a_commit_is_in_its_sync_other_threads_begin_read_write_and_end_transact
 
 #[test]
 fn a_commit_with_no_writes_does_not_wait_for_another_commits_sync() {
+    let _deadline = deadline();
     let (fs, db) = open_sim();
     let mut held = Some(fs.hold_syncs());
     let (tx, rx) = mpsc::channel();
@@ -287,6 +314,7 @@ fn a_commit_with_no_writes_does_not_wait_for_another_commits_sync() {
 
 #[test]
 fn the_writes_of_a_commit_in_its_sync_are_not_visible_to_transactions_begun_meanwhile() {
+    let _deadline = deadline();
     let (fs, db) = open_sim();
     put_one(&db, b"k", b"old");
     let mut held = Some(fs.hold_syncs());
@@ -310,6 +338,7 @@ fn the_writes_of_a_commit_in_its_sync_are_not_visible_to_transactions_begun_mean
 
 #[test]
 fn a_transaction_begun_while_a_commit_syncs_conflicts_with_it_on_the_same_key() {
+    let _deadline = deadline();
     let (fs, db) = open_sim();
     let mut held = Some(fs.hold_syncs());
     let (tx, rx) = mpsc::channel();
@@ -336,6 +365,7 @@ fn a_transaction_begun_while_a_commit_syncs_conflicts_with_it_on_the_same_key() 
 
 #[test]
 fn a_commit_sent_while_another_syncs_is_judged_after_it_and_waits_for_it() {
+    let _deadline = deadline();
     let (fs, db) = open_sim();
     // B begins first, so both A and B start from the same snapshot.
     let mut b = db.begin();
@@ -370,6 +400,7 @@ fn a_commit_sent_while_another_syncs_is_judged_after_it_and_waits_for_it() {
 
 #[test]
 fn commits_on_other_keys_queued_behind_a_syncing_commit_all_succeed_once_it_is_let_go() {
+    let _deadline = deadline();
     let (fs, db) = open_sim();
     let held = fs.hold_syncs();
     thread::scope(|s| {
@@ -395,6 +426,7 @@ fn commits_on_other_keys_queued_behind_a_syncing_commit_all_succeed_once_it_is_l
 
 #[test]
 fn a_checkpoint_asked_for_while_a_commit_syncs_runs_after_it() {
+    let _deadline = deadline();
     let (fs, db) = open_sim();
     let held = fs.hold_syncs();
     let (tx, rx) = mpsc::channel();
@@ -423,6 +455,7 @@ fn a_checkpoint_asked_for_while_a_commit_syncs_runs_after_it() {
 
 #[test]
 fn many_threads_on_their_own_keys_end_with_exactly_what_each_thread_committed() {
+    let _deadline = deadline();
     let (fs, db) = open_sim();
     const THREADS: u8 = 8;
     let models: Vec<BTreeMap<Vec<u8>, Vec<u8>>> = thread::scope(|s| {
@@ -479,6 +512,7 @@ fn many_threads_on_their_own_keys_end_with_exactly_what_each_thread_committed() 
 
 #[test]
 fn counters_incremented_from_many_threads_with_retries_lose_no_update() {
+    let _deadline = deadline();
     let (fs, db) = open_sim();
     const THREADS: u64 = 8;
     const EACH: u64 = 40;
@@ -520,6 +554,7 @@ fn counters_incremented_from_many_threads_with_retries_lose_no_update() {
 
 #[test]
 fn transfers_between_accounts_from_many_threads_keep_the_total_in_every_snapshot() {
+    let _deadline = deadline();
     let (_fs, db) = open_sim();
     const ACCOUNTS: u8 = 5;
     for a in 0..ACCOUNTS {
@@ -588,6 +623,7 @@ fn transfers_between_accounts_from_many_threads_keep_the_total_in_every_snapshot
 
 #[test]
 fn of_two_threads_writing_the_same_key_from_the_same_snapshot_exactly_one_commits() {
+    let _deadline = deadline();
     for round in 0..20u8 {
         let (_fs, db) = open_sim();
         let barrier = Barrier::new(2);
@@ -626,6 +662,7 @@ fn of_two_threads_writing_the_same_key_from_the_same_snapshot_exactly_one_commit
 
 #[test]
 fn a_reader_on_one_thread_keeps_its_snapshot_while_other_threads_commit() {
+    let _deadline = deadline();
     let (_fs, db) = open_sim();
     put_one(&db, b"k", b"0");
     let reader = db.begin();
@@ -686,6 +723,7 @@ fn commit_until_stopped(db: &Db<SimFs>) -> Vec<Vec<(u32, Result<(), Error>)>> {
 
 #[test]
 fn after_a_power_cut_one_batch_is_unknown_the_rest_stop_and_every_acknowledged_commit_survives() {
+    let _deadline = deadline();
     for seed in 0..4u64 {
         let (fs, db) = open_sim();
         fs.fail_after(40 + seed * 7);
@@ -719,6 +757,11 @@ fn after_a_power_cut_one_batch_is_unknown_the_rest_stop_and_every_acknowledged_c
             (1..=6).contains(&unknown.len()),
             "seed {seed}: {} commits met the failure, not one batch",
             unknown.len()
+        );
+        assert_eq!(
+            unknown.len() as u64,
+            db.stats().in_doubt,
+            "seed {seed}: not every commit that passed in the failed batch is in doubt"
         );
 
         // Every request on every thread now stops.
@@ -757,6 +800,7 @@ fn after_a_power_cut_one_batch_is_unknown_the_rest_stop_and_every_acknowledged_c
 #[test]
 fn after_a_failed_disk_operation_with_the_power_on_all_threads_see_the_engine_stopped_and_reopening_keeps_acked_commits(
 ) {
+    let _deadline = deadline();
     let (fs, db) = open_sim();
     put_one(&db, b"before", b"v");
     fs.fail_once_after(30);
@@ -768,6 +812,11 @@ fn after_a_failed_disk_operation_with_the_power_on_all_threads_see_the_engine_st
         .count();
     // One batch (#28): at most one commit per thread.
     assert!((1..=6).contains(&unknown), "{unknown} commits in doubt");
+    assert_eq!(
+        unknown as u64,
+        db.stats().in_doubt,
+        "not every commit that passed in the failed batch is in doubt"
+    );
     for (i, out) in outcomes.iter().enumerate() {
         assert!(
             out.iter()
@@ -806,6 +855,7 @@ fn after_a_failed_disk_operation_with_the_power_on_all_threads_see_the_engine_st
 
 #[test]
 fn dropping_the_database_joins_the_commit_thread_so_it_can_be_opened_again_at_once() {
+    let _deadline = deadline();
     let dir = tempfile::tempdir().unwrap();
     for round in 0..10u8 {
         let db = Db::open(dir.path()).unwrap();
@@ -824,6 +874,7 @@ fn dropping_the_database_joins_the_commit_thread_so_it_can_be_opened_again_at_on
 
 #[test]
 fn a_shared_database_is_dropped_by_the_last_arc_on_another_thread_and_closes_cleanly() {
+    let _deadline = deadline();
     let fs = SimFs::new();
     let db = Arc::new(Db::open_with(fs.clone(), DIR).unwrap());
     let hs: Vec<_> = (0..4u8)
@@ -844,6 +895,7 @@ fn a_shared_database_is_dropped_by_the_last_arc_on_another_thread_and_closes_cle
 
 #[test]
 fn close_after_commits_from_many_threads_succeeds_and_keeps_them_through_a_crash() {
+    let _deadline = deadline();
     let (fs, db) = open_sim();
     thread::scope(|s| {
         for i in 0..5u8 {
@@ -862,6 +914,7 @@ fn close_after_commits_from_many_threads_succeeds_and_keeps_them_through_a_crash
 
 #[test]
 fn a_stopped_database_still_answers_every_thread_and_drops_without_hanging() {
+    let _deadline = deadline();
     let (fs, db) = open_sim();
     fs.fail_after(0);
     // The first commit meets the cut.
@@ -897,6 +950,7 @@ fn a_stopped_database_still_answers_every_thread_and_drops_without_hanging() {
 
 #[test]
 fn opening_and_dropping_many_databases_leaves_no_commit_thread_waiting() {
+    let _deadline = deadline();
     // Each Db starts a commit thread; drop must join it, or this would
     // still pass but leak. We check drop returns, and the lock is free.
     let fs = SimFs::new();
