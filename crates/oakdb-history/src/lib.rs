@@ -21,7 +21,7 @@ mod text;
 use std::collections::BTreeMap;
 use std::fmt;
 
-pub use check::{check, Anomaly, Edge, Kind, Report};
+pub use check::{check, Anomaly, Edge, InvalidHistory, Kind, Report};
 pub use text::ParseError;
 
 /// A transaction: the thread that ran it, and its number among that

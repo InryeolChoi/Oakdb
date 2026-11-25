@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use oakdb_history::{check, Elem, History, Kind, Op, Outcome, Report, Txn, TxnId};
+use oakdb_history::{check, Elem, History, InvalidHistory, Kind, Op, Outcome, Report, Txn, TxnId};
 
 fn t(thread: u32, seq: u32) -> TxnId {
     TxnId::new(thread, seq)
@@ -53,7 +53,7 @@ fn kinds(report: &Report) -> Vec<Kind> {
 }
 
 fn assert_finds(history: &History, kind: Kind) -> Report {
-    let report = check(history);
+    let report = check(history).expect("the history is well formed");
     assert!(
         kinds(&report).contains(&kind),
         "expected {kind:?}, found {:?}\n{history}",
@@ -67,7 +67,7 @@ fn assert_finds(history: &History, kind: Kind) -> Report {
 }
 
 fn assert_clean(history: &History) -> Report {
-    let report = check(history);
+    let report = check(history).expect("the history is well formed");
     assert!(
         report.anomalies.is_empty(),
         "expected none, found {:?}\n{history}",
@@ -212,7 +212,71 @@ fn reading_the_first_of_two_appends_of_another_transaction_is_an_intermediate_re
         ],
         last: last(&[("x", &[e(t1), second])]),
     };
-    assert_finds(&history, Kind::IntermediateRead);
+    let report = assert_finds(&history, Kind::IntermediateRead);
+    // The same read is also a cycle with one anti-dependency: t2 read t1's
+    // first name (t1 -wr-> t2) and missed its second (t2 -rw-> t1). So
+    // wherever G1b is expected, G-single must be allowed with it. (t2
+    // also began after t1's commit came back and missed its second name:
+    // a stale read, which depends on the timing, not on G1b.)
+    assert_eq!(
+        kinds(&report),
+        [Kind::IntermediateRead, Kind::StaleRead, Kind::GSingle]
+    );
+}
+
+#[test]
+fn two_appends_of_the_same_name_are_an_error_not_a_panic() {
+    let (t1, t2) = (t(0, 0), t(1, 0));
+    let history = History {
+        txns: vec![txn(
+            t1,
+            Outcome::Ok,
+            0,
+            10,
+            vec![r("x", &[]), a("x", e(t1)), r("y", &[]), a("y", e(t1))],
+        )],
+        last: None,
+    };
+    assert_eq!(check(&history), Err(InvalidHistory::AppendedTwice(e(t1))));
+    assert!(check(&history)
+        .unwrap_err()
+        .to_string()
+        .contains("appended twice"));
+
+    let theirs = History {
+        txns: vec![txn(
+            t1,
+            Outcome::Ok,
+            0,
+            10,
+            vec![r("x", &[]), a("x", e(t2))],
+        )],
+        last: None,
+    };
+    assert_eq!(
+        check(&theirs),
+        Err(InvalidHistory::NotItsOwn {
+            txn: t1,
+            elem: e(t2)
+        })
+    );
+}
+
+#[test]
+fn two_transactions_with_one_id_are_an_error() {
+    let t1 = t(0, 0);
+    let one = txn(t1, Outcome::Ok, 0, 10, vec![r("x", &[])]);
+    let history = History {
+        txns: vec![one.clone(), one],
+        last: None,
+    };
+    assert_eq!(check(&history), Err(InvalidHistory::SameId(t1)));
+
+    let last_id = History {
+        txns: vec![txn(TxnId::LAST, Outcome::Ok, 0, 10, vec![r("x", &[])])],
+        last: None,
+    };
+    assert_eq!(check(&last_id), Err(InvalidHistory::SameId(TxnId::LAST)));
 }
 
 #[test]

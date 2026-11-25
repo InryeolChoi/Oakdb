@@ -26,8 +26,13 @@ fn run_with(bug: PlantedBug, threads: u32, seed: u64) -> Report {
 
 /// Runs `bug` on 8 threads for each of `seeds` and returns on how many
 /// the checker named one of `expected`. Every anomaly found must be one
-/// `bug` can make: expected, or `allowed`.
+/// `bug` can make: expected, or `allowed`. A G1b read is a G-single cycle
+/// too, so G-single is allowed wherever G1b is.
 fn detections(bug: PlantedBug, expected: &[Kind], allowed: &[Kind], seeds: &[u64]) -> usize {
+    let mut allowed = allowed.to_vec();
+    if expected.contains(&Kind::IntermediateRead) || allowed.contains(&Kind::IntermediateRead) {
+        allowed.push(Kind::GSingle);
+    }
     let mut found = 0;
     for &seed in seeds {
         let report = run_with(bug, 8, seed);

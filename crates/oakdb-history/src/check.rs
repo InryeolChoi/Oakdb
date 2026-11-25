@@ -16,6 +16,8 @@ pub enum Kind {
     /// G1a: a read saw a write that never committed.
     AbortedRead,
     /// G1b: a read saw a transaction's write that it later wrote over.
+    /// The same read also makes a [`Kind::GSingle`] cycle (it read the
+    /// first write and missed the last), so both are reported.
     IntermediateRead,
     /// A committed write is gone: another was made on the list it saw
     /// before it.
@@ -219,12 +221,70 @@ struct Snap<'h> {
     value: &'h [Elem],
 }
 
+/// Why a history cannot be checked: it is not one a run could write down.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InvalidHistory {
+    /// Two transactions share an id, or one uses [`TxnId::LAST`].
+    SameId(TxnId),
+    /// A transaction appended a name that is another transaction's.
+    NotItsOwn { txn: TxnId, elem: Elem },
+    /// Two appends used the same name.
+    AppendedTwice(Elem),
+}
+
+impl fmt::Display for InvalidHistory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            InvalidHistory::SameId(id) => {
+                write!(f, "malformed history: transaction id {id} is used twice")
+            }
+            InvalidHistory::NotItsOwn { txn, elem } => write!(
+                f,
+                "malformed history: {txn} appended {elem}, a name of another transaction"
+            ),
+            InvalidHistory::AppendedTwice(elem) => {
+                write!(f, "malformed history: {elem} is appended twice")
+            }
+        }
+    }
+}
+
+impl std::error::Error for InvalidHistory {}
+
+/// Every transaction id once, and every append a name of its own
+/// transaction used once: what [`Checker`] relies on.
+fn validate(history: &History) -> Result<(), InvalidHistory> {
+    let mut ids = HashSet::from([TxnId::LAST]);
+    let mut names = HashSet::new();
+    for txn in &history.txns {
+        if !ids.insert(txn.id) {
+            return Err(InvalidHistory::SameId(txn.id));
+        }
+        for op in &txn.ops {
+            if let Op::Append { elem, .. } = op {
+                if elem.txn != txn.id {
+                    return Err(InvalidHistory::NotItsOwn {
+                        txn: txn.id,
+                        elem: *elem,
+                    });
+                }
+                if !names.insert(*elem) {
+                    return Err(InvalidHistory::AppendedTwice(*elem));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Checks `history` for what snapshot isolation forbids.
 ///
-/// # Panics
+/// # Errors
 ///
-/// If two appends in it use the same name: the history is malformed.
-pub fn check(history: &History) -> Report {
+/// [`InvalidHistory`] if no run could have written it down, for example a
+/// hand-edited file where two appends use the same name.
+pub fn check(history: &History) -> Result<Report, InvalidHistory> {
+    validate(history)?;
     let mut txns: Vec<View> = history
         .txns
         .iter()
@@ -257,13 +317,13 @@ pub fn check(history: &History) -> Report {
     checker.orders();
     checker.stale_reads();
     checker.cycles();
-    Report {
+    Ok(Report {
         txns: history.txns.len(),
         committed: checker.committed.iter().filter(|c| **c).count()
             - usize::from(history.last.is_some()),
         write_skews: checker.write_skews,
         anomalies: checker.anomalies,
-    }
+    })
 }
 
 struct Checker<'h> {
@@ -293,8 +353,8 @@ impl<'h> Checker<'h> {
             let mut latest: HashMap<&str, Elem> = HashMap::new();
             for op in &txn.ops {
                 if let Op::Append { key, elem } = op {
-                    let before = writer.insert(*elem, (at, key.as_str()));
-                    assert!(before.is_none(), "{elem} is appended twice");
+                    // `validate` made every name appear once.
+                    writer.insert(*elem, (at, key.as_str()));
                     if let Some(earlier) = latest.insert(key, *elem) {
                         written_over.insert(earlier);
                     }

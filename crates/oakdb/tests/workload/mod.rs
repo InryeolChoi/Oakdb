@@ -223,7 +223,7 @@ pub fn last_reads<F: Fs>(db: &Db<F>, keys: u32) -> BTreeMap<String, Vec<Elem>> {
 /// checked again (design 0024 V11).
 pub fn checked(name: &str, history: &History) -> Report {
     let started = Instant::now();
-    let report = check(history);
+    let report = check(history).unwrap_or_else(|e| panic!("{name}: {e}"));
     eprintln!(
         "{name}: {} txns, {} committed, {} anomalies, {} write skews, checked in {:.1?}",
         report.txns,
