@@ -173,3 +173,23 @@ impl From<oakdb::Error> for SqlError {
         SqlError::Engine(e)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A statement that ran on its own and lost a conflict says to run it
+    /// again, in one SQL sentence, without the engine's advice to "begin
+    /// again" or its internal key (PR #78 review S2, P3).
+    #[test]
+    fn an_autocommit_conflict_says_to_run_the_statement_again() {
+        let e = SqlError::Engine(oakdb::Error::Conflict { key: vec![0] });
+        assert!(e.is_conflict());
+        let message = e.to_string();
+        assert!(message.starts_with("conflict: "), "{message}");
+        assert!(message.contains("run it again"), "{message}");
+        assert!(!message.contains("BEGIN"), "{message}");
+        assert!(!message.contains("0x"), "{message}");
+        assert!(!message.contains("begin again and retry"), "{message}");
+    }
+}

@@ -69,7 +69,7 @@ fn pair(row: &[Value]) -> (i64, Option<i64>) {
 }
 
 fn is_conflict(e: &SqlError) -> bool {
-    matches!(e, SqlError::Engine(oakdb::Error::Conflict { .. }))
+    e.is_conflict()
 }
 
 // ------------------------------------------------------- the issue's criteria
@@ -139,8 +139,18 @@ fn a_conflict_at_commit_reaches_sql_and_ends_the_transaction() {
     run(&mut b, "UPDATE t SET n = 5 WHERE id = 1");
     let e = fail(&mut a, "COMMIT");
     assert!(is_conflict(&e), "{e:?}");
-    // The message says the whole transaction is gone (design 0023, Q4).
-    assert!(e.to_string().contains("BEGIN"), "{e}");
+    assert!(matches!(e, SqlError::TransactionConflict(_)), "{e:?}");
+    // One SQL sentence that says the whole transaction is gone and to run
+    // it again from BEGIN (design 0023, 5-2 and Q4), without the engine's
+    // own advice or its internal key (PR #78 review S2, P3).
+    let message = e.to_string();
+    assert!(
+        message.contains("the whole transaction was rolled back"),
+        "{message}"
+    );
+    assert!(message.contains("run it again from BEGIN"), "{message}");
+    assert!(!message.contains("0x"), "{message}");
+    assert!(!message.contains("begin again and retry"), "{message}");
     // COMMIT ended the transaction even though it failed (T6): A is back
     // in autocommit, and none of its writes is there.
     assert!(!a.in_transaction());
@@ -401,6 +411,41 @@ fn other_statement_errors_keep_the_transaction_open() {
     assert_eq!(committed(&db), vec![(1, Some(1))]);
 }
 
+#[test]
+fn a_create_table_that_fails_inside_begin_leaves_no_trace() {
+    // Design 0023, 3-1: CREATE TABLE checks everything before it takes a
+    // table id, so a failed one writes nothing, not even the id counter
+    // (PR #78 review P2).
+    let db = with_t();
+    let mut a = Session::new(&db);
+    run(&mut a, "BEGIN");
+    run(&mut a, "INSERT INTO t VALUES (1, 1)");
+    let long = "x".repeat(oakdb::MAX_KEY_LEN + 1);
+    let e = fail(&mut a, &format!("CREATE TABLE {long} (id INTEGER PRIMARY KEY)"));
+    assert!(
+        matches!(e, SqlError::Engine(oakdb::Error::KeyTooLarge { .. })),
+        "{e:?}"
+    );
+    let e = fail(&mut a, "CREATE TABLE nokey (id INTEGER)");
+    assert!(matches!(e, SqlError::Unsupported(_)), "{e:?}");
+    assert!(a.in_transaction());
+    assert!(matches!(
+        a.execute("SELECT * FROM nokey"),
+        Err(SqlError::NoSuchTable(_))
+    ));
+    // Another session creates a table, which takes the next table id. Had
+    // A's failed CREATE TABLE written the counter, A's COMMIT would lose
+    // on it.
+    execute(&db, "CREATE TABLE other (id INTEGER PRIMARY KEY)").unwrap();
+    run(&mut a, "COMMIT");
+    assert_eq!(committed(&db), vec![(1, Some(1))]);
+    assert!(matches!(
+        execute(&db, "SELECT * FROM nokey"),
+        Err(SqlError::NoSuchTable(_))
+    ));
+    execute(&db, "SELECT * FROM other").unwrap();
+}
+
 // ----------------------------------------------------------------- reads
 
 #[test]
@@ -581,21 +626,14 @@ fn a_disk_failure_during_commit_ends_the_transaction_and_stops_the_engine() {
                 "{e:?}"
             );
             assert!(!session.in_transaction());
-            // Every statement after it finds the engine stopped, inside a
-            // transaction or not.
+            // Every statement after it finds the engine stopped, BEGIN too
+            // (design 0023, section 5 table; PR #78 review P4).
             let e = fail(&mut session, "INSERT INTO t VALUES (3, 3)");
             assert!(
                 matches!(e, SqlError::Engine(oakdb::Error::Stopped(_))),
                 "{e:?}"
             );
-            run(&mut session, "BEGIN");
-            let e = fail(&mut session, "SELECT * FROM t");
-            assert!(
-                matches!(e, SqlError::Engine(oakdb::Error::Stopped(_))),
-                "{e:?}"
-            );
-            assert!(session.in_transaction());
-            let e = fail(&mut session, "COMMIT");
+            let e = fail(&mut session, "BEGIN");
             assert!(
                 matches!(e, SqlError::Engine(oakdb::Error::Stopped(_))),
                 "{e:?}"
@@ -611,6 +649,37 @@ fn a_disk_failure_during_commit_ends_the_transaction_and_stops_the_engine() {
             "seed {seed}: {found:?}"
         );
     }
+}
+
+#[test]
+fn a_transaction_open_when_the_engine_stops_stays_open_until_commit() {
+    let fs = SimFs::new();
+    let db = Db::open_with(fs.clone(), "/oak").unwrap();
+    execute(&db, "CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER)").unwrap();
+    let mut a = Session::new(&db);
+    run(&mut a, "BEGIN");
+    run(&mut a, "INSERT INTO t VALUES (1, 1)");
+    // Another statement's commit fails on the disk and stops the engine.
+    fs.fail_once_after(0);
+    let e = execute(&db, "INSERT INTO t VALUES (2, 2)").unwrap_err();
+    assert!(
+        matches!(e, SqlError::Engine(oakdb::Error::OutcomeUnknown(_))),
+        "{e:?}"
+    );
+    // A's statements fail but its transaction stays open, so nothing after
+    // it leaks out in autocommit (design 0023, 5-1).
+    let e = fail(&mut a, "SELECT * FROM t");
+    assert!(
+        matches!(e, SqlError::Engine(oakdb::Error::Stopped(_))),
+        "{e:?}"
+    );
+    assert!(a.in_transaction());
+    let e = fail(&mut a, "COMMIT");
+    assert!(
+        matches!(e, SqlError::Engine(oakdb::Error::Stopped(_))),
+        "{e:?}"
+    );
+    assert!(!a.in_transaction());
 }
 
 // --------------------------------------------------------- concurrency
@@ -671,4 +740,13 @@ fn concurrent_inserts_of_the_same_key_inside_transactions_conflict_at_commit() {
     // ...and loses at COMMIT.
     assert!(is_conflict(&fail(&mut b, "COMMIT")));
     assert_eq!(committed(&db), vec![(1, Some(1))]);
+}
+
+/// A server moves each connection's session to that connection's thread
+/// (#37), so a session must be `Send` (PR #78 review S5).
+#[test]
+fn a_session_can_move_to_another_thread() {
+    fn assert_send<T: Send>() {}
+    assert_send::<Session<'static, SimFs>>();
+    assert_send::<Session<'static, oakdb::fs::StdFs>>();
 }

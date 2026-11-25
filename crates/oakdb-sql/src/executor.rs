@@ -372,7 +372,15 @@ mod tests {
     use oakdb::fs::sim::SimFs;
 
     use super::*;
-    use crate::{execute, parser};
+    use crate::execute;
+    use crate::parser::{parse_command, Command};
+
+    fn statement(sql: &str) -> Statement {
+        match parse_command(sql).unwrap() {
+            Command::Run(statement) => statement,
+            other => panic!("{other:?} is not a statement"),
+        }
+    }
 
     /// An UPDATE writes every row it matches, even one whose value stays
     /// the same (design 0022, U9), so a transaction that began before it
@@ -385,7 +393,7 @@ mod tests {
         execute(&db, "INSERT INTO t VALUES (1, 0), (2, 0)").unwrap();
 
         let mut earlier = db.begin();
-        let statement = parser::parse("UPDATE t SET n = n + 1 WHERE id = 1").unwrap();
+        let statement = statement("UPDATE t SET n = n + 1 WHERE id = 1");
         assert_eq!(apply(&mut earlier, statement).unwrap(), Output::Affected(1));
         // Another statement commits a write to the same row first.
         execute(&db, "UPDATE t SET n = n WHERE id = 1").unwrap();
@@ -397,7 +405,7 @@ mod tests {
 
         // Different rows do not conflict.
         let mut earlier = db.begin();
-        let statement = parser::parse("DELETE FROM t WHERE id = 2").unwrap();
+        let statement = statement("DELETE FROM t WHERE id = 2");
         apply(&mut earlier, statement).unwrap();
         execute(&db, "UPDATE t SET n = 5 WHERE id = 1").unwrap();
         earlier.commit().unwrap();
