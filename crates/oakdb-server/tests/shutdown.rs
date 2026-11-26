@@ -2,6 +2,7 @@
 //! handle is pulled by the test, not by a signal, so each scene is
 //! deterministic. `signal.rs` sends the real signals to the binary.
 
+use std::io::{ErrorKind, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
 use std::thread::{self, JoinHandle};
@@ -406,4 +407,178 @@ fn on_a_stopped_engine_the_final_checkpoint_fails_and_answered_commits_survive()
     assert!(!report.is_clean());
     let ids = ids_after(&fs);
     assert!(ids.contains(&1), "{ids:?}");
+}
+
+// --- Review fixes (#84 review D1, D2) ---
+
+/// The first byte of a QUERY frame's four-byte length: a client that sends
+/// it and stops sits halfway through a frame.
+fn half_a_frame(stream: &mut TcpStream) {
+    stream.write_all(&[0]).unwrap();
+    // Let the server see the byte and start reading the rest.
+    thread::sleep(Duration::from_millis(50));
+}
+
+/// A shutdown that waited on nobody: every connection gone, checkpointed,
+/// well within the margin.
+fn assert_prompt_and_clean(report: &Shutdown) {
+    assert!(
+        report.is_clean() && report.took < SHUTDOWN_MARGIN,
+        "took {:?}, busy {}, clean {}",
+        report.took,
+        report.busy,
+        report.is_clean()
+    );
+}
+
+#[test]
+fn a_client_stalled_halfway_through_a_frame_gets_0x49_and_does_not_hold_up_the_shutdown() {
+    // Review S1: the rest of a frame was read with no limit outside a
+    // transaction, so one such client made the shutdown wait out the
+    // grace and the margin and end without the checkpoint.
+    let server = start(config(SHORT));
+    let mut a = raw(server.addr);
+    half_a_frame(&mut a);
+    server.handle.shutdown();
+    let report = server.run.join().unwrap();
+    assert_prompt_and_clean(&report);
+    assert_eq!(report.closed, 1);
+    expect_shutting_down(&mut a);
+}
+
+#[test]
+fn a_client_stalled_halfway_through_its_hello_gets_0x49_and_does_not_hold_up_the_shutdown() {
+    let server = start(config(SHORT));
+    let mut a = TcpStream::connect(server.addr).unwrap();
+    a.set_read_timeout(Some(TIMEOUT)).unwrap();
+    half_a_frame(&mut a);
+    server.handle.shutdown();
+    let report = server.run.join().unwrap();
+    assert_prompt_and_clean(&report);
+    expect_shutting_down(&mut a);
+}
+
+#[test]
+fn a_transaction_stalled_halfway_through_a_frame_is_rolled_back_after_the_grace() {
+    let server = start(config(SHORT));
+    let mut a = raw(server.addr);
+    assert_eq!(send(&mut a, "BEGIN"), Response::Done);
+    assert_eq!(
+        send(&mut a, "INSERT INTO t VALUES (1)"),
+        Response::Affected(1)
+    );
+    half_a_frame(&mut a);
+    let started = Instant::now();
+    server.handle.shutdown();
+    let report = server.run.join().unwrap();
+    assert!(started.elapsed() >= SHORT, "not before the grace");
+    assert_prompt_and_clean(&report);
+    assert_eq!(report.rolled_back, 1);
+    expect_shutting_down(&mut a);
+    assert_eq!(ids_after(&server.fs), Vec::<i64>::new());
+}
+
+#[test]
+fn a_frame_finished_within_the_grace_inside_a_transaction_is_run() {
+    let server = start(config(TIMEOUT));
+    let mut a = raw(server.addr);
+    assert_eq!(send(&mut a, "BEGIN"), Response::Done);
+    let frame = Request::Query("INSERT INTO t VALUES (1)".into()).encode();
+    let mut bytes = Vec::new();
+    write_frame(&mut bytes, &frame).unwrap();
+    a.write_all(&bytes[..1]).unwrap();
+    thread::sleep(Duration::from_millis(50));
+    server.handle.shutdown();
+    // Well past a tick, inside the grace: the frame is still waited for.
+    thread::sleep(Duration::from_millis(300));
+    a.write_all(&bytes[1..]).unwrap();
+    assert_eq!(next(&mut a), Response::Affected(1));
+    assert_eq!(send(&mut a, "COMMIT"), Response::Done);
+    expect_shutting_down(&mut a);
+    let (report, fs) = server.shut_down();
+    assert!(report.is_clean(), "{report:?}");
+    assert_eq!(ids_after(&fs), vec![1]);
+}
+
+#[test]
+fn the_moment_0x49_is_read_the_transaction_is_already_rolled_back() {
+    // Review S3, mutation M14: 0x49 sent first and the rollback after the
+    // linger would leave the transaction open while the client reads it.
+    let server = start(config(SHORT));
+    let mut a = raw(server.addr);
+    assert_eq!(send(&mut a, "BEGIN"), Response::Done);
+    assert_eq!(
+        send(&mut a, "INSERT INTO t VALUES (1)"),
+        Response::Affected(1)
+    );
+    let monitor = server.monitor.clone();
+    assert_eq!(monitor.stats().open_transactions, 1);
+    server.handle.shutdown();
+    // The socket stays open, so the server is still lingering on it.
+    assert_eq!(
+        next(&mut a),
+        Response::Error {
+            code: code::SHUTTING_DOWN,
+            message: SHUTTING_DOWN_MESSAGE.into()
+        }
+    );
+    assert_eq!(monitor.stats().open_transactions, 0);
+    assert_eq!(monitor.connections(), 1, "still lingering");
+    drop(a);
+    let (report, _) = server.shut_down();
+    assert!(report.is_clean(), "{report:?}");
+}
+
+#[test]
+fn a_client_waiting_at_the_door_may_go_on_sending_after_its_0x49_without_a_reset() {
+    // Review S8, mutation M6: on macOS a socket accepted from the
+    // nonblocking listener is nonblocking too. Lingering on it would not
+    // wait, so bytes the client sends after reading its 0x49 reach a
+    // closed socket and reset the connection.
+    let db = Db::open_with(SimFs::new(), "/oak").unwrap();
+    let server = Server::bind(db, config(SHORT)).unwrap();
+    let mut waiting = TcpStream::connect(server.local_addr()).unwrap();
+    waiting.set_read_timeout(Some(TIMEOUT)).unwrap();
+    write_frame(&mut waiting, &Request::Hello { version: VERSION }.encode()).unwrap();
+    let handle = server.shutdown_handle();
+    handle.shutdown();
+    let run = thread::spawn(move || server.run());
+    assert_eq!(
+        next(&mut waiting),
+        Response::Error {
+            code: code::SHUTTING_DOWN,
+            message: SHUTTING_DOWN_MESSAGE.into()
+        }
+    );
+    let query = Request::Query("SELECT 1".into()).encode();
+    for _ in 0..3 {
+        write_frame(&mut waiting, &query).unwrap();
+        thread::sleep(Duration::from_millis(100));
+    }
+    let mut rest = [0u8; 16];
+    let end = std::io::Read::read(&mut waiting, &mut rest);
+    assert!(
+        matches!(end, Ok(0)),
+        "a clean close, not {end:?} (a reset is {:?})",
+        ErrorKind::ConnectionReset
+    );
+    assert!(run.join().unwrap().is_clean());
+}
+
+#[test]
+fn a_hello_finished_after_the_shutdown_started_gets_0x49_not_ready() {
+    // Mutation M11: the flag looked at between HELLO and READY. The HELLO
+    // began before the shutdown and ends just after it.
+    let server = start(config(SHORT));
+    let mut a = TcpStream::connect(server.addr).unwrap();
+    a.set_read_timeout(Some(TIMEOUT)).unwrap();
+    let mut hello = Vec::new();
+    write_frame(&mut hello, &Request::Hello { version: VERSION }.encode()).unwrap();
+    a.write_all(&hello[..1]).unwrap();
+    thread::sleep(Duration::from_millis(50));
+    server.handle.shutdown();
+    a.write_all(&hello[1..]).unwrap();
+    expect_shutting_down(&mut a);
+    let (report, _) = server.shut_down();
+    assert!(report.is_clean(), "{report:?}");
 }

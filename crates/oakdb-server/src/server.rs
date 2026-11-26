@@ -1155,6 +1155,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_last_connection_ending_just_before_the_margin_still_gets_the_checkpoint() {
+        // Review S2: the database is let go of a moment after the last seat
+        // is given back. When that happens at the very end of the grace and
+        // margin, the close still needs a moment of its own.
+        use oakdb::fs::sim::SimFs;
+
+        let db = Db::open_with(SimFs::new(), "/oak").unwrap();
+        let config = Config::default().with(|c| {
+            c.port = 0;
+            c.shutdown_grace = Duration::ZERO;
+        });
+        let server = Server::bind(db, config).unwrap();
+        // The shutdown started a grace and a margin ago: the deadline is
+        // now, and nobody is seated.
+        let started = Instant::now()
+            .checked_sub(SHUTDOWN_MARGIN)
+            .expect("the clock goes back that far");
+        server.shared.stop.at.set(started).unwrap();
+        // Held as a connection thread holds it after giving its seat back.
+        let held = Arc::clone(&server.shared);
+        let letting_go = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            drop(held);
+        });
+        let report = server.run();
+        letting_go.join().unwrap();
+        assert!(report.is_clean(), "{report:?}");
+    }
+
     // A panic on a connection's thread used to come from a planted disk
     // panic; since the commit thread turns its own panics into an engine
     // error (#27), nothing the tests can plant reaches this thread, so the
