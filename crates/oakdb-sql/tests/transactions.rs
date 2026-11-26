@@ -326,7 +326,8 @@ fn an_insert_repeating_a_key_of_its_own_leaves_nothing_inside_begin() {
     let e = fail(&mut session, "INSERT INTO t VALUES (4, 4), (5, 'x')");
     assert!(matches!(e, SqlError::TypeMismatch { .. }), "{e:?}");
     let e = fail(&mut session, "INSERT INTO t VALUES (6, 6), (NULL, 7)");
-    assert!(matches!(e, SqlError::TypeMismatch { .. }), "{e:?}");
+    // Issue #34 (design 0027 E3): NullKey, was TypeMismatch { found: None }.
+    assert!(matches!(e, SqlError::NullKey { .. }), "{e:?}");
     let e = fail(&mut session, "INSERT INTO t VALUES (7, 7), (8)");
     assert!(matches!(e, SqlError::ValueCount { .. }), "{e:?}");
     assert_eq!(seen(&mut session), vec![]);

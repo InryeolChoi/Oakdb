@@ -447,7 +447,8 @@ fn type_errors_on(db: &Db<SimFs>) {
     );
     let e = err(db, "UPDATE t SET id = NULL");
     assert!(
-        matches!(&e, SqlError::TypeMismatch { column, expected: ColumnType::Integer, found: None } if column == "id"),
+        // Issue #34 (design 0027 E3): NullKey, was TypeMismatch { found: None }.
+        matches!(&e, SqlError::NullKey { column } if column == "id"),
         "{e:?}"
     );
     let e = err(db, "UPDATE t SET a = (a = 1)");
@@ -546,7 +547,8 @@ fn a_primary_key_that_becomes_null_at_run_time_fails_and_changes_nothing() {
     let before = all(&db);
     let e = err(&db, "UPDATE t SET id = a");
     assert!(
-        matches!(&e, SqlError::TypeMismatch { column, found: None, .. } if column == "id"),
+        // Issue #34 (design 0027 E3): NullKey, was TypeMismatch { found: None }.
+        matches!(&e, SqlError::NullKey { column } if column == "id"),
         "{e:?}"
     );
     assert_eq!(all(&db), before);
@@ -848,11 +850,9 @@ enum Kind {
 fn kind_of(e: &SqlError) -> Option<Kind> {
     match e {
         SqlError::DuplicateKey { .. } => Some(Kind::Duplicate),
-        SqlError::TypeMismatch {
-            column,
-            found: None,
-            ..
-        } if column == "id" => Some(Kind::NullKey),
+        // Issue #34 (design 0027 E3) moved a NULL key from TypeMismatch
+        // to NullKey.
+        SqlError::NullKey { column } if column == "id" => Some(Kind::NullKey),
         SqlError::Arithmetic(_) => Some(Kind::Arithmetic),
         _ => None,
     }

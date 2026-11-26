@@ -600,7 +600,8 @@ fn each_statement_error_gets_its_documented_code_and_the_connection_stays_open()
         ("INSERT INTO u VALUES (3, 'a'), (3, 'b')".into(), 0x08),
         ("INSERT INTO u VALUES ('one', 'kim')".into(), 0x09),
         ("INSERT INTO u VALUES (4, 5)".into(), 0x09),
-        ("INSERT INTO u VALUES (NULL, 'kim')".into(), 0x09),
+        // Issue #34 (design 0027 E3): a NULL key is 0x0D, was 0x09.
+        ("INSERT INTO u VALUES (NULL, 'kim')".into(), 0x0d),
         ("SELECT * FROM u WHERE id = 'x'".into(), 0x09),
         (format!("INSERT INTO tk VALUES ('{long_key}')"), 0x21),
     ];
@@ -617,12 +618,14 @@ fn each_statement_error_gets_its_documented_code_and_the_connection_stays_open()
 }
 
 #[test]
-fn a_syntax_error_message_names_the_byte_position() {
+// Issue #34 (design 0027 E11): the message names the line and column
+// instead of the byte.
+fn a_syntax_error_message_names_the_line_and_column() {
     let (srv, _dir) = start(&[]);
     let mut s = open(srv.addr);
     let (code, msg) = expect_error(&mut s, "SELECT * FROM t WHERE id = 'oops");
     assert_eq!(code, 0x01);
-    assert!(msg.contains("byte"), "message: {msg}");
+    assert!(msg.contains("line 1, column 28"), "message: {msg}");
 }
 
 #[test]

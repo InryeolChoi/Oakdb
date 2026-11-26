@@ -299,3 +299,110 @@ fn both_kinds_of_conflict_carry_the_conflict_code() {
         code::CONFLICT
     );
 }
+
+/// Design 0027 E8, E13: what each known kind of error maps to. No known
+/// kind gets 0x1F, the code for "a statement error this build has no code
+/// for", except the transaction state errors, whose code 0x0B issue #37
+/// (design 0025 Q2) adds.
+#[test]
+fn every_known_kind_has_its_own_code() {
+    use oakdb_sql::{every_kind, TransactionError};
+    let mut seen = std::collections::BTreeMap::new();
+    for e in every_kind() {
+        let c = error_code(&e);
+        let expected = match &e {
+            SqlError::Syntax { .. } => code::SYNTAX,
+            SqlError::Unsupported(_) => code::UNSUPPORTED,
+            SqlError::NoSuchTable(_) => code::NO_SUCH_TABLE,
+            SqlError::NoSuchColumn { .. } => code::NO_SUCH_COLUMN,
+            SqlError::TableExists(_) => code::TABLE_EXISTS,
+            SqlError::DuplicateColumn(_) => code::DUPLICATE_COLUMN,
+            SqlError::ValueCount { .. } => code::VALUE_COUNT,
+            SqlError::DuplicateKey { .. } => code::DUPLICATE_KEY,
+            SqlError::TypeMismatch { .. } | SqlError::Type(_) => code::TYPE_MISMATCH,
+            SqlError::Arithmetic(_) => code::ARITHMETIC,
+            SqlError::NullKey { .. } => code::NULL_KEY,
+            SqlError::Corrupt(_) => code::SQL_CORRUPT,
+            // Issue #37 gives these 0x0B; until it lands they are the one
+            // known kind left at 0x1F.
+            SqlError::Transaction(
+                TransactionError::AlreadyBegun
+                | TransactionError::NotBegun
+                | TransactionError::NeedsSession,
+            ) => code::OTHER_STATEMENT,
+            SqlError::TransactionConflict(_) => code::CONFLICT,
+            SqlError::Engine(engine) => match engine {
+                oakdb::Error::Conflict { .. } => code::CONFLICT,
+                oakdb::Error::KeyTooLarge { .. } => code::KEY_TOO_LARGE,
+                oakdb::Error::ValueTooLarge { .. } => code::VALUE_TOO_LARGE,
+                oakdb::Error::Corrupt(_) => code::CORRUPT,
+                oakdb::Error::Io(_) => code::IO,
+                oakdb::Error::OutcomeUnknown(_) => code::OUTCOME_UNKNOWN,
+                oakdb::Error::Stopped(_) => code::STOPPED,
+                _ => code::OTHER_ENGINE,
+            },
+            other => panic!("every_kind holds a kind this test does not know: {other:?}"),
+        };
+        assert_eq!(c, expected, "{e:?}");
+        if !matches!(e, SqlError::Transaction(_)) {
+            assert_ne!(c, code::OTHER_STATEMENT, "{e:?} falls to 0x1F");
+        }
+        // Statement errors are 0x01-0x1F, engine errors 0x20-0x3F, and
+        // none of them closes the connection.
+        let statement = !matches!(e, SqlError::Engine(_) | SqlError::TransactionConflict(_));
+        let range = if statement { 0x01..=0x1f } else { 0x20..=0x3f };
+        assert!(range.contains(&c), "{e:?}: 0x{c:02x}");
+        assert!(!closes(c), "{e:?}");
+        seen.entry(c)
+            .or_insert_with(Vec::new)
+            .push(format!("{e:?}"));
+    }
+    // The new codes are their own, and 0x0B stays free for issue #37.
+    assert!(!seen.contains_key(&0x0b), "{seen:?}");
+    for c in [code::TYPE_MISMATCH, code::ARITHMETIC, code::NULL_KEY] {
+        assert!(seen.contains_key(&c), "0x{c:02x}");
+    }
+}
+
+/// The codes this build defines are all different.
+#[test]
+fn no_two_codes_share_a_number() {
+    let codes = [
+        code::SYNTAX,
+        code::UNSUPPORTED,
+        code::NO_SUCH_TABLE,
+        code::NO_SUCH_COLUMN,
+        code::TABLE_EXISTS,
+        code::DUPLICATE_COLUMN,
+        code::VALUE_COUNT,
+        code::DUPLICATE_KEY,
+        code::TYPE_MISMATCH,
+        code::SQL_CORRUPT,
+        code::ARITHMETIC,
+        code::NULL_KEY,
+        code::OTHER_STATEMENT,
+        code::CONFLICT,
+        code::KEY_TOO_LARGE,
+        code::VALUE_TOO_LARGE,
+        code::CORRUPT,
+        code::IO,
+        code::OUTCOME_UNKNOWN,
+        code::STOPPED,
+        code::OTHER_ENGINE,
+        code::MALFORMED,
+        code::FRAME_TOO_LARGE,
+        code::HANDSHAKE,
+        code::NOT_UTF8,
+        code::RESULT_TOO_LARGE,
+        code::TOO_MANY_CONNECTIONS,
+        code::NOT_ALLOWED,
+        code::INTERNAL,
+    ];
+    let distinct: std::collections::HashSet<u8> = codes.iter().copied().collect();
+    assert_eq!(distinct.len(), codes.len());
+    // Numbers other open tickets hold: 0x0B, 0x47, 0x48 (issue #37) and
+    // 0x49 (ticket 26).
+    for held in [0x0b, 0x47, 0x48, 0x49] {
+        assert!(!codes.contains(&held), "0x{held:02x}");
+    }
+}

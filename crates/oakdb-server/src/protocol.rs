@@ -64,10 +64,19 @@ pub mod code {
     pub const VALUE_COUNT: u8 = 0x07;
     /// A row with this primary key exists.
     pub const DUPLICATE_KEY: u8 = 0x08;
-    /// A value does not fit its column.
+    /// A type error: a value or an expression is not of the type its place
+    /// needs (design 0027 E8: both `TypeMismatch` and `Type`).
     pub const TYPE_MISMATCH: u8 = 0x09;
     /// What the SQL layer stored cannot be read back.
     pub const SQL_CORRUPT: u8 = 0x0a;
+    // 0x0b is kept for transaction state errors, which issue #37 (design
+    // 0025 Q2) adds.
+    /// A value out of range: integer overflow, division by zero, or an
+    /// integer literal that does not fit in 64 bits (design 0027 E4).
+    pub const ARITHMETIC: u8 = 0x0c;
+    /// A NULL in a column that cannot hold one, the primary key (design
+    /// 0027 E3).
+    pub const NULL_KEY: u8 = 0x0d;
     /// A statement error of a kind this build has no code for.
     pub const OTHER_STATEMENT: u8 = 0x1f;
     /// Another transaction committed a write to the same key first. Running
@@ -290,7 +299,9 @@ pub fn error_code(e: &SqlError) -> u8 {
         SqlError::DuplicateColumn(_) => code::DUPLICATE_COLUMN,
         SqlError::ValueCount { .. } => code::VALUE_COUNT,
         SqlError::DuplicateKey { .. } => code::DUPLICATE_KEY,
-        SqlError::TypeMismatch { .. } => code::TYPE_MISMATCH,
+        SqlError::TypeMismatch { .. } | SqlError::Type(_) => code::TYPE_MISMATCH,
+        SqlError::Arithmetic(_) => code::ARITHMETIC,
+        SqlError::NullKey { .. } => code::NULL_KEY,
         SqlError::Corrupt(_) => code::SQL_CORRUPT,
         SqlError::TransactionConflict(_) => code::CONFLICT,
         SqlError::Engine(e) => match e {

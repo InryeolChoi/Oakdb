@@ -59,25 +59,25 @@ impl Table {
 
     /// Whether a value of type `found` (`None` for NULL) fits column
     /// `column`: of its type, or NULL anywhere but the primary key. If not,
-    /// the error says so.
+    /// the error says so: a NULL key is [`SqlError::NullKey`], a constraint,
+    /// and a value of another type is [`SqlError::TypeMismatch`] (design
+    /// 0027 E3).
     pub(crate) fn check_fits(
         &self,
         column: usize,
         found: Option<ColumnType>,
     ) -> Result<(), SqlError> {
         let expected = self.columns[column].column_type;
-        let fits = match found {
-            None => column != self.primary_key,
-            Some(found) => found == expected,
-        };
-        if fits {
-            Ok(())
-        } else {
-            Err(SqlError::TypeMismatch {
+        match found {
+            None if column == self.primary_key => Err(SqlError::NullKey {
+                column: self.columns[column].name.clone(),
+            }),
+            Some(found) if found != expected => Err(SqlError::TypeMismatch {
                 column: self.columns[column].name.clone(),
                 expected,
-                found,
-            })
+                found: Some(found),
+            }),
+            _ => Ok(()),
         }
     }
 

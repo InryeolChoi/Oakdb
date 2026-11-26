@@ -490,11 +490,13 @@ fn or_and_not_equal_across_key_values() {
 }
 
 #[test]
-fn an_integer_literal_beyond_i64_is_a_syntax_error() {
+// Issue #34 (design 0027 E4): a literal out of range is Arithmetic, was
+// Syntax.
+fn an_integer_literal_beyond_i64_is_a_value_out_of_range() {
     let (_d, db) = edges();
     assert!(matches!(
         err(&db, "SELECT id FROM t WHERE id > 9223372036854775808"),
-        SqlError::Syntax { .. }
+        SqlError::Arithmetic(_)
     ));
 }
 

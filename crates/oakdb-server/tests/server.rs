@@ -749,3 +749,52 @@ fn update_and_delete_return_their_row_counts_over_the_connection() {
         }
     );
 }
+
+/// Design 0027 E13: one statement per error group, sent to a real server,
+/// comes back with its group's code, and after each error the same
+/// connection runs the next statement as usual.
+#[test]
+fn each_error_group_comes_back_with_its_code_and_the_connection_goes_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut client = connect(start_on(dir.path()));
+    client
+        .query("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)")
+        .unwrap();
+    client.query("INSERT INTO t VALUES (1, 'a')").unwrap();
+    for (sql, expected) in [
+        ("SELECT * FORM t", code::SYNTAX),
+        ("SELECT COUNT(*) FROM t", code::UNSUPPORTED),
+        ("-- note\nSELECT * FROM t", code::UNSUPPORTED),
+        ("SELECT * FROM nope", code::NO_SUCH_TABLE),
+        ("SELECT nope FROM t", code::NO_SUCH_COLUMN),
+        (
+            "CREATE TABLE t (id INTEGER PRIMARY KEY)",
+            code::TABLE_EXISTS,
+        ),
+        (
+            "INSERT INTO t (id, id) VALUES (2, 2)",
+            code::DUPLICATE_COLUMN,
+        ),
+        ("INSERT INTO t VALUES (2)", code::VALUE_COUNT),
+        ("INSERT INTO t VALUES (1, 'b')", code::DUPLICATE_KEY),
+        ("SELECT * FROM t WHERE name = 1", code::TYPE_MISMATCH),
+        ("SELECT * FROM t WHERE name + 1 = 2", code::TYPE_MISMATCH),
+        ("SELECT * FROM t WHERE 1 / 0 = 1", code::ARITHMETIC),
+        (
+            "SELECT * FROM t WHERE id = 99999999999999999999",
+            code::ARITHMETIC,
+        ),
+        ("INSERT INTO t VALUES (NULL, 'b')", code::NULL_KEY),
+    ] {
+        let result = client.query(sql);
+        assert_eq!(server_error(result), expected, "{sql}");
+        assert_eq!(
+            client.query("SELECT id FROM t").unwrap(),
+            Output::Rows {
+                columns: vec!["id".into()],
+                rows: vec![vec![Value::Integer(1)]],
+            },
+            "after {sql}"
+        );
+    }
+}

@@ -6,8 +6,12 @@ use crate::ColumnType;
 
 /// Everything that can go wrong running a SQL statement.
 ///
-/// Issue #34 will refine these, so the enum is `non_exhaustive`: callers
-/// match the kinds they care about and keep a catch-all arm.
+/// The kinds are flat (design 0027 E6): each is one `catch` a client may
+/// want, and the groups they fall into (syntax, names, types, values out of
+/// range, constraints, transaction state, run again, engine) are the ranges
+/// of the wire codes in `docs/protocol.md`, section 6. The enum is
+/// `non_exhaustive`: callers match the kinds they care about and keep a
+/// catch-all arm.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum SqlError {
@@ -16,6 +20,11 @@ pub enum SqlError {
     Syntax {
         /// Byte offset in the statement, from 0, where the problem starts.
         position: usize,
+        /// The line of `position`, from 1. Lines end at `\n`.
+        line: usize,
+        /// The column of `position` in its line, from 1, counted in
+        /// characters, so `'김'` is one and so is a tab (design 0027 E11).
+        column: usize,
         /// What was expected or what is wrong.
         message: String,
     },
@@ -50,14 +59,16 @@ pub enum SqlError {
         /// The table.
         table: String,
     },
-    /// A value does not fit its column: it is of another type, or it is
-    /// NULL in the primary key.
+    /// A value does not fit its column: it is of another type. A NULL in
+    /// the primary key is [`SqlError::NullKey`] (design 0027 E3).
     TypeMismatch {
         /// The column.
         column: String,
         /// The column's type.
         expected: ColumnType,
-        /// The value's type, `None` for NULL.
+        /// The value's type. Always `Some` since issue #34; the `Option`
+        /// stays so the field keeps its shape (design 0027, small question
+        /// 1).
         found: Option<ColumnType>,
     },
     /// An expression mixes types where it cannot (design 0019, section
@@ -66,9 +77,17 @@ pub enum SqlError {
     /// plain column (that case is [`SqlError::TypeMismatch`]). Found
     /// before any row is read.
     Type(String),
-    /// Integer arithmetic overflowed or divided by zero (design 0019,
-    /// section 2-2).
+    /// A value is out of range (design 0027 E4): integer arithmetic
+    /// overflowed or divided by zero (design 0019, section 2-2), or an
+    /// integer literal does not fit in 64 bits. The text says which, and
+    /// for a literal where it is.
     Arithmetic(String),
+    /// A NULL where a column cannot hold one: the primary key (design
+    /// 0027 E3). A constraint, like [`SqlError::DuplicateKey`], not a type.
+    NullKey {
+        /// The column.
+        column: String,
+    },
     /// What the SQL layer stored in the engine could not be read back. The
     /// text says what is wrong.
     Corrupt(String),
@@ -100,6 +119,71 @@ impl SqlError {
             SqlError::TransactionConflict(_) | SqlError::Engine(oakdb::Error::Conflict { .. })
         )
     }
+}
+
+/// One error of each kind of [`SqlError`], and of each known kind of
+/// engine error inside [`SqlError::Engine`], so a test outside this crate
+/// can check what each maps to (design 0027 E13: no known kind falls to
+/// the server's "other statement error" code). Not for use otherwise.
+///
+/// A unit test below matches every kind of this crate without a catch-all
+/// arm, so a new kind does not compile until it is added here too.
+#[doc(hidden)]
+pub fn every_kind() -> Vec<SqlError> {
+    let io = || std::sync::Arc::new(std::io::Error::other("sample"));
+    let mut kinds = vec![
+        SqlError::Syntax {
+            position: 0,
+            line: 1,
+            column: 1,
+            message: "sample".into(),
+        },
+        SqlError::Unsupported("sample".into()),
+        SqlError::NoSuchTable("t".into()),
+        SqlError::NoSuchColumn {
+            table: "t".into(),
+            column: "c".into(),
+        },
+        SqlError::TableExists("t".into()),
+        SqlError::DuplicateColumn("c".into()),
+        SqlError::ValueCount {
+            expected: 1,
+            found: 2,
+        },
+        SqlError::DuplicateKey { table: "t".into() },
+        SqlError::TypeMismatch {
+            column: "c".into(),
+            expected: ColumnType::Integer,
+            found: Some(ColumnType::Text),
+        },
+        SqlError::Type("sample".into()),
+        SqlError::Arithmetic("sample".into()),
+        SqlError::NullKey { column: "c".into() },
+        SqlError::Corrupt("sample".into()),
+        SqlError::Transaction(TransactionError::AlreadyBegun),
+        SqlError::Transaction(TransactionError::NotBegun),
+        SqlError::Transaction(TransactionError::NeedsSession),
+        SqlError::TransactionConflict(oakdb::Error::Conflict { key: vec![0] }),
+    ];
+    kinds.extend(
+        [
+            oakdb::Error::Io(io()),
+            oakdb::Error::OutcomeUnknown(io()),
+            oakdb::Error::Stopped(std::sync::Arc::new(oakdb::Error::Io(io()))),
+            oakdb::Error::KeyTooLarge { len: 513, max: 512 },
+            oakdb::Error::ValueTooLarge { len: 2, max: 1 },
+            oakdb::Error::PageSizeMismatch {
+                expected: 4096,
+                found: 512,
+            },
+            oakdb::Error::Corrupt("sample".into()),
+            oakdb::Error::AlreadyOpen,
+            oakdb::Error::Conflict { key: vec![0] },
+        ]
+        .into_iter()
+        .map(SqlError::Engine),
+    );
+    kinds
 }
 
 /// How a transaction command does not fit the session's state.
@@ -134,9 +218,12 @@ impl fmt::Display for TransactionError {
 impl fmt::Display for SqlError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SqlError::Syntax { position, message } => {
-                write!(f, "syntax error at byte {position}: {message}")
-            }
+            SqlError::Syntax {
+                line,
+                column,
+                message,
+                ..
+            } => write!(f, "syntax error at line {line}, column {column}: {message}"),
             SqlError::Unsupported(what) => write!(f, "unsupported: {what}"),
             SqlError::NoSuchTable(table) => write!(f, "no such table: {table}"),
             SqlError::NoSuchColumn { table, column } => {
@@ -163,6 +250,9 @@ impl fmt::Display for SqlError {
             } => write!(f, "column {column} is the primary key and cannot be NULL"),
             SqlError::Type(what) => write!(f, "type error: {what}"),
             SqlError::Arithmetic(what) => write!(f, "arithmetic error: {what}"),
+            SqlError::NullKey { column } => {
+                write!(f, "column {column} is the primary key and cannot be NULL")
+            }
             SqlError::Corrupt(reason) => write!(f, "stored SQL data is corrupt: {reason}"),
             SqlError::Transaction(e) => write!(f, "transaction error: {e}"),
             // Not the engine's text, which names an internal key and says
@@ -198,6 +288,55 @@ impl From<oakdb::Error> for SqlError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Which kind `e` is. No catch-all arm for this crate's kinds: a new
+    /// kind of [`SqlError`] or [`TransactionError`] fails to compile here
+    /// until [`every_kind`] holds it.
+    fn kind(e: &SqlError) -> &'static str {
+        match e {
+            SqlError::Syntax { .. } => "Syntax",
+            SqlError::Unsupported(_) => "Unsupported",
+            SqlError::NoSuchTable(_) => "NoSuchTable",
+            SqlError::NoSuchColumn { .. } => "NoSuchColumn",
+            SqlError::TableExists(_) => "TableExists",
+            SqlError::DuplicateColumn(_) => "DuplicateColumn",
+            SqlError::ValueCount { .. } => "ValueCount",
+            SqlError::DuplicateKey { .. } => "DuplicateKey",
+            SqlError::TypeMismatch { .. } => "TypeMismatch",
+            SqlError::Type(_) => "Type",
+            SqlError::Arithmetic(_) => "Arithmetic",
+            SqlError::NullKey { .. } => "NullKey",
+            SqlError::Corrupt(_) => "Corrupt",
+            SqlError::Transaction(TransactionError::AlreadyBegun) => "AlreadyBegun",
+            SqlError::Transaction(TransactionError::NotBegun) => "NotBegun",
+            SqlError::Transaction(TransactionError::NeedsSession) => "NeedsSession",
+            SqlError::TransactionConflict(_) => "TransactionConflict",
+            SqlError::Engine(e) => match e {
+                oakdb::Error::Io(_) => "Io",
+                oakdb::Error::OutcomeUnknown(_) => "OutcomeUnknown",
+                oakdb::Error::Stopped(_) => "Stopped",
+                oakdb::Error::KeyTooLarge { .. } => "KeyTooLarge",
+                oakdb::Error::ValueTooLarge { .. } => "ValueTooLarge",
+                oakdb::Error::PageSizeMismatch { .. } => "PageSizeMismatch",
+                oakdb::Error::Corrupt(_) => "EngineCorrupt",
+                oakdb::Error::AlreadyOpen => "AlreadyOpen",
+                oakdb::Error::Conflict { .. } => "Conflict",
+                // The engine's enum is `non_exhaustive` to this crate, so a
+                // new engine kind is caught by the server's own check that
+                // it gets an engine code, not here.
+                _ => "OtherEngine",
+            },
+        }
+    }
+
+    #[test]
+    fn every_kind_holds_each_kind_once() {
+        let kinds: Vec<&str> = every_kind().iter().map(kind).collect();
+        let distinct: std::collections::HashSet<&str> = kinds.iter().copied().collect();
+        assert_eq!(distinct.len(), kinds.len(), "{kinds:?}");
+        // 17 SQL kinds (three of them transaction errors) and 9 engine ones.
+        assert_eq!(kinds.len(), 26, "{kinds:?}");
+    }
 
     /// A statement that ran on its own and lost a conflict says to run it
     /// again, in one SQL sentence, without the engine's advice to "begin

@@ -43,7 +43,7 @@ use std::fmt;
 use oakdb::fs::Fs;
 use oakdb::Db;
 
-pub use error::{SqlError, TransactionError};
+pub use error::{every_kind, SqlError, TransactionError};
 pub use session::Session;
 
 /// Runs one SQL statement on `db` and returns what it produced.

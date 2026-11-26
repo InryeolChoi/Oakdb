@@ -763,7 +763,9 @@ fn same(a: &Model, b: &Model) -> bool {
 fn failure(e: &SqlError) -> Option<Failure> {
     match e {
         SqlError::Arithmetic(_) => Some(Failure::Overflow),
-        SqlError::TypeMismatch { found: None, .. } => Some(Failure::NullKey),
+        // Issue #34 (design 0027 E3) moved a NULL key from TypeMismatch
+        // to NullKey.
+        SqlError::NullKey { .. } => Some(Failure::NullKey),
         SqlError::DuplicateKey { .. } => Some(Failure::Duplicate),
         _ => None,
     }
