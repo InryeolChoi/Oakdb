@@ -232,7 +232,11 @@ fn load(port: u16, client: i64, tally: &Mutex<Tally>) {
                 return;
             }
             for id in ids {
-                if !fate(c.query(&format!("INSERT INTO t VALUES ({id})")), &ids, false) {
+                if !fate(
+                    c.query(&format!("INSERT INTO t VALUES ({id})")),
+                    &ids,
+                    false,
+                ) {
                     return;
                 }
             }
@@ -241,7 +245,11 @@ fn load(port: u16, client: i64, tally: &Mutex<Tally>) {
             }
             tally.lock().unwrap().committed.extend_from_slice(&ids);
         } else {
-            if !fate(c.query(&format!("INSERT INTO t VALUES ({next})")), &[next], true) {
+            if !fate(
+                c.query(&format!("INSERT INTO t VALUES ({next})")),
+                &[next],
+                true,
+            ) {
                 return;
             }
             tally.lock().unwrap().committed.push(next);
@@ -290,7 +298,11 @@ fn sigterm(rounds: u64) {
         let restarted = Serving::start(dir.path(), &[]);
         let present = ids(&mut restarted.client());
         let t = tally.lock().unwrap();
-        lost += t.committed.iter().filter(|id| !present.contains(id)).count();
+        lost += t
+            .committed
+            .iter()
+            .filter(|id| !present.contains(id))
+            .count();
         written += t.refused.iter().filter(|id| present.contains(id)).count();
         cut += t.cut;
         commits += t.committed.len();
@@ -342,7 +354,11 @@ fn kill9(rounds: u64) {
         opened += 1;
         let present = ids(&mut restarted.client());
         let t = tally.lock().unwrap();
-        lost += t.committed.iter().filter(|id| !present.contains(id)).count();
+        lost += t
+            .committed
+            .iter()
+            .filter(|id| !present.contains(id))
+            .count();
         cut += t.cut;
         unknown_total += t.unknown.len();
         unknown_kept += t.unknown.iter().filter(|id| present.contains(id)).count();
