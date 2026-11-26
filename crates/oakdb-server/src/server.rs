@@ -88,6 +88,13 @@ pub const TICK: Duration = Duration::from_millis(100);
 /// The message that goes with [`code::SHUTTING_DOWN`].
 pub const SHUTTING_DOWN_MESSAGE: &str = "server is shutting down";
 
+/// How long the database is waited for once the last connection has given
+/// its seat back: its thread lets go of it a moment later (review S2). It
+/// is counted from then, not from the shutdown's start, so a connection
+/// that ends at the very end of the grace and margin still gets the final
+/// checkpoint.
+const RELEASE: Duration = Duration::from_secs(1);
+
 /// How long the handle keeps trying to wake the accepting thread.
 const WAKE_FOR: Duration = Duration::from_secs(10);
 
@@ -189,13 +196,18 @@ struct Shared<F: Fs> {
 }
 
 impl<F: Fs> Shared<F> {
-    /// Whether a connection should now be closed with `0x49`: shutdown has
-    /// started, and it is outside a transaction or the grace is over.
+    /// When a connection is to be closed with `0x49`, once shutdown has
+    /// started: at once outside a transaction, at the end of the grace
+    /// inside one.
+    fn closes_at(&self, in_transaction: bool) -> Option<Instant> {
+        let at = *self.stop.at.get()?;
+        Some(if in_transaction { at + self.grace } else { at })
+    }
+
+    /// Whether a connection should now be closed with `0x49`.
     fn shutting_down(&self, in_transaction: bool) -> bool {
-        match self.stop.at.get() {
-            None => false,
-            Some(at) => !in_transaction || at.elapsed() >= self.grace,
-        }
+        self.closes_at(in_transaction)
+            .is_some_and(|at| Instant::now() >= at)
     }
 }
 
@@ -472,12 +484,14 @@ where
             return report;
         }
         // A connection thread lets go of the database a moment after it
-        // gives its seat back; a monitor holds it for a moment too.
+        // gives its seat back; a monitor holds it for a moment too. That
+        // moment is its own, not what is left of the grace and margin.
+        let let_go_by = Instant::now() + RELEASE;
         let mut shared = shared;
         let db = loop {
             match Arc::try_unwrap(shared) {
                 Ok(only) => break Some(only.db),
-                Err(back) if Instant::now() < give_up => {
+                Err(back) if Instant::now() < let_go_by => {
                     shared = back;
                     thread::sleep(Duration::from_millis(1));
                 }
@@ -755,9 +769,9 @@ fn timed_out(e: &io::Error) -> bool {
 }
 
 /// The socket's read and write timeouts, set only when they change. The
-/// wait for a frame's first byte reads in [`TICK`]s and the rest of the
-/// frame under the idle limit, so a statement costs two calls to set the
-/// read timeout; the write timeout is set only when the limit changes.
+/// wait for a frame's first byte and the reads of its rest both wake every
+/// [`TICK`], so a statement usually sets no option at all; the write
+/// timeout is set only when the limit changes.
 struct Timeouts<'s> {
     stream: &'s TcpStream,
     read: Option<Duration>,
@@ -825,10 +839,11 @@ fn serve<F: Fs>(shared: &Shared<F>, stream: &TcpStream, peer: SocketAddr) -> io:
         Wait::Closed => return Ok(()),
         Wait::Idle | Wait::ShuttingDown => return shut(shared, stream, None),
     }
-    timeouts.read(None)?;
-    let frame = match read_frame(&mut reader) {
+    let mut rest = Rest::new(shared, &mut reader, &mut timeouts, None, false);
+    let frame = match read_frame(&mut rest) {
         Ok(Some(frame)) => frame,
         Ok(None) => return Ok(()),
+        Err(FrameError::Io(_)) if rest.shut => return shut(shared, stream, None),
         Err(e) => return frame_failed(stream, e),
     };
     let refused = match Request::decode(frame) {
@@ -876,11 +891,13 @@ fn serve<F: Fs>(shared: &Shared<F>, stream: &TcpStream, peer: SocketAddr) -> io:
             Wait::Idle => return idled(stream, session, idle, peer),
             Wait::ShuttingDown => return shut(shared, stream, Some(session)),
         }
-        // Halfway through a frame, each read gets the same limit.
-        timeouts.read(idle)?;
-        let frame = match read_frame(&mut reader) {
+        // Halfway through a frame, each read gets the same limit, and the
+        // shutdown reaches it too (review S1).
+        let mut rest = Rest::new(shared, &mut reader, &mut timeouts, idle, in_transaction);
+        let frame = match read_frame(&mut rest) {
             Ok(Some(frame)) => frame,
             Ok(None) => return Ok(()),
+            Err(FrameError::Io(_)) if rest.shut => return shut(shared, stream, Some(session)),
             Err(FrameError::Io(e)) if timed_out(&e) => {
                 return idled(stream, session, idle, peer);
             }
@@ -968,6 +985,83 @@ fn wait_for_frame<F: Fs>(
                 }
             }
             Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Reads the rest of a frame whose first byte is here. Each read waits at
+/// most `idle`, as before; it wakes every [`TICK`] to look at the shutdown
+/// flag, and once the connection is to close it gives a frame already on
+/// its way one more tick and then gives up, with [`Rest::shut`] set
+/// (review S1). Without that, a client that sent one byte and stopped held
+/// the shutdown for the grace and the margin, and ended it without the
+/// final checkpoint. A read that times out has read nothing, so waking
+/// loses no byte.
+struct Rest<'a, 'r, 's, F: Fs> {
+    shared: &'a Shared<F>,
+    reader: &'a mut BufReader<&'r TcpStream>,
+    timeouts: &'a mut Timeouts<'s>,
+    idle: Option<Duration>,
+    in_transaction: bool,
+    /// Whether the read gave up because the server is shutting down.
+    shut: bool,
+}
+
+impl<'a, 'r, 's, F: Fs> Rest<'a, 'r, 's, F> {
+    fn new(
+        shared: &'a Shared<F>,
+        reader: &'a mut BufReader<&'r TcpStream>,
+        timeouts: &'a mut Timeouts<'s>,
+        idle: Option<Duration>,
+        in_transaction: bool,
+    ) -> Self {
+        Rest {
+            shared,
+            reader,
+            timeouts,
+            idle,
+            in_transaction,
+            shut: false,
+        }
+    }
+}
+
+impl<F: Fs> Read for Rest<'_, '_, '_, F> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let idle_until = self.idle.map(|idle| Instant::now() + idle);
+        loop {
+            let now = Instant::now();
+            let stop_at = self
+                .shared
+                .closes_at(self.in_transaction)
+                .map(|at| at + TICK);
+            if stop_at.is_some_and(|at| now >= at) {
+                self.shut = true;
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    SHUTTING_DOWN_MESSAGE,
+                ));
+            }
+            if idle_until.is_some_and(|at| now >= at) {
+                return Err(io::ErrorKind::TimedOut.into());
+            }
+            let wake = match (idle_until, stop_at) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+            // As in `wait_for_frame`: at least a millisecond, and TICK when
+            // nothing is due sooner, so a statement sets no option again.
+            let timeout = match wake {
+                Some(w) if w < now + TICK => w
+                    .saturating_duration_since(now)
+                    .max(Duration::from_millis(1)),
+                _ => TICK,
+            };
+            self.timeouts.read(Some(timeout))?;
+            match self.reader.read(buf) {
+                Err(e) if e.kind() == io::ErrorKind::Interrupted || timed_out(&e) => {}
+                done => return done,
+            }
         }
     }
 }

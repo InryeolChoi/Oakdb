@@ -75,3 +75,5 @@ target/release/examples/shutdown_faults second 20
 | 2. 종료 도중 kill -9 ×50 | 50번 모두 다시 열림, 응답한 커밋 손실 0 |
 | 3. 두 번째 Ctrl-C ×20 | 130 ×20, 1초 안에 끝남, 다시 열면 온전 |
 | 4. 멈춘 엔진 | 체크포인트 실패 보고 → exit 1, 응답한 커밋 있음 (프로세스 안 테스트로 대신) |
+
+> **Linux 숫자는 아직 없다 (PR #84 리뷰 P14, 결정 D5).** 위 표는 모두 macOS다. 설계 Q11은 "두 OS CI에서 20회쯤"을 말했지만, CI 시간 때문에 `tests/signal.rs`의 부하 불변식은 **5라운드로 둔다**(사용자 결정). 눈 가린 테스터의 `tests/blind_shutdown.rs`가 같은 불변식을 5라운드 더 돌리므로 CI는 OS마다 10라운드를 본다. Linux 기계에서 `shutdown_faults sigterm 100`·`kill9 50`·`second 20`을 돌릴 기회가 오면 이 기록에 덧붙인다.
