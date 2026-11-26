@@ -2,7 +2,7 @@
 
 use std::fmt;
 use std::io::{self, BufReader};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{Shutdown, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use oakdb_sql::{transaction_command, Output, TransactionCommand};
@@ -88,6 +88,13 @@ impl Client {
     /// [`Client::in_transaction`].
     pub fn query(&mut self, sql: &str) -> Result<Output, ClientError> {
         let result = self.call(&Request::Query(sql.to_string()));
+        if let Err(ClientError::Io(_) | ClientError::Protocol(_)) = &result {
+            // A read that timed out, or an answer that made no sense: a
+            // late response would be taken for the next one, so this
+            // connection is done. Closing it also tells the server, which
+            // rolls back what it held once it sees the close (review S6).
+            let _ = self.writer.shutdown(Shutdown::Both);
+        }
         self.in_transaction = match (&result, transaction_command(sql)) {
             // The connection is over, and with it the transaction.
             (Err(ClientError::Server { code, .. }), _) if closes(*code) => false,
@@ -114,6 +121,13 @@ impl Client {
     /// sent and what came back, by the protocol's rule; it asks the server
     /// nothing. Once the connection breaks, it is `false`: the server
     /// rolls back the transaction of a connection that ends.
+    ///
+    /// After [`ClientError::Io`], a timeout from [`Client::set_timeout`]
+    /// included, the client closes the connection and this is `false` at
+    /// once, but the server may still hold the transaction for a moment:
+    /// until it finishes the statement it was running and sees the close.
+    /// A COMMIT that timed out may have committed; read the data again on
+    /// a new connection to know. Every later call on this `Client` fails.
     pub fn in_transaction(&self) -> bool {
         self.in_transaction
     }

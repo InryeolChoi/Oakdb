@@ -506,10 +506,11 @@ impl std::io::Read for Pausing {
 
 #[test]
 fn when_the_server_closes_on_a_transaction_the_cli_says_it_was_rolled_back_and_exits_1() {
-    let addr = in_process(
-        oakdb_server::server::Config::default()
-            .with(|c| c.idle_in_transaction_timeout = Some(Duration::from_millis(100))),
-    );
+    let addr = in_process(oakdb_server::server::Config::default().with(|c| {
+        // Long enough that a slow runner never trips it between BEGIN and
+        // INSERT, short against the two-second pause below.
+        c.idle_in_transaction_timeout = Some(Duration::from_millis(500));
+    }));
     let input = Pausing {
         parts: vec![
             (
@@ -517,7 +518,7 @@ fn when_the_server_closes_on_a_transaction_the_cli_says_it_was_rolled_back_and_e
                 b"CREATE TABLE t (id INTEGER PRIMARY KEY);\nBEGIN;\nINSERT INTO t VALUES (1);\n"
                     .to_vec(),
             ),
-            (Duration::from_millis(600), b"COMMIT;\nSELECT 1;\n".to_vec()),
+            (Duration::from_secs(2), b"COMMIT;\nSELECT 1;\n".to_vec()),
         ],
     };
     let (code, _, err) = run_cli(addr, BufReader::new(input));
@@ -531,20 +532,14 @@ fn when_the_server_closes_on_a_transaction_the_cli_says_it_was_rolled_back_and_e
     assert!(out.contains("(0 rows)"), "{out}");
 }
 
-#[test]
-fn the_server_logs_an_old_transaction_and_an_idle_close() {
+/// A server child process started with `options`, its log lines sent
+/// down the channel as they come, and the data directory it uses.
+fn serve_logging(options: &[&str]) -> (ServerProcess, mpsc::Receiver<String>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let mut child = oakdb()
-        .args([
-            "serve",
-            "--port",
-            "0",
-            "--idle-in-transaction-timeout",
-            "0.5",
-            "--warn-transaction-age",
-            "0.1",
-            "--data",
-        ])
+        .args(["serve", "--port", "0"])
+        .args(options)
+        .arg("--data")
         .arg(dir.path())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -561,29 +556,50 @@ fn the_server_logs_an_old_transaction_and_an_idle_close() {
             tx.send(line).ok();
         }
     });
+    (server, rx, dir)
+}
 
-    let mut stream = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+/// A raw socket to `port` that has said HELLO and read READY.
+fn raw_session(port: u16) -> TcpStream {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
     stream.set_read_timeout(Some(common::DEADLINE)).unwrap();
     write_frame(&mut stream, &Request::Hello { version: VERSION }.encode()).unwrap();
     read_frame(&mut stream).unwrap().unwrap();
-    write_frame(&mut stream, &Request::Query("BEGIN".into()).encode()).unwrap();
-    assert_eq!(
-        Response::decode(read_frame(&mut stream).unwrap().unwrap()).unwrap(),
-        Response::Done
-    );
-    // Nothing more: the warning comes first, then the close.
+    stream
+}
+
+fn query_raw(stream: &mut TcpStream, sql: &str) -> Response {
+    write_frame(stream, &Request::Query(sql.into()).encode()).unwrap();
+    Response::decode(read_frame(stream).unwrap().unwrap()).unwrap()
+}
+
+/// The log lines up to and including the first that contains `until`,
+/// failing past the deadline.
+fn log_until(rx: &mpsc::Receiver<String>, until: &str) -> Vec<String> {
     let deadline = Instant::now() + common::DEADLINE;
     let mut seen = Vec::new();
-    while !seen
-        .iter()
-        .any(|l: &String| l.contains("rolled back and closed"))
-    {
+    while !seen.iter().any(|l: &String| l.contains(until)) {
         let left = deadline.saturating_duration_since(Instant::now());
         match rx.recv_timeout(left) {
             Ok(line) => seen.push(line),
-            Err(_) => panic!("no idle line within the deadline: {seen:?}"),
+            Err(_) => panic!("no line with {until:?} within the deadline: {seen:?}"),
         }
     }
+    seen
+}
+
+#[test]
+fn the_server_logs_an_old_transaction_and_an_idle_close() {
+    let (server, rx, _dir) = serve_logging(&[
+        "--idle-in-transaction-timeout",
+        "0.5",
+        "--warn-transaction-age",
+        "0.1",
+    ]);
+    let mut stream = raw_session(server.port);
+    assert_eq!(query_raw(&mut stream, "BEGIN"), Response::Done);
+    // Nothing more: the warning comes first, then the close.
+    let seen = log_until(&rx, "rolled back and closed");
     let warned = seen
         .iter()
         .position(|l| l.contains("warning") && l.contains("transaction open for"));
@@ -594,6 +610,40 @@ fn the_server_logs_an_old_transaction_and_an_idle_close() {
         matches!((warned, closed), (Some(w), Some(c)) if w < c),
         "{seen:?}"
     );
+}
+
+#[test]
+fn the_server_logs_a_rollback_when_a_client_stops_reading_inside_a_transaction() {
+    // The write timeout cuts off a client that leaves a large result
+    // unread; the log says the transaction went with it (review S5).
+    let (server, rx, _dir) = serve_logging(&["--idle-in-transaction-timeout", "1"]);
+    let mut stream = raw_session(server.port);
+    assert_eq!(query_raw(&mut stream, "BEGIN"), Response::Done);
+    assert_eq!(
+        query_raw(
+            &mut stream,
+            "CREATE TABLE big (id INTEGER PRIMARY KEY, b BLOB)"
+        ),
+        Response::Done
+    );
+    let blob = "ab".repeat(512 * 1024);
+    for id in 0..24 {
+        let sql = format!("INSERT INTO big VALUES ({id}, X'{blob}')");
+        assert_eq!(query_raw(&mut stream, &sql), Response::Affected(1));
+    }
+    // Twelve MiB of rows, more than both socket buffers hold, never read.
+    write_frame(
+        &mut stream,
+        &Request::Query("SELECT b FROM big".into()).encode(),
+    )
+    .unwrap();
+    let seen = log_until(&rx, "the open transaction was rolled back");
+    assert!(
+        seen.iter()
+            .any(|l| l.contains("sending timed out; the open transaction was rolled back")),
+        "{seen:?}"
+    );
+    drop(stream);
 }
 
 // --- A server shutting down (issue #38, design 0028 Q6) ---

@@ -90,20 +90,26 @@ pub(crate) fn parse_command(sql: &str) -> Result<Command, SqlError> {
 /// Which transaction command `sql` is, if the parser takes it as one
 /// whole: what a [`crate::Session`] would run as BEGIN, COMMIT or
 /// ROLLBACK. Anything else, a statement or SQL that fails to parse, is
-/// `None`. Only a statement that starts with one of the three words is
-/// parsed past its first token.
+/// `None`. The first word is read straight from the bytes, so only a
+/// statement that starts with one of the three words is tokenized and
+/// parsed at all: a 16 MiB INSERT costs one short scan.
 pub(crate) fn transaction_command(sql: &str) -> Option<crate::TransactionCommand> {
+    let rest = sql.trim_start_matches(|c: char| c.is_ascii_whitespace());
+    let end = rest
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .unwrap_or(rest.len());
+    let first = &rest[..end];
+    if !["BEGIN", "COMMIT", "ROLLBACK"]
+        .iter()
+        .any(|keyword| first.eq_ignore_ascii_case(keyword))
+    {
+        return None;
+    }
     let mut parser = Parser {
         tokens: tokenize(sql).ok()?,
         at: 0,
         depth: 0,
     };
-    if !["BEGIN", "COMMIT", "ROLLBACK"]
-        .iter()
-        .any(|keyword| parser.at_keyword(keyword))
-    {
-        return None;
-    }
     let command = parser.command().ok()?;
     parser.finish().ok()?;
     match command {

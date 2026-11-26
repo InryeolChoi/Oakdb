@@ -858,7 +858,9 @@ fn serve<F: Fs>(shared: &Shared<F>, stream: &TcpStream, peer: SocketAddr) -> io:
         } else {
             shared.idle
         };
-        timeouts.write(idle)?;
+        if let Err(e) = timeouts.write(idle) {
+            return Err(rolled_back_on_error(session, e));
+        }
         let waited = wait_for_frame(
             shared,
             &mut reader,
@@ -896,7 +898,9 @@ fn serve<F: Fs>(shared: &Shared<F>, stream: &TcpStream, peer: SocketAddr) -> io:
                     (_, false) => None,
                 };
                 warn_if_old(shared, &mut open, peer);
-                send(stream, &response)?;
+                if let Err(e) = send(stream, &response) {
+                    return Err(rolled_back_on_error(session, e));
+                }
                 continue;
             }
             Err(DecodeError::NotUtf8) => (code::NOT_UTF8, DecodeError::NotUtf8.to_string()),
@@ -985,6 +989,27 @@ fn warn_if_old<F: Fs>(shared: &Shared<F>, open: &mut Option<Open>, peer: SocketA
             stats.open_transactions,
         );
     }
+}
+
+/// Ends `session` for a connection that failed on a write, and says in
+/// the error, which [`serve_guarded`] logs, whether that rolled a
+/// transaction back: a client that stops reading a large result is cut off
+/// by the write timeout, and the operator should see what it lost
+/// (review S5).
+fn rolled_back_on_error<F: Fs>(session: Session<'_, F>, e: io::Error) -> io::Error {
+    if !session.in_transaction() {
+        return e;
+    }
+    drop(session);
+    let what = if timed_out(&e) {
+        "sending timed out".to_string()
+    } else {
+        e.to_string()
+    };
+    io::Error::new(
+        e.kind(),
+        format!("{what}; the open transaction was rolled back and the connection closed"),
+    )
 }
 
 /// The connection idled past its limit: rolls back what it held, tells it
