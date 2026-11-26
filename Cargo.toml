@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/oakdb", "crates/oakdb-history", "crates/oakdb-sql", "crates/oakdb-server"]
+members = [
+    "crates/oakdb",
+    "crates/oakdb-history",
+    "crates/oakdb-sql",
+    "crates/oakdb-server",
+    "crates/oakdb-bench",
+]
 
 [workspace.package]
 edition = "2021"

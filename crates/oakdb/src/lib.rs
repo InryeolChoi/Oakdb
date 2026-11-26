@@ -19,8 +19,8 @@ mod tree;
 mod wal;
 
 pub use db::{
-    check_key, check_value_len, Db, Scan, Stats, Txn, CHECKPOINT_AFTER, COMMIT_THREAD, DATA_FILE,
-    MAX_BATCH,
+    check_key, check_value_len, Db, Scan, Stats, Txn, BATCH_SIZE_BUCKETS, CHECKPOINT_AFTER,
+    COMMIT_THREAD, DATA_FILE, MAX_BATCH,
 };
 pub use error::{Error, Result, MAX_ENTRY_LEN, MAX_KEY_LEN, MAX_VALUE_LEN};
 #[cfg(feature = "planted-bugs")]

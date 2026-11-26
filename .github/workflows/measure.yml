@@ -8,6 +8,8 @@ on:
     paths:
       - crates/oakdb/benches/**
       - crates/oakdb/examples/ab_commit_sync.rs
+      - crates/oakdb-bench/**
+      - docs/experiments/scripts/bench_concurrent.py
       - .github/workflows/measure.yml
 
 jobs:
@@ -29,6 +31,7 @@ jobs:
             echo '```'
             uname -a
             rustc --version
+            date -u '+measured at %FT%TZ'
             if [ "$RUNNER_OS" = Linux ]; then
               grep -m1 'model name' /proc/cpuinfo
               nproc
@@ -38,6 +41,7 @@ jobs:
               sysctl -n machdep.cpu.brand_string hw.ncpu
               df -h "${TMPDIR:-/tmp}"
               diskutil info / | grep -E 'File System Personality|Solid State|Device / Media Name' || true
+              pmset -g batt | head -1 || true
             fi
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY" measure.txt
@@ -62,7 +66,19 @@ jobs:
               echo '```'
             } | tee -a "$GITHUB_STEP_SUMMARY" measure.txt
           done
+      # Commits a second from 1, 4 and 16 threads, Oakdb against SQLite
+      # (issue #30, benchmark 0010): a record of the runner, and the
+      # direction of H1 and H2 only. The claims are judged on a Mac.
+      - name: Concurrent writes
+        run: |
+          python3 docs/experiments/scripts/bench_concurrent.py curve concurrent.csv 3 quick
+          {
+            echo "## Concurrent writes (3 rounds, 3 s windows)"
+            python3 docs/experiments/scripts/bench_concurrent.py report concurrent.csv
+          } | tee -a "$GITHUB_STEP_SUMMARY" measure.txt
       - uses: actions/upload-artifact@v4
         with:
           name: measure-${{ matrix.os }}
-          path: measure.txt
+          path: |
+            measure.txt
+            concurrent.csv
