@@ -22,8 +22,10 @@ use oakdb_sql::{Output, Value};
 /// How long a test waits on the server before failing instead of hanging.
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The idle limit the timeout tests use, short so they run fast.
-const SHORT: Duration = Duration::from_millis(200);
+/// The idle limit the timeout tests use: short so they run fast, long
+/// enough that a slow CI runner pausing a few hundred milliseconds between
+/// two statements does not trip it.
+const SHORT: Duration = Duration::from_secs(1);
 
 fn config() -> Config {
     Config {
@@ -274,6 +276,62 @@ fn a_malformed_frame_closes_the_connection_and_rolls_the_transaction_back() {
     });
 }
 
+/// Reads one frame and checks it is an `ERROR` with `expected`.
+fn expect_error(stream: &mut TcpStream, expected: u8) {
+    let frame = read_frame(stream).unwrap().expect("an ERROR first");
+    let response = Response::decode(frame).unwrap();
+    assert!(
+        matches!(response, Response::Error { code, .. } if code == expected),
+        "expected {expected:#04x}, got {response:?}"
+    );
+}
+
+#[test]
+fn a_frame_over_16_mib_inside_a_transaction_gets_0x41_and_a_rollback() {
+    ends_in_rollback(config(), |mut stream| {
+        // Only the length is sent: the server refuses on it alone.
+        let len = oakdb_server::protocol::MAX_FRAME_LEN + 1;
+        stream.write_all(&len.to_be_bytes()).unwrap();
+        expect_error(&mut stream, code::FRAME_TOO_LARGE);
+    });
+}
+
+#[test]
+fn an_empty_frame_inside_a_transaction_gets_0x40_and_a_rollback() {
+    ends_in_rollback(config(), |mut stream| {
+        stream.write_all(&[0, 0, 0, 0]).unwrap();
+        expect_error(&mut stream, code::MALFORMED);
+    });
+}
+
+#[test]
+fn when_0x47_arrives_the_transaction_is_already_rolled_back() {
+    // The order the server keeps on an idle timeout is roll back, tell,
+    // close (design 0025 Q5). So the moment the client reads 0x47, without
+    // waiting for the close, the engine holds no transaction and its rows
+    // are gone: a client that reconnects at once and writes the same key
+    // cannot meet the old transaction.
+    let (addr, monitor) = start(Config {
+        idle_in_transaction_timeout: Some(SHORT),
+        ..config()
+    });
+    let mut stream = raw(addr);
+    assert_eq!(send_raw(&mut stream, "BEGIN"), Response::Done);
+    assert_eq!(
+        send_raw(&mut stream, "INSERT INTO t VALUES (7, 7)"),
+        Response::Affected(1)
+    );
+    assert_eq!(monitor.stats().open_transactions, 1);
+    expect_error(&mut stream, code::IDLE_IN_TRANSACTION);
+    // No `eventually` here: it must already hold.
+    assert_eq!(monitor.stats().open_transactions, 0);
+    let mut other = connect(addr);
+    ok(&mut other, "BEGIN");
+    ok(&mut other, "INSERT INTO t VALUES (7, 70)");
+    ok(&mut other, "COMMIT");
+    assert_eq!(rows(&mut other), vec![(7, 70)]);
+}
+
 #[test]
 fn idling_in_a_transaction_gets_0x47_then_the_close_and_a_rollback() {
     let config = Config {
@@ -365,7 +423,7 @@ fn outside_a_transaction_an_idle_connection_stays_unless_told_otherwise() {
         ..config()
     });
     let mut a = connect(addr);
-    thread::sleep(SHORT * 3);
+    thread::sleep(SHORT + SHORT / 2);
     assert_eq!(rows(&mut a), vec![]);
 
     let (addr, monitor) = start(Config {
@@ -410,12 +468,56 @@ fn a_transaction_that_keeps_working_is_not_idle() {
     });
     let mut a = connect(addr);
     ok(&mut a, "BEGIN");
-    for i in 0..8 {
-        thread::sleep(SHORT / 4);
+    // Twelve tenths of the limit in all, a tenth between statements: the
+    // transaction outlives the limit while each wait leaves nine tenths
+    // to spare for a slow runner.
+    let started = Instant::now();
+    for i in 0..12 {
+        thread::sleep(SHORT / 10);
         ok(&mut a, &format!("INSERT INTO t VALUES ({i}, {i})"));
     }
+    assert!(started.elapsed() > SHORT);
     ok(&mut a, "COMMIT");
-    assert_eq!(rows(&mut a).len(), 8);
+    assert_eq!(rows(&mut a).len(), 12);
+}
+
+#[test]
+fn a_client_whose_read_times_out_closes_its_connection() {
+    // A server that says READY and then never answers. The client gives up
+    // on its timeout; it must close the socket, so a real server sees the
+    // close and rolls back, and a late answer cannot be taken for the next
+    // one (review S6).
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(TIMEOUT)).unwrap();
+        read_frame(&mut stream).unwrap().expect("HELLO");
+        write_frame(
+            &mut stream,
+            &Response::Ready { version: VERSION }.encode().unwrap(),
+        )
+        .unwrap();
+        read_frame(&mut stream).unwrap().expect("BEGIN");
+        write_frame(&mut stream, &Response::Done.encode().unwrap()).unwrap();
+        read_frame(&mut stream)
+            .unwrap()
+            .expect("the INSERT, left unanswered");
+        // What comes next is the client closing, not another frame.
+        read_frame(&mut stream)
+    });
+    let mut client = Client::connect(addr).unwrap();
+    client
+        .set_timeout(Some(Duration::from_millis(300)))
+        .unwrap();
+    ok(&mut client, "BEGIN");
+    assert!(client.in_transaction());
+    let e = client.query("INSERT INTO t VALUES (1, 1)").unwrap_err();
+    assert!(matches!(e, ClientError::Io(_)), "{e:?}");
+    assert!(!client.in_transaction());
+    assert!(matches!(server.join().unwrap(), Ok(None)));
+    assert!(client.query("SELECT 1").is_err());
 }
 
 // --- Many connections at once (Q10) ---

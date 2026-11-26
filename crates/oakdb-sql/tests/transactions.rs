@@ -869,6 +869,12 @@ fn transaction_command_names_only_what_a_session_would_run_as_one() {
         transaction_command("ROLLBACK TRANSACTION;"),
         Some(TransactionCommand::Rollback)
     );
+    // The first word is read before anything is tokenized: it ends at the
+    // first byte that cannot be in a name, whatever comes after it.
+    assert_eq!(
+        transaction_command("\n\t commit;"),
+        Some(TransactionCommand::Commit)
+    );
     for not_one in [
         "COMMIT now",
         "ROLLBACK TO s",
@@ -878,6 +884,11 @@ fn transaction_command_names_only_what_a_session_would_run_as_one() {
         "INSERT INTO t VALUES (1, 2)",
         "",
         "'unterminated",
+        "BEGINS",
+        "COMMIT_1",
+        "rollback1",
+        "_BEGIN",
+        "BEGIN 'unterminated",
     ] {
         assert_eq!(transaction_command(not_one), None, "{not_one}");
     }
