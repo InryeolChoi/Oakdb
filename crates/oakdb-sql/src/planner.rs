@@ -648,7 +648,7 @@ mod tests {
         ));
         assert!(matches!(
             assignments_of("id = NULL"),
-            Err(SqlError::TypeMismatch { column, found: None, .. }) if column == "id"
+            Err(SqlError::NullKey { column }) if column == "id"
         ));
         assert!(matches!(
             assignments_of("age = (age = 1)"),

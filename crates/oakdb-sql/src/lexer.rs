@@ -49,6 +49,13 @@ pub(crate) fn tokenize(sql: &str) -> Result<Vec<Spanned>, SqlError> {
         let token = if b.is_ascii_whitespace() {
             at += 1;
             continue;
+        } else if let Some(opener) = comment(&bytes[at..]) {
+            // Design 0027 E10: a comment is standard SQL that Oakdb does
+            // not read yet, so it is unsupported, not broken.
+            return Err(SqlError::Unsupported(format!(
+                "comments (`{opener}` at {}); remove the comment",
+                at_line_column(sql, start)
+            )));
         } else if (b == b'x' || b == b'X') && bytes.get(at + 1) == Some(&b'\'') {
             let (text, end) = quoted(sql, at + 1, start)?;
             at = end;
@@ -85,6 +92,35 @@ pub(crate) fn tokenize(sql: &str) -> Result<Vec<Spanned>, SqlError> {
         position: bytes.len(),
     });
     Ok(tokens)
+}
+
+/// The opener of the comment `rest` starts with, if it starts with one.
+fn comment(rest: &[u8]) -> Option<&'static str> {
+    ["--", "/*"]
+        .into_iter()
+        .find(|opener| rest.starts_with(opener.as_bytes()))
+}
+
+/// The line and column of byte `position` of `sql`, both from 1: lines end
+/// at `\n`, and the column counts characters, so a letter of several bytes
+/// or a tab is one (design 0027 E11). A position past the end is just after
+/// the last character.
+pub(crate) fn line_column(sql: &str, position: usize) -> (usize, usize) {
+    let mut end = position.min(sql.len());
+    while !sql.is_char_boundary(end) {
+        end -= 1;
+    }
+    let before = &sql[..end];
+    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+    let line = before.matches('\n').count() + 1;
+    let column = before[line_start..].chars().count() + 1;
+    (line, column)
+}
+
+/// `line L, column C` for byte `position` of `sql`.
+pub(crate) fn at_line_column(sql: &str, position: usize) -> String {
+    let (line, column) = line_column(sql, position);
+    format!("line {line}, column {column}")
 }
 
 /// Whether `b` can be part of a name or keyword after its first byte.
@@ -154,11 +190,33 @@ fn symbol(rest: &[u8]) -> Option<&'static str> {
         .find(|symbol| rest.starts_with(symbol.as_bytes()))
 }
 
-/// A syntax error at byte `position`.
+/// A syntax error at byte `position`. Its line and column are 0 until
+/// [`locate`] fills them in from the statement.
 pub(crate) fn syntax(position: usize, message: &str) -> SqlError {
     SqlError::Syntax {
         position,
+        line: 0,
+        column: 0,
         message: message.to_owned(),
+    }
+}
+
+/// `e` with its line and column filled in, if it is a syntax error in
+/// `sql`.
+pub(crate) fn locate(e: SqlError, sql: &str) -> SqlError {
+    match e {
+        SqlError::Syntax {
+            position, message, ..
+        } => {
+            let (line, column) = line_column(sql, position);
+            SqlError::Syntax {
+                position,
+                line,
+                column,
+                message,
+            }
+        }
+        other => other,
     }
 }
 
@@ -309,6 +367,41 @@ mod tests {
     fn a_character_sql_has_no_use_for_is_a_syntax_error() {
         assert_eq!(syntax_position("SELECT # FROM t"), 7);
         assert_eq!(syntax_position("a ! b"), 2);
+    }
+
+    #[test]
+    fn lines_and_columns_count_characters_from_one() {
+        assert_eq!(line_column("abc", 0), (1, 1));
+        assert_eq!(line_column("abc", 3), (1, 4));
+        assert_eq!(line_column("a\nbc", 3), (2, 2));
+        assert_eq!(line_column("'김'x", 5), (1, 4));
+        assert_eq!(line_column("\t\tx", 2), (1, 3));
+        assert_eq!(line_column("a\r\nb", 3), (2, 1));
+        // Inside a character it counts the character it is in.
+        assert_eq!(line_column("김", 1), (1, 1));
+        assert_eq!(line_column("ab", 99), (1, 3));
+    }
+
+    #[test]
+    fn comments_are_unsupported_where_they_open() {
+        for (sql, opener) in [("-- x", "--"), ("a /* b */", "/*"), ("a\n--", "--")] {
+            match tokenize(sql) {
+                Err(SqlError::Unsupported(message)) => {
+                    assert!(message.contains(opener), "{message}")
+                }
+                other => panic!("{sql:?}: {other:?}"),
+            }
+        }
+        // A minus before a minus with a space between is two minuses.
+        assert_eq!(
+            tokens("- -1"),
+            vec![
+                Token::Symbol("-"),
+                Token::Symbol("-"),
+                Token::Integer("1".into()),
+                Token::End
+            ]
+        );
     }
 
     #[test]

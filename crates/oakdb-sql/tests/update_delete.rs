@@ -260,7 +260,8 @@ fn type_errors_fail_before_any_row_is_read() {
         ),
         (
             "UPDATE t SET id = NULL",
-            |e| matches!(e, SqlError::TypeMismatch { column, found: None, .. } if column == "id"),
+            // Issue #34 (design 0027 E3): NullKey, was TypeMismatch { found: None }.
+            |e| matches!(e, SqlError::NullKey { column } if column == "id"),
         ),
         (
             "UPDATE t SET nope = 1",
@@ -308,7 +309,8 @@ fn a_null_primary_key_found_on_a_row_fails_and_changes_nothing() {
     let before = all(&db);
     assert!(matches!(
         fail(&db, "UPDATE t SET id = n"),
-        SqlError::TypeMismatch { ref column, found: None, .. } if column == "id"
+        // Issue #34 (design 0027 E3): NullKey, was TypeMismatch { found: None }.
+        SqlError::NullKey { ref column } if column == "id"
     ));
     assert_eq!(all(&db), before);
     // NULL in another column is fine.

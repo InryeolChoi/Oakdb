@@ -8,7 +8,7 @@
 //! where.
 
 use crate::expr::{ArithOp, CompareOp, Expr};
-use crate::lexer::{syntax, tokenize, Spanned, Token};
+use crate::lexer::{at_line_column, locate, syntax, tokenize, Spanned, Token};
 use crate::{ColumnType, SqlError, Value};
 
 /// A parsed statement.
@@ -76,15 +76,20 @@ pub(crate) struct ColumnDef {
 }
 
 /// Parses one command, with an optional trailing semicolon.
+/// A syntax error carries the line and column of where it is.
 pub(crate) fn parse_command(sql: &str) -> Result<Command, SqlError> {
-    let mut parser = Parser {
-        tokens: tokenize(sql)?,
-        at: 0,
-        depth: 0,
+    let parse = || {
+        let mut parser = Parser {
+            sql,
+            tokens: tokenize(sql)?,
+            at: 0,
+            depth: 0,
+        };
+        let command = parser.command()?;
+        parser.finish()?;
+        Ok(command)
     };
-    let command = parser.command()?;
-    parser.finish()?;
-    Ok(command)
+    parse().map_err(|e| locate(e, sql))
 }
 
 /// Words that shape the grammar, so they cannot name a table or column.
@@ -112,7 +117,9 @@ const OPERATORS_SUPPORTED: &str = "only comparisons, IS [NOT] NULL, BETWEEN and 
 /// or that would make it recurse deeper than this, before building it.
 pub(crate) const MAX_DEPTH: usize = 200;
 
-struct Parser {
+struct Parser<'a> {
+    /// The statement, for the line and column an error names.
+    sql: &'a str,
     /// The tokens, ending with [`Token::End`], which [`Parser::next`]
     /// never moves past.
     tokens: Vec<Spanned>,
@@ -122,7 +129,7 @@ struct Parser {
     depth: usize,
 }
 
-impl Parser {
+impl Parser<'_> {
     fn peek(&self) -> &Spanned {
         &self.tokens[self.at]
     }
@@ -143,6 +150,12 @@ impl Parser {
     /// Whether the next token is symbol `symbol`.
     fn at_symbol(&self, symbol: &str) -> bool {
         matches!(self.peek().token, Token::Symbol(found) if found == symbol)
+    }
+
+    /// Whether the token after the next one is keyword `keyword`.
+    fn keyword_after(&self, keyword: &str) -> bool {
+        let after = &self.tokens[(self.at + 1).min(self.tokens.len() - 1)].token;
+        matches!(after, Token::Word(word) if word.eq_ignore_ascii_case(keyword))
     }
 
     /// Takes keyword `keyword`, or fails with a syntax error.
@@ -195,19 +208,58 @@ impl Parser {
     fn name(&mut self) -> Result<String, SqlError> {
         let found = self.peek();
         match &found.token {
-            Token::Word(word) if RESERVED.iter().any(|k| word.eq_ignore_ascii_case(k)) => {
-                Err(syntax(
-                    found.position,
-                    &format!("`{word}` is a keyword, not a name"),
-                ))
-            }
+            Token::Word(word) if is_reserved(word) => Err(syntax(
+                found.position,
+                &format!("`{word}` is a keyword, not a name"),
+            )),
             Token::Word(word) => {
                 let word = word.clone();
                 self.next();
+                self.not_qualified(&word)?;
                 Ok(word)
             }
             _ => Err(self.expected("a name")),
         }
+    }
+
+    /// Fails as unsupported if `name`, just taken, is followed by `.` and
+    /// another name or `*`: a qualified name such as `t.id` (design 0027
+    /// E10). A `.` before anything else is left for the caller to call a
+    /// syntax error.
+    fn not_qualified(&self, name: &str) -> Result<(), SqlError> {
+        if !self.at_symbol(".") {
+            return Ok(());
+        }
+        let after = &self.tokens[(self.at + 1).min(self.tokens.len() - 1)].token;
+        let qualified = match after {
+            Token::Word(word) => !is_reserved(word),
+            Token::Symbol("*") => true,
+            _ => false,
+        };
+        if !qualified {
+            return Ok(());
+        }
+        let part = match after {
+            Token::Word(word) => word.as_str(),
+            _ => "*",
+        };
+        Err(SqlError::Unsupported(format!(
+            "qualified name `{name}.{part}`; name a table or column on its own, without `{name}.`"
+        )))
+    }
+
+    /// A column name where a value is read, failing as unsupported if a
+    /// `(` follows it: a function call such as `COUNT(*)` (design 0027
+    /// E10).
+    fn column_name(&mut self) -> Result<String, SqlError> {
+        let name = self.name()?;
+        if self.at_symbol("(") {
+            return Err(SqlError::Unsupported(format!(
+                "function `{}(...)`; only columns, literals and operators are supported",
+                name.to_ascii_uppercase()
+            )));
+        }
+        Ok(name)
     }
 
     /// command := (BEGIN | COMMIT | ROLLBACK) [TRANSACTION] | statement
@@ -274,6 +326,11 @@ impl Parser {
         self.expect_keyword_or_unsupported("TABLE", |word| {
             format!("CREATE {word}; only CREATE TABLE is supported")
         })?;
+        if self.at_keyword("IF") && self.keyword_after("NOT") {
+            return Err(SqlError::Unsupported(
+                "`IF NOT EXISTS`; CREATE TABLE fails with \"table already exists\" instead".into(),
+            ));
+        }
         let name = self.name()?;
         self.expect_symbol("(")?;
         let mut columns = vec![self.column()?];
@@ -388,11 +445,11 @@ impl Parser {
             Token::Symbol("-") => match self.peek().token.clone() {
                 Token::Integer(digits) => {
                     self.next();
-                    integer(&digits, true, start.position)
+                    integer(self.sql, &digits, true, start.position)
                 }
                 _ => Err(self.expected("digits after `-`")),
             },
-            Token::Integer(digits) => integer(&digits, false, start.position),
+            Token::Integer(digits) => integer(self.sql, &digits, false, start.position),
             Token::Text(text) => Ok(Value::Text(text)),
             Token::Blob(bytes) => Ok(Value::Blob(bytes)),
             Token::Word(word) if word.eq_ignore_ascii_case("NULL") => Ok(Value::Null),
@@ -413,10 +470,10 @@ impl Parser {
             self.next();
             None
         } else {
-            let mut columns = vec![self.name()?];
+            let mut columns = vec![self.column_name()?];
             while self.at_symbol(",") {
                 self.next();
-                columns.push(self.name()?);
+                columns.push(self.column_name()?);
             }
             Some(columns)
         };
@@ -589,7 +646,7 @@ impl Parser {
                 Ok(inner)
             }
             Token::Word(word) if !word.eq_ignore_ascii_case("NULL") => {
-                Ok(Tree::leaf(Expr::Column(self.name()?)))
+                Ok(Tree::leaf(Expr::Column(self.column_name()?)))
             }
             Token::Word(_) | Token::Integer(_) | Token::Text(_) | Token::Blob(_) => {
                 Ok(Tree::leaf(Expr::Literal(self.literal()?)))
@@ -605,7 +662,9 @@ impl Parser {
     #[inline(never)]
     fn negative_literal(&mut self, at: usize) -> Result<Tree, SqlError> {
         match self.next().token {
-            Token::Integer(digits) => Ok(Tree::leaf(Expr::Literal(integer(&digits, true, at)?))),
+            Token::Integer(digits) => Ok(Tree::leaf(Expr::Literal(integer(
+                self.sql, &digits, true, at,
+            )?))),
             found => Err(syntax(
                 at,
                 &format!("expected digits after `-`, found {}", describe(&found)),
@@ -935,12 +994,32 @@ fn compare_op(symbol: &str) -> Option<CompareOp> {
     })
 }
 
-/// The integer that `digits` spell, negated if `negative`, or a syntax
-/// error at `position` if it does not fit in an i64. The digits are read
-/// as an i128 first so that `-9223372036854775808`, whose digits alone do
-/// not fit in an i64, still does once negated.
-fn integer(digits: &str, negative: bool, position: usize) -> Result<Value, SqlError> {
-    let out_of_range = || syntax(position, "the integer does not fit in 64 bits");
+/// Whether `word` is one of [`RESERVED`], in any case.
+fn is_reserved(word: &str) -> bool {
+    RESERVED.iter().any(|k| word.eq_ignore_ascii_case(k))
+}
+
+/// The integer that `digits` spell, negated if `negative`. One that does
+/// not fit in an i64 is a value out of range, not a syntax error (design
+/// 0027 E4), and the error says where in `sql` it starts, at byte
+/// `position`. The digits are read as an i128 first so that
+/// `-9223372036854775808`, whose digits alone do not fit in an i64, still
+/// does once negated.
+fn integer(sql: &str, digits: &str, negative: bool, position: usize) -> Result<Value, SqlError> {
+    let out_of_range = || {
+        let sign = if negative { "-" } else { "" };
+        // A literal of thousands of digits is named by its start.
+        let shown: String = digits.chars().take(24).collect();
+        let more = if digits.len() > shown.len() {
+            "..."
+        } else {
+            ""
+        };
+        SqlError::Arithmetic(format!(
+            "the integer `{sign}{shown}{more}` at {} does not fit in 64 bits",
+            at_line_column(sql, position)
+        ))
+    };
     let magnitude: i128 = digits.parse().map_err(|_| out_of_range())?;
     let value = if negative { -magnitude } else { magnitude };
     i64::try_from(value)

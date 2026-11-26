@@ -526,12 +526,14 @@ fn a_null_primary_key_is_an_error() {
     let db = with_users();
     assert!(matches!(
         fail(&db, "INSERT INTO users VALUES (NULL, 'a', NULL)"),
-        SqlError::TypeMismatch { column, found: None, .. } if column == "id"
+        // Issue #34 (design 0027 E3): NullKey, was TypeMismatch { found: None }.
+        SqlError::NullKey { column } if column == "id"
     ));
     // Leaving the primary key out of the column list makes it NULL.
     assert!(matches!(
         fail(&db, "INSERT INTO users (name) VALUES ('a')"),
-        SqlError::TypeMismatch { column, found: None, .. } if column == "id"
+        // Issue #34 (design 0027 E3): NullKey, was TypeMismatch { found: None }.
+        SqlError::NullKey { column } if column == "id"
     ));
 }
 
@@ -608,8 +610,8 @@ fn broken_statements_are_syntax_errors_that_say_where() {
         ("INSERT INTO users VALUES (1, 'a, NULL)", 29),
         // A keyword where a name belongs.
         ("CREATE TABLE select (id INTEGER PRIMARY KEY)", 13),
-        // An integer that does not fit in 64 bits.
-        ("SELECT * FROM users WHERE id = 9223372036854775808", 31),
+        // An integer that does not fit in 64 bits is no longer here: since
+        // issue #34 (design 0027 E4) it is Arithmetic, in tests/errors.rs.
         // Nothing at all.
         ("", 0),
     ] {

@@ -256,12 +256,14 @@ fn null_primary_key_is_a_type_mismatch_explicit_or_omitted() {
     users(&db);
     let e = err(&db, "INSERT INTO users VALUES (NULL, 'a', NULL)");
     assert!(
-        matches!(&e, SqlError::TypeMismatch { column, found: None, .. } if column == "id"),
+        // Issue #34 (design 0027 E3): NullKey, was TypeMismatch { found: None }.
+        matches!(&e, SqlError::NullKey { column } if column == "id"),
         "{e:?}"
     );
     let e = err(&db, "INSERT INTO users (name) VALUES ('a')");
     assert!(
-        matches!(&e, SqlError::TypeMismatch { column, found: None, .. } if column == "id"),
+        // Issue #34 (design 0027 E3): NullKey, was TypeMismatch { found: None }.
+        matches!(&e, SqlError::NullKey { column } if column == "id"),
         "{e:?}"
     );
 }
@@ -357,13 +359,15 @@ fn integer_keys_including_negative_and_extremes_round_trip() {
 }
 
 #[test]
-fn integer_out_of_i64_range_is_a_syntax_error() {
+// Issue #34 (design 0027 E4): a literal out of range is Arithmetic, was
+// Syntax.
+fn integer_out_of_i64_range_is_a_value_out_of_range() {
     let (_fs, db) = fresh();
     ok(&db, "CREATE TABLE n (k INTEGER PRIMARY KEY)");
     let e = err(&db, "INSERT INTO n VALUES (9223372036854775808)");
-    assert!(is_syntax(&e), "{e:?}");
+    assert!(matches!(e, SqlError::Arithmetic(_)), "{e:?}");
     let e = err(&db, "INSERT INTO n VALUES (-9223372036854775809)");
-    assert!(is_syntax(&e), "{e:?}");
+    assert!(matches!(e, SqlError::Arithmetic(_)), "{e:?}");
 }
 
 #[test]
