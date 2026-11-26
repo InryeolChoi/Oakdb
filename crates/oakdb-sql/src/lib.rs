@@ -64,6 +64,36 @@ pub fn execute<F: Fs>(db: &Db<F>, sql: &str) -> Result<Output, SqlError> {
     }
 }
 
+/// BEGIN, COMMIT or ROLLBACK: the statements that start or end a
+/// session's transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionCommand {
+    /// `BEGIN [TRANSACTION]`.
+    Begin,
+    /// `COMMIT [TRANSACTION]`.
+    Commit,
+    /// `ROLLBACK [TRANSACTION]`.
+    Rollback,
+}
+
+/// Which of BEGIN, COMMIT and ROLLBACK `sql` is, as a [`Session`] would
+/// read it, or `None` for any other statement and for SQL that does not
+/// parse. A client uses it to follow whether its connection is in a
+/// transaction without asking the server (issue #37, design 0025 Q3):
+/// BEGIN answered `DONE` opens one, COMMIT or ROLLBACK ends it whatever
+/// the answer, and nothing else changes it.
+///
+/// ```
+/// use oakdb_sql::{transaction_command, TransactionCommand};
+///
+/// assert_eq!(transaction_command("begin;"), Some(TransactionCommand::Begin));
+/// assert_eq!(transaction_command("COMMIT later"), None);
+/// assert_eq!(transaction_command("SELECT * FROM t"), None);
+/// ```
+pub fn transaction_command(sql: &str) -> Option<TransactionCommand> {
+    parser::transaction_command(sql)
+}
+
 /// What a statement produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Output {

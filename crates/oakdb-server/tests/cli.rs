@@ -425,3 +425,226 @@ fn a_server_whose_hard_limit_is_too_low_refuses_to_start_and_says_what_to_do() {
         "{err}"
     );
 }
+
+// --- Transactions in the CLI (issue #37, design 0025 Q9) ---
+
+/// A server in this process on an in-memory database, for `cli::run`.
+fn in_process(config: oakdb_server::server::Config) -> std::net::SocketAddr {
+    let db = oakdb::Db::open_with(oakdb::fs::sim::SimFs::new(), "/oak").unwrap();
+    let server =
+        oakdb_server::server::Server::bind(db, oakdb_server::server::Config { port: 0, ..config })
+            .unwrap();
+    let addr = server.local_addr();
+    thread::spawn(move || server.run());
+    addr
+}
+
+/// Runs `cli::run` as a person would, prompts included, on `input`.
+fn run_cli(addr: std::net::SocketAddr, input: impl BufRead) -> (u8, String, String) {
+    let mut client = oakdb_server::client::Client::connect(addr).unwrap();
+    client.set_timeout(Some(Duration::from_secs(10))).unwrap();
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let code = oakdb_server::cli::run(&mut client, input, &mut out, &mut err, true).unwrap();
+    (code, text(&out), text(&err))
+}
+
+#[test]
+fn the_prompt_shows_a_star_while_a_transaction_is_open() {
+    let addr = in_process(Default::default());
+    let input = "CREATE TABLE t (id INTEGER PRIMARY KEY);\nBEGIN;\nINSERT INTO t VALUES (1);\n\
+                 BEGIN;\nCOMMIT;\nSELECT * FROM t;\n";
+    let (code, out, err) = run_cli(addr, input.as_bytes());
+    // BEGIN twice is an error, so the run fails, but the transaction lives.
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("ERROR 0x0b"), "{err}");
+    // One prompt per statement and one at the end of input, in order;
+    // errors go to `err`, so some share a line.
+    let prompts: Vec<&str> = out
+        .match_indices("oakdb")
+        .map(|(at, _)| {
+            if out[at..].starts_with("oakdb*> ") {
+                "*"
+            } else {
+                ">"
+            }
+        })
+        .collect();
+    assert_eq!(prompts, [">", ">", "*", "*", "*", ">", ">"], "{out}");
+    assert!(!err.contains("rolled back"), "{err}");
+}
+
+#[test]
+fn leaving_inside_a_transaction_says_it_is_rolled_back() {
+    let addr = in_process(Default::default());
+    let input = "CREATE TABLE t (id INTEGER PRIMARY KEY);\nBEGIN;\nINSERT INTO t VALUES (1);\n";
+    let (code, _, err) = run_cli(addr, input.as_bytes());
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains("rolled back"), "{err}");
+    // And it was.
+    let (_, out, _) = run_cli(addr, "SELECT * FROM t;\n".as_bytes());
+    assert!(out.contains("(0 rows)"), "{out}");
+}
+
+/// Input that hands over its first part, then waits `pause` before the
+/// rest: a person who stops typing in the middle of a transaction.
+struct Pausing {
+    parts: Vec<(Duration, Vec<u8>)>,
+}
+
+impl std::io::Read for Pausing {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let Some((pause, mut part)) = (!self.parts.is_empty()).then(|| self.parts.remove(0)) else {
+            return Ok(0);
+        };
+        thread::sleep(pause);
+        let n = part.len().min(buf.len());
+        buf[..n].copy_from_slice(&part[..n]);
+        if n < part.len() {
+            self.parts.insert(0, (Duration::ZERO, part.split_off(n)));
+        }
+        Ok(n)
+    }
+}
+
+#[test]
+fn when_the_server_closes_on_a_transaction_the_cli_says_it_was_rolled_back_and_exits_1() {
+    let addr = in_process(oakdb_server::server::Config {
+        // Long enough that a slow runner never trips it between BEGIN and
+        // INSERT, short against the two-second pause below.
+        idle_in_transaction_timeout: Some(Duration::from_millis(500)),
+        ..Default::default()
+    });
+    let input = Pausing {
+        parts: vec![
+            (
+                Duration::ZERO,
+                b"CREATE TABLE t (id INTEGER PRIMARY KEY);\nBEGIN;\nINSERT INTO t VALUES (1);\n"
+                    .to_vec(),
+            ),
+            (Duration::from_secs(2), b"COMMIT;\nSELECT 1;\n".to_vec()),
+        ],
+    };
+    let (code, _, err) = run_cli(addr, BufReader::new(input));
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("ERROR 0x47"), "{err}");
+    assert!(
+        err.contains("connection closed by server; the open transaction was rolled back"),
+        "{err}"
+    );
+    let (_, out, _) = run_cli(addr, "SELECT * FROM t;\n".as_bytes());
+    assert!(out.contains("(0 rows)"), "{out}");
+}
+
+/// A server child process started with `options`, its log lines sent
+/// down the channel as they come, and the data directory it uses.
+fn serve_logging(options: &[&str]) -> (ServerProcess, mpsc::Receiver<String>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut child = oakdb()
+        .args(["serve", "--port", "0"])
+        .args(options)
+        .arg("--data")
+        .arg(dir.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut server = ServerProcess {
+        port: port_of(&first_line(&mut child)),
+        child,
+    };
+    let (tx, rx) = mpsc::channel();
+    let stderr = BufReader::new(server.child.stderr.take().unwrap());
+    thread::spawn(move || {
+        for line in stderr.lines().map_while(Result::ok) {
+            tx.send(line).ok();
+        }
+    });
+    (server, rx, dir)
+}
+
+/// A raw socket to `port` that has said HELLO and read READY.
+fn raw_session(port: u16) -> TcpStream {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream.set_read_timeout(Some(common::DEADLINE)).unwrap();
+    write_frame(&mut stream, &Request::Hello { version: VERSION }.encode()).unwrap();
+    read_frame(&mut stream).unwrap().unwrap();
+    stream
+}
+
+fn query_raw(stream: &mut TcpStream, sql: &str) -> Response {
+    write_frame(stream, &Request::Query(sql.into()).encode()).unwrap();
+    Response::decode(read_frame(stream).unwrap().unwrap()).unwrap()
+}
+
+/// The log lines up to and including the first that contains `until`,
+/// failing past the deadline.
+fn log_until(rx: &mpsc::Receiver<String>, until: &str) -> Vec<String> {
+    let deadline = Instant::now() + common::DEADLINE;
+    let mut seen = Vec::new();
+    while !seen.iter().any(|l: &String| l.contains(until)) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left) {
+            Ok(line) => seen.push(line),
+            Err(_) => panic!("no line with {until:?} within the deadline: {seen:?}"),
+        }
+    }
+    seen
+}
+
+#[test]
+fn the_server_logs_an_old_transaction_and_an_idle_close() {
+    let (server, rx, _dir) = serve_logging(&[
+        "--idle-in-transaction-timeout",
+        "0.5",
+        "--warn-transaction-age",
+        "0.1",
+    ]);
+    let mut stream = raw_session(server.port);
+    assert_eq!(query_raw(&mut stream, "BEGIN"), Response::Done);
+    // Nothing more: the warning comes first, then the close.
+    let seen = log_until(&rx, "rolled back and closed");
+    let warned = seen
+        .iter()
+        .position(|l| l.contains("warning") && l.contains("transaction open for"));
+    let closed = seen
+        .iter()
+        .position(|l| l.contains("idle in a transaction for 0.5s; rolled back and closed"));
+    assert!(
+        matches!((warned, closed), (Some(w), Some(c)) if w < c),
+        "{seen:?}"
+    );
+}
+
+#[test]
+fn the_server_logs_a_rollback_when_a_client_stops_reading_inside_a_transaction() {
+    // The write timeout cuts off a client that leaves a large result
+    // unread; the log says the transaction went with it (review S5).
+    let (server, rx, _dir) = serve_logging(&["--idle-in-transaction-timeout", "1"]);
+    let mut stream = raw_session(server.port);
+    assert_eq!(query_raw(&mut stream, "BEGIN"), Response::Done);
+    assert_eq!(
+        query_raw(
+            &mut stream,
+            "CREATE TABLE big (id INTEGER PRIMARY KEY, b BLOB)"
+        ),
+        Response::Done
+    );
+    let blob = "ab".repeat(512 * 1024);
+    for id in 0..24 {
+        let sql = format!("INSERT INTO big VALUES ({id}, X'{blob}')");
+        assert_eq!(query_raw(&mut stream, &sql), Response::Affected(1));
+    }
+    // Twelve MiB of rows, more than both socket buffers hold, never read.
+    write_frame(
+        &mut stream,
+        &Request::Query("SELECT b FROM big".into()).encode(),
+    )
+    .unwrap();
+    let seen = log_until(&rx, "the open transaction was rolled back");
+    assert!(
+        seen.iter()
+            .any(|l| l.contains("sending timed out; the open transaction was rolled back")),
+        "{seen:?}"
+    );
+    drop(stream);
+}

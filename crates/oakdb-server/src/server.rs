@@ -2,12 +2,21 @@
 //!
 //! The accepting thread checks each new client against the allowlist and
 //! the connection limit, then hands it a thread of its own. That thread
-//! reads the HELLO, answers READY, and then runs each QUERY through
-//! `oakdb_sql::execute` (one statement, one transaction) and writes the
-//! response, until the client leaves. Connections share the one database.
+//! reads the HELLO, answers READY, and then runs each QUERY on a
+//! [`Session`] of its own and writes the response, until the client
+//! leaves. Connections share the one database.
 //!
-//! Not here yet, by design: closing idle connections (#37) and a way to
-//! stop the server (#38). `run` takes connections until the process ends.
+//! The session lives on the connection's thread (issue #37, design 0025
+//! Q1): outside BEGIN ... COMMIT each statement commits on its own, and
+//! however the connection ends (the client closes, a frame breaks, the
+//! thread panics, the client idles too long in a transaction) the session
+//! is dropped and its open transaction rolled back. A connection that
+//! waits longer than [`Config::idle_in_transaction_timeout`] for its next
+//! statement inside a transaction gets [`code::IDLE_IN_TRANSACTION`] and
+//! is closed (Q5).
+//!
+//! Not here yet, by design: a way to stop the server (#38). `run` takes
+//! connections until the process ends.
 
 use std::io::{self, BufReader, Read};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -18,7 +27,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use oakdb::fs::Fs;
-use oakdb::Db;
+use oakdb::{Db, Stats};
+use oakdb_sql::Session;
 
 use crate::allow::Allowlist;
 use crate::protocol::{
@@ -43,6 +53,14 @@ pub const CONNECTION_STACK: usize = 256 * 1024;
 /// database's files, standard streams, refused connections lingering.
 pub const FD_MARGIN: u64 = 64;
 
+/// How long a connection may wait for its next statement inside a
+/// transaction unless told otherwise (design 0025 Q5).
+pub const DEFAULT_IDLE_IN_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How old a transaction gets before the server logs a warning about it,
+/// unless told otherwise (design 0025 Q7).
+pub const DEFAULT_LONG_TRANSACTION_WARNING: Duration = Duration::from_secs(5 * 60);
+
 /// How long a refused or broken connection is given to take its error
 /// before the socket closes.
 const LINGER: Duration = Duration::from_secs(1);
@@ -64,6 +82,19 @@ pub struct Config {
     /// Connections taken at once. One more is refused with
     /// [`code::TOO_MANY_CONNECTIONS`].
     pub max_connections: usize,
+    /// How long a connection inside a transaction may wait for its next
+    /// statement, or sit halfway through sending one, before the server
+    /// rolls the transaction back and closes it with
+    /// [`code::IDLE_IN_TRANSACTION`]. Writing a response to it is held to
+    /// the same limit. `None` or zero: no limit.
+    pub idle_in_transaction_timeout: Option<Duration>,
+    /// The same outside a transaction, closing with [`code::IDLE`]. Off by
+    /// default: such a connection holds a seat and a small stack but
+    /// nothing of the engine's, and pools keep connections open on purpose.
+    pub idle_timeout: Option<Duration>,
+    /// A transaction this old gets one warning in the log, saying it holds
+    /// old pages and conflict records. `None` or zero: no warning.
+    pub long_transaction_warning: Option<Duration>,
 }
 
 impl Default for Config {
@@ -72,8 +103,16 @@ impl Default for Config {
             port: DEFAULT_PORT,
             allow: Allowlist::default(),
             max_connections: DEFAULT_MAX_CONNECTIONS,
+            idle_in_transaction_timeout: Some(DEFAULT_IDLE_IN_TRANSACTION_TIMEOUT),
+            idle_timeout: None,
+            long_transaction_warning: Some(DEFAULT_LONG_TRANSACTION_WARNING),
         }
     }
+}
+
+/// `None` for a limit of zero, which means none.
+fn limit(d: Option<Duration>) -> Option<Duration> {
+    d.filter(|d| !d.is_zero())
 }
 
 /// A server bound to its port, not yet taking connections.
@@ -92,6 +131,28 @@ struct Shared<F: Fs> {
     active: AtomicUsize,
     /// Set once the engine's stop is logged, to log it once.
     stop_logged: AtomicBool,
+    idle_in_transaction: Option<Duration>,
+    idle: Option<Duration>,
+    long_transaction: Option<Duration>,
+}
+
+/// Reads a running server's numbers from any thread, for operators and
+/// tests (design 0025 Q7).
+pub struct Monitor<F: Fs> {
+    shared: Arc<Shared<F>>,
+}
+
+impl<F: Fs> Monitor<F> {
+    /// The engine's numbers: commits, conflicts, open transactions and the
+    /// commits kept for them.
+    pub fn stats(&self) -> Stats {
+        self.shared.db.stats()
+    }
+
+    /// Connections being served now, each on its own thread.
+    pub fn connections(&self) -> usize {
+        self.shared.active.load(Ordering::Acquire)
+    }
 }
 
 impl<F: Fs + 'static> Server<F>
@@ -120,6 +181,9 @@ where
                 max_connections: config.max_connections,
                 active: AtomicUsize::new(0),
                 stop_logged: AtomicBool::new(false),
+                idle_in_transaction: limit(config.idle_in_transaction_timeout),
+                idle: limit(config.idle_timeout),
+                long_transaction: limit(config.long_transaction_warning),
             }),
             lingering: Arc::new(AtomicUsize::new(0)),
         })
@@ -130,6 +194,13 @@ where
         self.listener
             .local_addr()
             .expect("a bound listener has an address")
+    }
+
+    /// A handle that reads this server's numbers while it runs.
+    pub fn monitor(&self) -> Monitor<F> {
+        Monitor {
+            shared: Arc::clone(&self.shared),
+        }
     }
 
     /// Takes connections until the process ends.
@@ -166,7 +237,7 @@ where
                 .stack_size(CONNECTION_STACK)
                 .spawn(move || {
                     eprintln!("oakdb: {peer} connected");
-                    serve_guarded(peer, &stream, || serve(&slot.shared, &stream));
+                    serve_guarded(peer, &stream, || serve(&slot.shared, &stream, peer));
                     eprintln!("oakdb: {peer} disconnected");
                     drop(slot);
                 });
@@ -260,8 +331,6 @@ enum Next {
     Close,
 }
 
-/// Sends an `ERROR`. After a code that [`closes`] the connection, it waits
-/// for the client to read it and says to close.
 /// Runs `serve` for the connection from `peer`; if it panics, the client
 /// gets [`code::INTERNAL`] before the socket closes, and the server goes on.
 fn serve_guarded(peer: SocketAddr, stream: &TcpStream, serve: impl FnOnce() -> io::Result<()>) {
@@ -277,6 +346,8 @@ fn serve_guarded(peer: SocketAddr, stream: &TcpStream, serve: impl FnOnce() -> i
     }
 }
 
+/// Sends an `ERROR`. After a code that [`closes`] the connection, it waits
+/// for the client to read it and says to close.
 fn send_error(stream: &TcpStream, code: u8, message: String) -> io::Result<Next> {
     let mut writer = stream;
     write_frame(&mut writer, &error_frame(code, message))?;
@@ -332,8 +403,59 @@ fn frame_failed(stream: &TcpStream, e: FrameError) -> io::Result<()> {
     }
 }
 
+/// Whether a failed read or write gave up on its timeout. macOS and Linux
+/// say `WouldBlock`; other systems may say `TimedOut` (design 0025 Q5).
+fn timed_out(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+    )
+}
+
+/// The socket's read and write timeouts, set only when they change, so a
+/// connection that keeps one limit makes no system call per statement.
+struct Timeouts<'s> {
+    stream: &'s TcpStream,
+    read: Option<Duration>,
+    write: Option<Duration>,
+}
+
+impl Timeouts<'_> {
+    fn read(&mut self, t: Option<Duration>) -> io::Result<()> {
+        if t != self.read {
+            self.stream.set_read_timeout(t)?;
+            self.read = t;
+        }
+        Ok(())
+    }
+
+    fn write(&mut self, t: Option<Duration>) -> io::Result<()> {
+        if t != self.write {
+            self.stream.set_write_timeout(t)?;
+            self.write = t;
+        }
+        Ok(())
+    }
+}
+
+/// When the open transaction began, and whether its age was logged.
+struct Open {
+    since: Instant,
+    warned: bool,
+}
+
+/// What waiting for the next frame came to.
+enum Wait {
+    /// Its first byte is here.
+    Ready,
+    /// The client closed the connection between frames.
+    Closed,
+    /// The idle limit passed first.
+    Idle,
+}
+
 /// Runs one connection to its end.
-fn serve<F: Fs>(shared: &Shared<F>, stream: &TcpStream) -> io::Result<()> {
+fn serve<F: Fs>(shared: &Shared<F>, stream: &TcpStream, peer: SocketAddr) -> io::Result<()> {
     stream.set_nodelay(true)?;
     let mut reader = BufReader::new(stream);
 
@@ -356,15 +478,54 @@ fn serve<F: Fs>(shared: &Shared<F>, stream: &TcpStream) -> io::Result<()> {
     }
     send(stream, &Response::Ready { version: VERSION })?;
 
+    // Dropped however this function ends, unwinding included: that rolls
+    // an open transaction back (design 0025 Q1).
+    let mut session = Session::new(&shared.db);
+    let mut open: Option<Open> = None;
+    let mut timeouts = Timeouts {
+        stream,
+        read: None,
+        write: None,
+    };
     loop {
+        let idle = if session.in_transaction() {
+            shared.idle_in_transaction
+        } else {
+            shared.idle
+        };
+        if let Err(e) = timeouts.write(idle) {
+            return Err(rolled_back_on_error(session, e));
+        }
+        match wait_for_frame(shared, &mut reader, &mut timeouts, idle, &mut open, peer)? {
+            Wait::Ready => {}
+            Wait::Closed => return Ok(()),
+            Wait::Idle => return idled(stream, session, idle, peer),
+        }
+        // Halfway through a frame, each read gets the same limit.
+        timeouts.read(idle)?;
         let frame = match read_frame(&mut reader) {
             Ok(Some(frame)) => frame,
             Ok(None) => return Ok(()),
+            Err(FrameError::Io(e)) if timed_out(&e) => {
+                return idled(stream, session, idle, peer);
+            }
             Err(e) => return frame_failed(stream, e),
         };
         let failed = match Request::decode(frame) {
             Ok(Request::Query(sql)) => {
-                send(stream, &run(shared, &sql))?;
+                let response = run(shared, &mut session, &sql);
+                open = match (open, session.in_transaction()) {
+                    (None, true) => Some(Open {
+                        since: Instant::now(),
+                        warned: false,
+                    }),
+                    (open, true) => open,
+                    (_, false) => None,
+                };
+                warn_if_old(shared, &mut open, peer);
+                if let Err(e) = send(stream, &response) {
+                    return Err(rolled_back_on_error(session, e));
+                }
                 continue;
             }
             Err(DecodeError::NotUtf8) => (code::NOT_UTF8, DecodeError::NotUtf8.to_string()),
@@ -377,9 +538,132 @@ fn serve<F: Fs>(shared: &Shared<F>, stream: &TcpStream) -> io::Result<()> {
     }
 }
 
-/// Runs one statement and makes its response.
-fn run<F: Fs>(shared: &Shared<F>, sql: &str) -> Response {
-    match oakdb_sql::execute(&shared.db, sql) {
+/// Waits for the first byte of the next frame, at most `idle`. Only this
+/// wait counts as idle: running a statement, its commit's sync included,
+/// does not (design 0025 Q5). It wakes early to log the open
+/// transaction's age once that passes the warning limit, and waits on;
+/// `fill_buf` takes no byte, so waking loses nothing.
+fn wait_for_frame<F: Fs>(
+    shared: &Shared<F>,
+    reader: &mut BufReader<&TcpStream>,
+    timeouts: &mut Timeouts<'_>,
+    idle: Option<Duration>,
+    open: &mut Option<Open>,
+    peer: SocketAddr,
+) -> io::Result<Wait> {
+    use std::io::BufRead;
+    let started = Instant::now();
+    let deadline = idle.map(|idle| started + idle);
+    loop {
+        let warn_at = match (&*open, shared.long_transaction) {
+            (Some(o), Some(after)) if !o.warned => Some(o.since + after),
+            _ => None,
+        };
+        let wake = match (deadline, warn_at) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        // A timeout of zero is refused, so at least a millisecond.
+        let now = Instant::now();
+        timeouts.read(wake.map(|w| {
+            w.saturating_duration_since(now)
+                .max(Duration::from_millis(1))
+        }))?;
+        match reader.fill_buf() {
+            Ok([]) => return Ok(Wait::Closed),
+            Ok(_) => return Ok(Wait::Ready),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) if timed_out(&e) => {
+                warn_if_old(shared, open, peer);
+                if deadline.is_some_and(|d| Instant::now() >= d) {
+                    return Ok(Wait::Idle);
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Logs, once, that the open transaction has passed the warning age.
+fn warn_if_old<F: Fs>(shared: &Shared<F>, open: &mut Option<Open>, peer: SocketAddr) {
+    let (Some(o), Some(after)) = (open.as_mut(), shared.long_transaction) else {
+        return;
+    };
+    let age = o.since.elapsed();
+    if !o.warned && age >= after {
+        o.warned = true;
+        let stats = shared.db.stats();
+        eprintln!(
+            "oakdb: warning: {peer} has had a transaction open for {}s; it holds old pages \
+             in memory and {} commits for conflict checks ({} transactions open)",
+            age.as_secs(),
+            stats.kept_commits,
+            stats.open_transactions,
+        );
+    }
+}
+
+/// Ends `session` for a connection that failed on a write, and says in
+/// the error, which [`serve_guarded`] logs, whether that rolled a
+/// transaction back: a client that stops reading a large result is cut off
+/// by the write timeout, and the operator should see what it lost
+/// (review S5).
+fn rolled_back_on_error<F: Fs>(session: Session<'_, F>, e: io::Error) -> io::Error {
+    if !session.in_transaction() {
+        return e;
+    }
+    drop(session);
+    let what = if timed_out(&e) {
+        "sending timed out".to_string()
+    } else {
+        e.to_string()
+    };
+    io::Error::new(
+        e.kind(),
+        format!("{what}; the open transaction was rolled back and the connection closed"),
+    )
+}
+
+/// The connection idled past its limit: rolls back what it held, tells it
+/// so, and closes.
+fn idled<F: Fs>(
+    stream: &TcpStream,
+    session: Session<'_, F>,
+    idle: Option<Duration>,
+    peer: SocketAddr,
+) -> io::Result<()> {
+    let secs = idle.unwrap_or_default().as_secs_f64();
+    let (code, message) = if session.in_transaction() {
+        // Rolled back before the client hears of it, so whatever it does
+        // next finds the transaction gone.
+        drop(session);
+        eprintln!("oakdb: {peer} idle in a transaction for {secs}s; rolled back and closed");
+        (
+            code::IDLE_IN_TRANSACTION,
+            format!(
+                "idle in a transaction for more than {secs}s; the transaction was rolled back \
+                 and the connection closed"
+            ),
+        )
+    } else {
+        eprintln!("oakdb: {peer} idle for {secs}s; closed");
+        (
+            code::IDLE,
+            format!("idle for more than {secs}s; the connection closed"),
+        )
+    };
+    // Whatever half-frame was read is dropped with the connection.
+    let _ = stream.set_write_timeout(Some(LINGER));
+    send_error(stream, code, message).map(|_| ())
+}
+
+/// Runs one statement on the connection's session and makes its response.
+fn run<F: Fs>(shared: &Shared<F>, session: &mut Session<'_, F>, sql: &str) -> Response {
+    #[cfg(test)]
+    if sql == tests::PANIC {
+        panic!("a bug in the server (planted by the test)");
+    }
+    match session.execute(sql) {
         Ok(output) => Response::from(output),
         Err(e) => {
             let code = error_code(&e);
@@ -400,6 +684,66 @@ fn run<F: Fs>(shared: &Shared<F>, sql: &str) -> Response {
 mod tests {
     use super::*;
     use crate::protocol::{read_frame, Response};
+
+    /// A statement [`run`] panics on, in test builds only: no statement
+    /// reaches a real panic on a connection's thread (design 0025 Q8).
+    pub(super) const PANIC: &str = "-- panic, planted by the test";
+
+    #[test]
+    fn a_panic_inside_a_transaction_sends_0x7f_and_rolls_the_transaction_back() {
+        use crate::protocol::write_frame;
+        use oakdb::fs::sim::SimFs;
+
+        let shared = Arc::new(Shared {
+            db: Db::open_with(SimFs::new(), "/oak").unwrap(),
+            allow: Allowlist::default(),
+            max_connections: 1,
+            active: AtomicUsize::new(0),
+            stop_logged: AtomicBool::new(false),
+            idle_in_transaction: None,
+            idle: None,
+            long_transaction: None,
+        });
+        oakdb_sql::execute(&shared.db, "CREATE TABLE t (id INTEGER PRIMARY KEY)").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let (server, peer) = listener.accept().unwrap();
+        let serving = {
+            let shared = Arc::clone(&shared);
+            thread::spawn(move || serve_guarded(peer, &server, || serve(&shared, &server, peer)))
+        };
+
+        let mut ask = |request: Request| {
+            write_frame(&mut client, &request.encode()).unwrap();
+            Response::decode(read_frame(&mut client).unwrap().unwrap()).unwrap()
+        };
+        ask(Request::Hello { version: VERSION });
+        assert_eq!(ask(Request::Query("BEGIN".into())), Response::Done);
+        assert_eq!(
+            ask(Request::Query("INSERT INTO t VALUES (1)".into())),
+            Response::Affected(1)
+        );
+        assert_eq!(shared.db.stats().open_transactions, 1);
+        match ask(Request::Query(PANIC.into())) {
+            Response::Error { code, .. } => assert_eq!(code, code::INTERNAL),
+            other => panic!("expected ERROR, got {other:?}"),
+        }
+        serving.join().unwrap();
+
+        // Unwinding dropped the session, and with it the transaction.
+        assert_eq!(shared.db.stats().open_transactions, 0);
+        let out = oakdb_sql::execute(&shared.db, "SELECT id FROM t").unwrap();
+        assert_eq!(
+            out,
+            oakdb_sql::Output::Rows {
+                columns: vec!["id".into()],
+                rows: vec![]
+            }
+        );
+    }
 
     // A panic on a connection's thread used to come from a planted disk
     // panic; since the commit thread turns its own panics into an engine

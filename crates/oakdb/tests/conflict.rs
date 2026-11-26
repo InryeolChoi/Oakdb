@@ -189,6 +189,39 @@ fn a_write_another_transaction_undid_still_conflicts() {
 }
 
 #[test]
+fn stats_count_open_transactions_and_the_commits_kept_for_them() {
+    // Issue #37, design 0025 Q7: a server shows what long transactions
+    // hold, and a test sees it return to zero once they end.
+    let db = open();
+    let s = db.stats();
+    assert_eq!((s.open_transactions, s.kept_commits), (0, 0));
+
+    let old = db.begin();
+    let also_old = db.begin();
+    assert_eq!(db.stats().open_transactions, 2);
+    for i in 0..5u8 {
+        put(&db, &[i], b"v");
+    }
+    // Five commits since the oldest open transaction began: each is kept
+    // so `old` can conflict with it.
+    let s = db.stats();
+    assert_eq!((s.open_transactions, s.kept_commits), (2, 5));
+
+    drop(also_old);
+    assert_eq!(db.stats().open_transactions, 1);
+    old.rollback();
+    let s = db.stats();
+    assert_eq!((s.open_transactions, s.kept_commits), (0, 0));
+
+    // A commit with nothing open is kept by no one.
+    put(&db, b"k", b"v");
+    let committed = db.begin();
+    assert_eq!(db.stats().kept_commits, 0);
+    committed.commit().unwrap();
+    assert_eq!(db.stats().open_transactions, 0);
+}
+
+#[test]
 fn a_conflict_holds_through_checkpoints() {
     let db = open();
     let mut late = db.begin();

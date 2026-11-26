@@ -4,10 +4,10 @@
 
 use std::io::{self, BufRead, Write};
 
-use oakdb_sql::{Output, Value};
+use oakdb_sql::{transaction_command, Output, TransactionCommand, Value};
 
 use crate::client::{Client, ClientError};
-use crate::protocol::closes;
+use crate::protocol::{closes, code};
 
 /// Gathers lines until a `;` outside single quotes ends a statement.
 #[derive(Debug, Default)]
@@ -142,9 +142,24 @@ fn show(value: &Value) -> String {
     }
 }
 
+/// The prompt before a new statement: `oakdb*> ` while a transaction is
+/// open, as psql marks it (design 0025 Q9), `oakdb> ` otherwise.
+pub fn prompt(in_transaction: bool) -> &'static str {
+    if in_transaction {
+        "oakdb*> "
+    } else {
+        "oakdb> "
+    }
+}
+
 /// Runs statements from `input` until it ends or `\q`, results to `out`
 /// and errors to `err`. Prompts only when `interactive`. Returns the exit
 /// code: 0, or 1 if any statement failed or the connection was lost.
+///
+/// Ending, by `\q` or the end of input, closes the connection, and the
+/// server rolls back a transaction left open; the CLI says so on `err`.
+/// When the server closes the connection on a transaction, the CLI says it
+/// was rolled back and exits 1, without connecting again (design 0025 Q9).
 pub fn run(
     client: &mut Client,
     input: impl BufRead,
@@ -158,7 +173,7 @@ pub fn run(
     loop {
         if interactive {
             let prompt = if splitter.is_empty() {
-                "oakdb> "
+                prompt(client.in_transaction())
             } else {
                 "   ...> "
             };
@@ -173,6 +188,7 @@ pub fn run(
         };
         let line = line?;
         if splitter.is_empty() && line.trim() == "\\q" {
+            left_open(client, err)?;
             return Ok(u8::from(failed));
         }
         for statement in splitter.push_line(&line) {
@@ -194,7 +210,19 @@ pub fn run(
             Sent::Lost => return Ok(1),
         }
     }
+    left_open(client, err)?;
     Ok(u8::from(failed))
+}
+
+/// Says that the transaction still open as the CLI leaves is rolled back.
+fn left_open(client: &Client, err: &mut impl Write) -> io::Result<()> {
+    if client.in_transaction() {
+        writeln!(
+            err,
+            "the open transaction was not committed; it is rolled back as the connection closes"
+        )?;
+    }
+    Ok(())
 }
 
 enum Sent {
@@ -209,7 +237,43 @@ fn send(
     out: &mut impl Write,
     err: &mut impl Write,
 ) -> io::Result<Sent> {
-    match client.query(statement) {
+    let was_open = client.in_transaction();
+    let result = client.query(statement);
+    let lost = match &result {
+        Err(ClientError::Server { code, .. }) => closes(*code),
+        Err(_) => true,
+        Ok(_) => false,
+    };
+    if lost && was_open {
+        // The error says why; the line after it says what became of the
+        // transaction.
+        if let Err(e) = &result {
+            writeln!(err, "{e}")?;
+        }
+        // A server that closes on idling rolled back before it said so;
+        // otherwise a COMMIT may have gone through before the end.
+        let rolled_back = matches!(
+            result,
+            Err(ClientError::Server {
+                code: code::IDLE_IN_TRANSACTION,
+                ..
+            })
+        );
+        if !rolled_back && transaction_command(statement) == Some(TransactionCommand::Commit) {
+            writeln!(
+                err,
+                "the connection closed before COMMIT was answered; the transaction may or may \
+                 not have been committed"
+            )?;
+        } else {
+            writeln!(
+                err,
+                "connection closed by server; the open transaction was rolled back"
+            )?;
+        }
+        return Ok(Sent::Lost);
+    }
+    match result {
         Ok(output) => {
             write!(out, "{}", format_output(statement, &output))?;
             out.flush()?;

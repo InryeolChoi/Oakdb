@@ -13,7 +13,7 @@
 use std::fmt;
 use std::io::{self, Read, Write};
 
-use oakdb_sql::{Output, SqlError, Value};
+use oakdb_sql::{Output, SqlError, TransactionError, Value};
 
 /// What a `HELLO` starts with, so the server can tell an Oakdb client from
 /// anything else that knocks.
@@ -68,10 +68,16 @@ pub mod code {
     pub const TYPE_MISMATCH: u8 = 0x09;
     /// What the SQL layer stored cannot be read back.
     pub const SQL_CORRUPT: u8 = 0x0a;
+    /// BEGIN inside a transaction, or COMMIT or ROLLBACK outside one
+    /// (issue #37, design 0025 Q2). The open transaction, if any, stays as
+    /// it was; the message says which.
+    pub const TRANSACTION_STATE: u8 = 0x0b;
     /// A statement error of a kind this build has no code for.
     pub const OTHER_STATEMENT: u8 = 0x1f;
     /// Another transaction committed a write to the same key first. Running
-    /// the statement again may work.
+    /// it again may work: the statement alone if it ran on its own, the
+    /// whole transaction from BEGIN if this was its COMMIT (design 0025
+    /// Q4).
     pub const CONFLICT: u8 = 0x20;
     /// A key is too long.
     pub const KEY_TOO_LARGE: u8 = 0x21;
@@ -103,6 +109,13 @@ pub mod code {
     pub const TOO_MANY_CONNECTIONS: u8 = 0x45;
     /// The client's address is not on the server's allowlist.
     pub const NOT_ALLOWED: u8 = 0x46;
+    /// The connection sat in a transaction, waiting for the next
+    /// statement, longer than the server's idle limit; the transaction was
+    /// rolled back (design 0025 Q5).
+    pub const IDLE_IN_TRANSACTION: u8 = 0x47;
+    /// The connection sat idle outside a transaction longer than the
+    /// server's limit for that, which is off unless the server sets one.
+    pub const IDLE: u8 = 0x48;
     /// The server failed in a way it should not.
     pub const INTERNAL: u8 = 0x7f;
 }
@@ -293,6 +306,9 @@ pub fn error_code(e: &SqlError) -> u8 {
         SqlError::TypeMismatch { .. } => code::TYPE_MISMATCH,
         SqlError::Corrupt(_) => code::SQL_CORRUPT,
         SqlError::TransactionConflict(_) => code::CONFLICT,
+        SqlError::Transaction(TransactionError::AlreadyBegun | TransactionError::NotBegun) => {
+            code::TRANSACTION_STATE
+        }
         SqlError::Engine(e) => match e {
             oakdb::Error::Conflict { .. } => code::CONFLICT,
             oakdb::Error::KeyTooLarge { .. } => code::KEY_TOO_LARGE,
@@ -542,6 +558,8 @@ pub fn closes(code: u8) -> bool {
             | code::HANDSHAKE
             | code::TOO_MANY_CONNECTIONS
             | code::NOT_ALLOWED
+            | code::IDLE_IN_TRANSACTION
+            | code::IDLE
             | code::INTERNAL
     )
 }
