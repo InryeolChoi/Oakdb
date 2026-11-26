@@ -45,14 +45,7 @@ fn run<F: Fs + 'static>(db: Db<F>, n: usize) -> Vec<Duration>
 where
     Db<F>: Send + Sync,
 {
-    let server = Server::bind(
-        db,
-        Config {
-            port: 0,
-            ..Config::default()
-        },
-    )
-    .unwrap();
+    let server = Server::bind(db, Config::default().with(|c| c.port = 0)).unwrap();
     let addr = server.local_addr();
     thread::spawn(move || server.run());
     let mut client = Client::connect(addr).unwrap();

@@ -274,6 +274,7 @@ fn only_codes_that_break_the_conversation_close_the_connection() {
         code::NOT_ALLOWED,
         code::IDLE_IN_TRANSACTION,
         code::IDLE,
+        code::SHUTTING_DOWN,
         code::INTERNAL,
     ] {
         assert!(closes(c), "0x{c:02x}");

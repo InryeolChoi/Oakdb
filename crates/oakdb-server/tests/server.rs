@@ -25,10 +25,7 @@ use oakdb_sql::{execute, Output, Value};
 const TIMEOUT: Duration = Duration::from_secs(30);
 
 fn config() -> Config {
-    Config {
-        port: 0,
-        ..Config::default()
-    }
+    Config::default().with(|c| c.port = 0)
 }
 
 fn start<F>(db: Db<F>, config: Config) -> SocketAddr
@@ -424,10 +421,7 @@ fn a_client_over_the_connection_limit_is_refused_until_a_seat_frees() {
     let dir = tempfile::tempdir().unwrap();
     let addr = start(
         Db::open(dir.path()).unwrap(),
-        Config {
-            max_connections: 4,
-            ..config()
-        },
+        config().with(|c| c.max_connections = 4),
     );
     let mut seated: Vec<Client> = (0..4).map(|_| connect(addr)).collect();
     match Client::connect(addr) {
@@ -463,10 +457,7 @@ fn a_client_not_on_the_allowlist_is_refused_and_closed() {
     // a strict list, built here, can turn 127.0.0.1 away.
     let addr = start(
         Db::open(dir.path()).unwrap(),
-        Config {
-            allow: Allowlist::strict(vec!["127.0.0.2".parse().unwrap()]),
-            ..config()
-        },
+        config().with(|c| c.allow = Allowlist::strict(vec!["127.0.0.2".parse().unwrap()])),
     );
     match Client::connect(addr) {
         Err(ClientError::Server { code, message }) => {
@@ -514,10 +505,7 @@ fn a_dropped_connection_frees_its_thread_without_harm() {
     let dir = tempfile::tempdir().unwrap();
     let addr = start(
         Db::open(dir.path()).unwrap(),
-        Config {
-            max_connections: 2,
-            ..config()
-        },
+        config().with(|c| c.max_connections = 2),
     );
     for i in 0..10 {
         // Half a frame, then gone.
@@ -553,10 +541,7 @@ fn refused_clients_read_their_error_every_time() {
     let dir = tempfile::tempdir().unwrap();
     let addr = start(
         Db::open(dir.path()).unwrap(),
-        Config {
-            max_connections: 1,
-            ..config()
-        },
+        config().with(|c| c.max_connections = 1),
     );
     let _seated = connect(addr);
     for _ in 0..100 {

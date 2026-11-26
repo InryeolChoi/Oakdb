@@ -431,9 +431,7 @@ fn a_server_whose_hard_limit_is_too_low_refuses_to_start_and_says_what_to_do() {
 /// A server in this process on an in-memory database, for `cli::run`.
 fn in_process(config: oakdb_server::server::Config) -> std::net::SocketAddr {
     let db = oakdb::Db::open_with(oakdb::fs::sim::SimFs::new(), "/oak").unwrap();
-    let server =
-        oakdb_server::server::Server::bind(db, oakdb_server::server::Config { port: 0, ..config })
-            .unwrap();
+    let server = oakdb_server::server::Server::bind(db, config.with(|c| c.port = 0)).unwrap();
     let addr = server.local_addr();
     thread::spawn(move || server.run());
     addr
@@ -508,10 +506,10 @@ impl std::io::Read for Pausing {
 
 #[test]
 fn when_the_server_closes_on_a_transaction_the_cli_says_it_was_rolled_back_and_exits_1() {
-    let addr = in_process(oakdb_server::server::Config {
-        idle_in_transaction_timeout: Some(Duration::from_millis(100)),
-        ..Default::default()
-    });
+    let addr = in_process(
+        oakdb_server::server::Config::default()
+            .with(|c| c.idle_in_transaction_timeout = Some(Duration::from_millis(100))),
+    );
     let input = Pausing {
         parts: vec![
             (
@@ -595,5 +593,58 @@ fn the_server_logs_an_old_transaction_and_an_idle_close() {
     assert!(
         matches!((warned, closed), (Some(w), Some(c)) if w < c),
         "{seen:?}"
+    );
+}
+
+// --- A server shutting down (issue #38, design 0028 Q6) ---
+
+/// The CLI, with a server in this process that shuts down while the person
+/// pauses in the middle of a session.
+fn shut_down_during_pause(first: &[u8], then: &[u8]) -> (u8, String) {
+    let db = oakdb::Db::open_with(oakdb::fs::sim::SimFs::new(), "/oak").unwrap();
+    let config = oakdb_server::server::Config::default().with(|c| {
+        c.port = 0;
+        c.shutdown_grace = Duration::ZERO;
+    });
+    let server = oakdb_server::server::Server::bind(db, config).unwrap();
+    let addr = server.local_addr();
+    let handle = server.shutdown_handle();
+    let running = thread::spawn(move || server.run());
+    let input = Pausing {
+        parts: vec![
+            (Duration::ZERO, first.to_vec()),
+            (Duration::from_millis(600), then.to_vec()),
+        ],
+    };
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(150));
+        handle.shutdown();
+    });
+    let (code, _, err) = run_cli(addr, BufReader::new(input));
+    assert!(running.join().unwrap().is_clean());
+    (code, err)
+}
+
+#[test]
+fn when_the_server_shuts_down_the_cli_says_so_and_exits_1() {
+    let (code, err) = shut_down_during_pause(
+        b"CREATE TABLE t (id INTEGER PRIMARY KEY);\n",
+        b"SELECT * FROM t;\n",
+    );
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("ERROR 0x49 server is shutting down"), "{err}");
+}
+
+#[test]
+fn when_the_server_shuts_down_on_a_transaction_the_cli_says_it_was_rolled_back() {
+    let (code, err) = shut_down_during_pause(
+        b"CREATE TABLE t (id INTEGER PRIMARY KEY);\nBEGIN;\nINSERT INTO t VALUES (1);\n",
+        b"COMMIT;\n",
+    );
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("ERROR 0x49 server is shutting down"), "{err}");
+    assert!(
+        err.contains("connection closed by server; the open transaction was rolled back"),
+        "{err}"
     );
 }

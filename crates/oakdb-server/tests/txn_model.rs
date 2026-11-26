@@ -257,14 +257,7 @@ fn server() -> SocketAddr {
     static ADDR: OnceLock<SocketAddr> = OnceLock::new();
     *ADDR.get_or_init(|| {
         let db = Db::open_with(SimFs::new(), "/oak").unwrap();
-        let server = Server::bind(
-            db,
-            Config {
-                port: 0,
-                ..Config::default()
-            },
-        )
-        .unwrap();
+        let server = Server::bind(db, Config::default().with(|c| c.port = 0)).unwrap();
         let addr = server.local_addr();
         thread::spawn(move || server.run());
         addr

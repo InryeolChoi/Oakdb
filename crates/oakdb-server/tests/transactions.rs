@@ -26,10 +26,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const SHORT: Duration = Duration::from_millis(200);
 
 fn config() -> Config {
-    Config {
-        port: 0,
-        ..Config::default()
-    }
+    Config::default().with(|c| c.port = 0)
 }
 
 /// A server on a fresh in-memory database holding
@@ -212,10 +209,7 @@ fn a_failed_statement_inside_a_transaction_keeps_it_open() {
 /// `end` finish the connection, and checks the row never shows, the
 /// engine has no transaction open, and the seat is free again.
 fn ends_in_rollback(config: Config, end: impl FnOnce(TcpStream)) {
-    let (addr, monitor) = start(Config {
-        max_connections: 2,
-        ..config
-    });
+    let (addr, monitor) = start(config.with(|c| c.max_connections = 2));
     let mut stream = raw(addr);
     assert_eq!(send_raw(&mut stream, "BEGIN"), Response::Done);
     assert_eq!(
@@ -276,10 +270,7 @@ fn a_malformed_frame_closes_the_connection_and_rolls_the_transaction_back() {
 
 #[test]
 fn idling_in_a_transaction_gets_0x47_then_the_close_and_a_rollback() {
-    let config = Config {
-        idle_in_transaction_timeout: Some(SHORT),
-        ..config()
-    };
+    let config = config().with(|c| c.idle_in_transaction_timeout = Some(SHORT));
     ends_in_rollback(config, |mut stream| {
         let started = Instant::now();
         let frame = read_frame(&mut stream).unwrap().expect("an ERROR first");
@@ -297,10 +288,7 @@ fn idling_in_a_transaction_gets_0x47_then_the_close_and_a_rollback() {
 
 #[test]
 fn stopping_halfway_through_a_frame_in_a_transaction_also_times_out() {
-    let config = Config {
-        idle_in_transaction_timeout: Some(SHORT),
-        ..config()
-    };
+    let config = config().with(|c| c.idle_in_transaction_timeout = Some(SHORT));
     ends_in_rollback(config, |mut stream| {
         // Half a frame, then nothing: the client is stuck, not gone.
         stream.write_all(&[0, 0, 0, 9, command::QUERY]).unwrap();
@@ -324,10 +312,7 @@ fn a_client_that_stops_reading_a_large_result_in_a_transaction_is_cut_off() {
     // The write timeout (Q5): a SELECT whose rows the client never reads
     // fills the socket buffers, and the server gives up on the write
     // instead of holding the transaction forever.
-    let config = Config {
-        idle_in_transaction_timeout: Some(SHORT),
-        ..config()
-    };
+    let config = config().with(|c| c.idle_in_transaction_timeout = Some(SHORT));
     ends_in_rollback(config, |mut stream| {
         // Half a MiB per row, in a table of their own.
         let blob = "ab".repeat(512 * 1024);
@@ -360,18 +345,12 @@ fn a_client_that_stops_reading_a_large_result_in_a_transaction_is_cut_off() {
 
 #[test]
 fn outside_a_transaction_an_idle_connection_stays_unless_told_otherwise() {
-    let (addr, _) = start(Config {
-        idle_in_transaction_timeout: Some(SHORT),
-        ..config()
-    });
+    let (addr, _) = start(config().with(|c| c.idle_in_transaction_timeout = Some(SHORT)));
     let mut a = connect(addr);
     thread::sleep(SHORT * 3);
     assert_eq!(rows(&mut a), vec![]);
 
-    let (addr, monitor) = start(Config {
-        idle_timeout: Some(SHORT),
-        ..config()
-    });
+    let (addr, monitor) = start(config().with(|c| c.idle_timeout = Some(SHORT)));
     let mut stream = raw(addr);
     let frame = read_frame(&mut stream).unwrap().expect("an ERROR first");
     let response = Response::decode(frame).unwrap();
@@ -404,10 +383,7 @@ fn the_default_idle_limit_in_a_transaction_is_a_minute_and_none_outside() {
 fn a_transaction_that_keeps_working_is_not_idle() {
     // The limit is on the wait for the next statement, not on the age of
     // the transaction.
-    let (addr, _) = start(Config {
-        idle_in_transaction_timeout: Some(SHORT),
-        ..config()
-    });
+    let (addr, _) = start(config().with(|c| c.idle_in_transaction_timeout = Some(SHORT)));
     let mut a = connect(addr);
     ok(&mut a, "BEGIN");
     for i in 0..8 {

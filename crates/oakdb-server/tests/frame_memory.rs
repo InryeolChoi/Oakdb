@@ -80,10 +80,7 @@ fn a_claimed_length_does_not_reserve_memory_until_bytes_arrive() {
     const CLIENTS: usize = 32;
     let server = Server::bind(
         Db::open_with(SimFs::new(), "/db").unwrap(),
-        Config {
-            port: 0,
-            ..Config::default()
-        },
+        Config::default().with(|c| c.port = 0),
     )
     .unwrap();
     let addr = server.local_addr();
