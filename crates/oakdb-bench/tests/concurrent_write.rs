@@ -95,7 +95,9 @@ fn group_commit_off_puts_each_commit_in_a_batch_of_its_own() {
         [0; BATCH_SIZE_BUCKETS - 1],
         "{out:?}"
     );
-    assert_eq!(engine.wal_syncs, engine.batches, "{out:?}");
+    // The counters are read one by one while the commit thread works, so
+    // a batch may be counted and its sync not yet (`Stats`).
+    assert!(engine.batches.abs_diff(engine.wal_syncs) <= 1, "{out:?}");
 }
 
 #[test]
