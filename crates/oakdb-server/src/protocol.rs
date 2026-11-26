@@ -116,6 +116,10 @@ pub mod code {
     /// The connection sat idle outside a transaction longer than the
     /// server's limit for that, which is off unless the server sets one.
     pub const IDLE: u8 = 0x48;
+    /// The server is shutting down (design 0028 Q6). It may come without a
+    /// request. A request it answers was not run, and no transaction is
+    /// left open: it was rolled back, or the answer before ended it.
+    pub const SHUTTING_DOWN: u8 = 0x49;
     /// The server failed in a way it should not.
     pub const INTERNAL: u8 = 0x7f;
 }
@@ -560,6 +564,7 @@ pub fn closes(code: u8) -> bool {
             | code::NOT_ALLOWED
             | code::IDLE_IN_TRANSACTION
             | code::IDLE
+            | code::SHUTTING_DOWN
             | code::INTERNAL
     )
 }

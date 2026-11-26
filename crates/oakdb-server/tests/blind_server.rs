@@ -1044,12 +1044,11 @@ fn a_strict_allowlist_turns_a_loopback_client_away_with_0x46_before_hello() {
     let db = oakdb::Db::open(dir.path()).unwrap();
     let server = Server::bind(
         db,
-        Config {
-            port: 0,
-            allow: Allowlist::strict(vec![]),
-            max_connections: 8,
-            ..Config::default()
-        },
+        Config::default().with(|c| {
+            c.port = 0;
+            c.allow = Allowlist::strict(vec![]);
+            c.max_connections = 8;
+        }),
     )
     .unwrap();
     let addr = server.local_addr();

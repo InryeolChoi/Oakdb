@@ -10,8 +10,9 @@ use oakdb::Db;
 use oakdb_server::allow::{Allowlist, Ipv4Net};
 use oakdb_server::client::Client;
 use oakdb_server::server::{
-    Config, Server, DEFAULT_IDLE_IN_TRANSACTION_TIMEOUT, DEFAULT_LONG_TRANSACTION_WARNING,
-    DEFAULT_MAX_CONNECTIONS, DEFAULT_PORT,
+    Config, Server, ShutdownHandle, DEFAULT_IDLE_IN_TRANSACTION_TIMEOUT,
+    DEFAULT_LONG_TRANSACTION_WARNING, DEFAULT_MAX_CONNECTIONS, DEFAULT_PORT,
+    DEFAULT_SHUTDOWN_GRACE,
 };
 
 const USAGE: &str = "\
@@ -19,6 +20,7 @@ usage:
   oakdb serve --data <dir> [--port <n>] [--allow <ip or cidr>]... [--allow-file <file>]
               [--max-connections <n>] [--idle-in-transaction-timeout <s>]
               [--idle-timeout <s>] [--warn-transaction-age <s>]
+              [--shutdown-grace <s>]
   oakdb cli [--host <host>] [--port <n>]
 
 serve
@@ -35,6 +37,18 @@ serve
   --warn-transaction-age <s>
                            log a warning when a transaction stays open this
                            many seconds (default 300, 0 for never)
+  --shutdown-grace <s>     on shutdown, give open transactions this many
+                           seconds to finish before rolling them back
+                           (default 10, 0 to roll them back at once)
+
+  SIGINT (Ctrl-C) or SIGTERM shuts the server down: new connections are
+  refused, a statement running is answered, connections are closed with
+  ERROR 0x49 (in a transaction, after the grace, rolled back), and the
+  database is checkpointed. A second signal stops it at once.
+  Exit codes: 0 shut down cleanly; 1 failed to start, or the final
+  checkpoint failed, or statements still ran 5s past the grace (the next
+  start replays the WAL); 2 wrong command line; 130 or 143 stopped by a
+  second SIGINT or SIGTERM.
 
   With no allowlist the server listens on 127.0.0.1 and only local clients
   connect. Loopback clients are always let in. An entry outside loopback
@@ -122,6 +136,7 @@ fn serve(args: &[String]) -> Result<ExitCode, Usage> {
     let mut idle_in_transaction = DEFAULT_IDLE_IN_TRANSACTION_TIMEOUT;
     let mut idle = Duration::ZERO;
     let mut warn_age = DEFAULT_LONG_TRANSACTION_WARNING;
+    let mut grace = DEFAULT_SHUTDOWN_GRACE;
     for (flag, value) in flags(args)? {
         match flag {
             "--data" => data = Some(PathBuf::from(value)),
@@ -130,6 +145,7 @@ fn serve(args: &[String]) -> Result<ExitCode, Usage> {
             "--idle-in-transaction-timeout" => idle_in_transaction = seconds(flag, value)?,
             "--idle-timeout" => idle = seconds(flag, value)?,
             "--warn-transaction-age" => warn_age = seconds(flag, value)?,
+            "--shutdown-grace" => grace = seconds(flag, value)?,
             "--allow" => match value.parse() {
                 Ok(net) => nets.push(net),
                 Err(reason) => return fail(format!("--allow {reason}")),
@@ -156,20 +172,48 @@ fn serve(args: &[String]) -> Result<ExitCode, Usage> {
         eprintln!("oakdb: warning: the allowlist lets in every address");
     }
 
+    // Before the database opens: its commit thread must inherit the mask
+    // (design 0028 Q1). No thread is made before this line.
+    let handle = ShutdownHandle::new();
+    #[cfg(unix)]
+    {
+        let signals = match oakdb_server::signal::Signals::block() {
+            Ok(signals) => signals,
+            Err(e) => return fail(format!("cannot block SIGINT and SIGTERM: {e}")),
+        };
+        if let Err(e) = signals.spawn(handle.clone()) {
+            return fail(format!("cannot start the signal thread: {e}"));
+        }
+    }
+
     let db = match Db::open(&data) {
         Ok(db) => db,
         Err(e) => return fail(format!("cannot open {}: {e}", data.display())),
     };
-    let config = Config {
-        port,
-        allow,
-        max_connections,
+    if handle.requested() {
+        // A signal came while the WAL was replayed: close without serving.
+        return Ok(match db.close() {
+            Ok(()) => {
+                eprintln!("oakdb: checkpointed and closed");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("oakdb: the final checkpoint failed: {e}");
+                ExitCode::from(1)
+            }
+        });
+    }
+    let config = Config::default().with(|c| {
+        c.port = port;
+        c.allow = allow;
+        c.max_connections = max_connections;
         // Zero is no limit; the server reads it so.
-        idle_in_transaction_timeout: Some(idle_in_transaction),
-        idle_timeout: Some(idle),
-        long_transaction_warning: Some(warn_age),
-    };
-    let server = match Server::bind(db, config) {
+        c.idle_in_transaction_timeout = Some(idle_in_transaction);
+        c.idle_timeout = Some(idle);
+        c.long_transaction_warning = Some(warn_age);
+        c.shutdown_grace = grace;
+    });
+    let server = match Server::bind_with(db, config, handle) {
         Ok(server) => server,
         Err(e) => return fail(format!("cannot start: {e}")),
     };
@@ -179,8 +223,18 @@ fn serve(args: &[String]) -> Result<ExitCode, Usage> {
         server.local_addr(),
         data.display()
     );
-    server.run();
-    Ok(ExitCode::SUCCESS)
+    let report = server.run();
+    eprintln!(
+        "oakdb: shut down in {:.1}s: {} connections closed, {} transactions rolled back",
+        report.took.as_secs_f64(),
+        report.closed,
+        report.rolled_back
+    );
+    Ok(if report.is_clean() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
 }
 
 fn cli(args: &[String]) -> Result<ExitCode, Usage> {

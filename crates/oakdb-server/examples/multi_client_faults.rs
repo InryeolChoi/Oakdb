@@ -238,7 +238,7 @@ fn kill(rounds: u64) {
 
 fn in_process(config: Config) -> (SocketAddr, Monitor<SimFs>) {
     let db = Db::open_with(SimFs::new(), "/oak").unwrap();
-    let server = Server::bind(db, Config { port: 0, ..config }).unwrap();
+    let server = Server::bind(db, config.with(|c| c.port = 0)).unwrap();
     let addr = server.local_addr();
     let monitor = server.monitor();
     thread::spawn(move || server.run());
@@ -251,10 +251,8 @@ fn in_process(config: Config) -> (SocketAddr, Monitor<SimFs>) {
 /// quarter second.
 fn sigstop() {
     let timeout = Duration::from_secs(2);
-    let (addr, monitor) = in_process(Config {
-        idle_in_transaction_timeout: Some(timeout),
-        ..Config::default()
-    });
+    let (addr, monitor) =
+        in_process(Config::default().with(|c| c.idle_in_transaction_timeout = Some(timeout)));
     let mut writer = connect(addr);
     writer
         .query("CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER)")

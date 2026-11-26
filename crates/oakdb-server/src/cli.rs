@@ -250,12 +250,13 @@ fn send(
         if let Err(e) = &result {
             writeln!(err, "{e}")?;
         }
-        // A server that closes on idling rolled back before it said so;
+        // A server that closes on idling or shutting down rolled back
+        // before it said so, and a COMMIT it answers so was not run;
         // otherwise a COMMIT may have gone through before the end.
         let rolled_back = matches!(
             result,
             Err(ClientError::Server {
-                code: code::IDLE_IN_TRANSACTION,
+                code: code::IDLE_IN_TRANSACTION | code::SHUTTING_DOWN,
                 ..
             })
         );

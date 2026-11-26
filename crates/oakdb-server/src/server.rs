@@ -15,14 +15,24 @@
 //! statement inside a transaction gets [`code::IDLE_IN_TRANSACTION`] and
 //! is closed (Q5).
 //!
-//! Not here yet, by design: a way to stop the server (#38). `run` takes
-//! connections until the process ends.
+//! A [`ShutdownHandle`] stops the server gracefully (issue #38, design
+//! 0028): the accepting thread is woken by a connection to itself, turns
+//! away the clients still waiting at the door with
+//! [`code::SHUTTING_DOWN`] and closes the listener. Each connection thread
+//! looks at the flag while it waits for the first byte of its next frame,
+//! every [`TICK`]: outside a transaction it closes with `0x49` at once,
+//! inside one it goes on for [`Config::shutdown_grace`] and is then rolled
+//! back and closed. A statement already running always finishes and is
+//! answered first. Once every connection is gone the database is closed,
+//! which is the final checkpoint. There is no list of connections, and no
+//! socket is shut from another thread: that could reset the connection
+//! and lose the `0x49` (Q5).
 
 use std::io::{self, BufReader, Read};
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::{self, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -61,6 +71,33 @@ pub const DEFAULT_IDLE_IN_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(60
 /// unless told otherwise (design 0025 Q7).
 pub const DEFAULT_LONG_TRANSACTION_WARNING: Duration = Duration::from_secs(5 * 60);
 
+/// How long transactions get to finish once shutdown starts, unless told
+/// otherwise (design 0028 Q4): with the margin and the checkpoint it fits
+/// in Kubernetes' default 30 seconds.
+pub const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
+
+/// How much longer than the grace the server waits for statements still
+/// running before it gives up and ends without the final checkpoint
+/// (design 0028 Q4). Only a stuck sync or a very long scan gets here.
+pub const SHUTDOWN_MARGIN: Duration = Duration::from_secs(5);
+
+/// How often a connection waiting for the first byte of its next frame
+/// wakes to look at the shutdown flag (design 0028 Q5).
+pub const TICK: Duration = Duration::from_millis(100);
+
+/// The message that goes with [`code::SHUTTING_DOWN`].
+pub const SHUTTING_DOWN_MESSAGE: &str = "server is shutting down";
+
+/// How long the database is waited for once the last connection has given
+/// its seat back: its thread lets go of it a moment later (review S2). It
+/// is counted from then, not from the shutdown's start, so a connection
+/// that ends at the very end of the grace and margin still gets the final
+/// checkpoint.
+const RELEASE: Duration = Duration::from_secs(1);
+
+/// How long the handle keeps trying to wake the accepting thread.
+const WAKE_FOR: Duration = Duration::from_secs(10);
+
 /// How long a refused or broken connection is given to take its error
 /// before the socket closes.
 const LINGER: Duration = Duration::from_secs(1);
@@ -72,8 +109,10 @@ const MAX_LINGERING: usize = 32;
 /// Stack of a thread that only lingers on a refused connection.
 const LINGER_STACK: usize = 64 * 1024;
 
-/// How the server runs.
+/// How the server runs. Fields are added from ticket to ticket, so it is
+/// built from [`Config::default`]: `Config::default().with(|c| c.port = 0)`.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Config {
     /// TCP port; 0 lets the operating system pick one.
     pub port: u16,
@@ -95,6 +134,18 @@ pub struct Config {
     /// A transaction this old gets one warning in the log, saying it holds
     /// old pages and conflict records. `None` or zero: no warning.
     pub long_transaction_warning: Option<Duration>,
+    /// Once shutdown starts, how long a connection inside a transaction may
+    /// go on to finish it before the server rolls it back and closes it
+    /// with [`code::SHUTTING_DOWN`]. Zero rolls them back at once.
+    pub shutdown_grace: Duration,
+}
+
+impl Config {
+    /// This configuration with `change` made to it.
+    pub fn with(mut self, change: impl FnOnce(&mut Config)) -> Config {
+        change(&mut self);
+        self
+    }
 }
 
 impl Default for Config {
@@ -106,6 +157,7 @@ impl Default for Config {
             idle_in_transaction_timeout: Some(DEFAULT_IDLE_IN_TRANSACTION_TIMEOUT),
             idle_timeout: None,
             long_transaction_warning: Some(DEFAULT_LONG_TRANSACTION_WARNING),
+            shutdown_grace: DEFAULT_SHUTDOWN_GRACE,
         }
     }
 }
@@ -134,24 +186,168 @@ struct Shared<F: Fs> {
     idle_in_transaction: Option<Duration>,
     idle: Option<Duration>,
     long_transaction: Option<Duration>,
+    /// The shutdown flag, shared with every [`ShutdownHandle`].
+    stop: Arc<Stop>,
+    grace: Duration,
+    /// Connections closed with `0x49`, and the transactions rolled back
+    /// with them.
+    closed: AtomicUsize,
+    rolled_back: AtomicUsize,
+}
+
+impl<F: Fs> Shared<F> {
+    /// When a connection is to be closed with `0x49`, once shutdown has
+    /// started: at once outside a transaction, at the end of the grace
+    /// inside one.
+    fn closes_at(&self, in_transaction: bool) -> Option<Instant> {
+        let at = *self.stop.at.get()?;
+        Some(if in_transaction { at + self.grace } else { at })
+    }
+
+    /// Whether a connection should now be closed with `0x49`.
+    fn shutting_down(&self, in_transaction: bool) -> bool {
+        self.closes_at(in_transaction)
+            .is_some_and(|at| Instant::now() >= at)
+    }
 }
 
 /// Reads a running server's numbers from any thread, for operators and
-/// tests (design 0025 Q7).
+/// tests (design 0025 Q7). It does not keep the database open: once the
+/// server has shut down it reads zeros.
 pub struct Monitor<F: Fs> {
-    shared: Arc<Shared<F>>,
+    shared: Weak<Shared<F>>,
+}
+
+impl<F: Fs> Clone for Monitor<F> {
+    fn clone(&self) -> Self {
+        Monitor {
+            shared: Weak::clone(&self.shared),
+        }
+    }
 }
 
 impl<F: Fs> Monitor<F> {
     /// The engine's numbers: commits, conflicts, open transactions and the
     /// commits kept for them.
     pub fn stats(&self) -> Stats {
-        self.shared.db.stats()
+        self.shared
+            .upgrade()
+            .map(|shared| shared.db.stats())
+            .unwrap_or_default()
     }
 
     /// Connections being served now, each on its own thread.
     pub fn connections(&self) -> usize {
-        self.shared.active.load(Ordering::Acquire)
+        self.shared
+            .upgrade()
+            .map_or(0, |shared| shared.active.load(Ordering::Acquire))
+    }
+}
+
+/// When shutdown started, and where to knock to wake the accepting thread.
+#[derive(Debug, Default)]
+struct Stop {
+    /// Set once, by the first [`ShutdownHandle::shutdown`].
+    at: OnceLock<Instant>,
+    /// The listener's address, once the server is bound.
+    wake: Mutex<Option<SocketAddr>>,
+    /// Set once the accepting thread has stopped accepting.
+    door_closed: AtomicBool,
+}
+
+/// Starts a server's graceful shutdown from any thread: the signal thread
+/// of `oakdb serve`, or a test (design 0028 Q1). Clones pull the same
+/// handle; pulling it again does nothing.
+#[derive(Debug, Clone, Default)]
+pub struct ShutdownHandle {
+    stop: Arc<Stop>,
+}
+
+impl ShutdownHandle {
+    /// A handle for a server not bound yet; [`Server::bind_with`] takes it.
+    /// Pulled before the server runs, `run` shuts down at once.
+    pub fn new() -> Self {
+        ShutdownHandle::default()
+    }
+
+    /// Starts the shutdown and returns at once; [`Server::run`] returns
+    /// once it is over.
+    pub fn shutdown(&self) {
+        if self.stop.at.set(Instant::now()).is_err() {
+            return;
+        }
+        let addr = *self
+            .stop
+            .wake
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(addr) = addr {
+            let stop = Arc::clone(&self.stop);
+            let spawned = thread::Builder::new()
+                .name("oakdb wake".into())
+                .stack_size(LINGER_STACK)
+                .spawn(move || wake(&stop, addr));
+            if spawned.is_err() {
+                let _ = TcpStream::connect_timeout(&addr, LINGER);
+            }
+        }
+    }
+
+    /// Whether the shutdown has started.
+    pub fn requested(&self) -> bool {
+        self.stop.at.get().is_some()
+    }
+}
+
+/// Wakes the accepting thread, asleep in `accept`, by connecting to it
+/// (design 0028 Q2). It keeps knocking until the door is closed: a knock
+/// can fail when descriptors run out, and then `accept` fails too and the
+/// accepting thread sees the flag by itself.
+fn wake(stop: &Stop, addr: SocketAddr) {
+    let give_up = Instant::now() + WAKE_FOR;
+    while !stop.door_closed.load(Ordering::Acquire) && Instant::now() < give_up {
+        match TcpStream::connect_timeout(&addr, LINGER) {
+            Ok(_knock) => {
+                let waited = Instant::now() + LINGER;
+                while !stop.door_closed.load(Ordering::Acquire) && Instant::now() < waited {
+                    thread::sleep(Duration::from_millis(5));
+                }
+            }
+            // The listener is gone: nobody left to wake.
+            Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => return,
+            Err(_) => thread::sleep(Duration::from_millis(20)),
+        }
+    }
+}
+
+/// What a shutdown came to, for the log and the exit code (design 0028
+/// Q8).
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct Shutdown {
+    /// Connections being served when it started.
+    pub connections: usize,
+    /// Transactions open when it started.
+    pub in_transaction: u64,
+    /// Connections closed with [`code::SHUTTING_DOWN`].
+    pub closed: usize,
+    /// Transactions rolled back because the grace ran out.
+    pub rolled_back: usize,
+    /// Connections still running a statement past the grace and
+    /// [`SHUTDOWN_MARGIN`]. If any, the database was not closed.
+    pub busy: usize,
+    /// What the final checkpoint gave: `None` if the database could not be
+    /// closed because connections were still busy.
+    pub checkpoint: Option<oakdb::Result<()>>,
+    /// From the start of the shutdown to its end.
+    pub took: Duration,
+}
+
+impl Shutdown {
+    /// Whether it ended as designed: every connection gone and the final
+    /// checkpoint done. `oakdb serve` exits 0 then, 1 otherwise.
+    pub fn is_clean(&self) -> bool {
+        self.busy == 0 && matches!(self.checkpoint, Some(Ok(())))
     }
 }
 
@@ -163,6 +359,12 @@ where
     /// the port on the address the allowlist picks. Fails, saying what to
     /// do, if the limit cannot be raised that far.
     pub fn bind(db: Db<F>, config: Config) -> io::Result<Self> {
+        Self::bind_with(db, config, ShutdownHandle::new())
+    }
+
+    /// [`Server::bind`], with a shutdown handle made beforehand, so that a
+    /// signal that comes while the database opens is not lost.
+    pub fn bind_with(db: Db<F>, config: Config, handle: ShutdownHandle) -> io::Result<Self> {
         let need = config.max_connections as u64 + FD_MARGIN;
         let got = raise_fd_limit(need)?;
         if got < need {
@@ -173,6 +375,17 @@ where
             )));
         }
         let listener = TcpListener::bind((config.allow.bind_ip(), config.port))?;
+        let mut wake = listener.local_addr()?;
+        if wake.ip().is_unspecified() {
+            // Listening on every address: knock on loopback, which the
+            // allowlist always lets in.
+            wake.set_ip(Ipv4Addr::LOCALHOST.into());
+        }
+        *handle
+            .stop
+            .wake
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(wake);
         Ok(Server {
             listener,
             shared: Arc::new(Shared {
@@ -184,6 +397,10 @@ where
                 idle_in_transaction: limit(config.idle_in_transaction_timeout),
                 idle: limit(config.idle_timeout),
                 long_transaction: limit(config.long_transaction_warning),
+                stop: handle.stop,
+                grace: config.shutdown_grace,
+                closed: AtomicUsize::new(0),
+                rolled_back: AtomicUsize::new(0),
             }),
             lingering: Arc::new(AtomicUsize::new(0)),
         })
@@ -199,80 +416,219 @@ where
     /// A handle that reads this server's numbers while it runs.
     pub fn monitor(&self) -> Monitor<F> {
         Monitor {
-            shared: Arc::clone(&self.shared),
+            shared: Arc::downgrade(&self.shared),
         }
     }
 
-    /// Takes connections until the process ends.
-    pub fn run(self) {
-        for conn in self.listener.incoming() {
-            let stream = match conn {
-                Ok(stream) => stream,
-                Err(e) => {
-                    // Out of descriptors and the like: wait instead of
-                    // spinning.
-                    eprintln!("oakdb: accepting a connection failed: {e}");
-                    thread::sleep(Duration::from_millis(10));
-                    continue;
+    /// A handle that shuts this server down.
+    pub fn shutdown_handle(&self) -> ShutdownHandle {
+        ShutdownHandle {
+            stop: Arc::clone(&self.shared.stop),
+        }
+    }
+
+    /// Takes connections until the shutdown handle is pulled, then shuts
+    /// down (design 0028) and says how that went.
+    pub fn run(self) -> Shutdown {
+        let Server {
+            listener,
+            shared,
+            lingering,
+        } = self;
+        accept(&listener, &shared, &lingering);
+        shared.stop.door_closed.store(true, Ordering::Release);
+        let at = *shared
+            .stop
+            .at
+            .get()
+            .expect("accepting stops only on shutdown");
+        let connections = shared.active.load(Ordering::Acquire);
+        let in_transaction = shared.db.stats().open_transactions;
+        eprintln!(
+            "oakdb: shutting down: {connections} connections, {in_transaction} in a transaction; \
+             waiting up to {}s for transactions",
+            shared.grace.as_secs_f64()
+        );
+        let turned_away = turn_away_waiting(&listener, &lingering);
+        // New clients are refused by the system from here on.
+        drop(listener);
+        if turned_away > 0 {
+            eprintln!("oakdb: turned away {turned_away} connections waiting at the door");
+        }
+
+        let give_up = at + shared.grace + SHUTDOWN_MARGIN;
+        while shared.active.load(Ordering::Acquire) > 0 && Instant::now() < give_up {
+            thread::sleep(Duration::from_millis(5));
+        }
+        let closed = shared.closed.load(Ordering::Acquire);
+        let rolled_back = shared.rolled_back.load(Ordering::Acquire);
+        if rolled_back > 0 {
+            eprintln!("oakdb: rolled back {rolled_back} open transactions");
+        }
+        let busy = shared.active.load(Ordering::Acquire);
+        let mut report = Shutdown {
+            connections,
+            in_transaction,
+            closed,
+            rolled_back,
+            busy,
+            checkpoint: None,
+            took: Duration::ZERO,
+        };
+        if busy > 0 {
+            eprintln!(
+                "oakdb: {busy} connections still running a statement; ending without the final \
+                 checkpoint, and the next start replays the WAL"
+            );
+            report.took = at.elapsed();
+            return report;
+        }
+        // A connection thread lets go of the database a moment after it
+        // gives its seat back; a monitor holds it for a moment too. That
+        // moment is its own, not what is left of the grace and margin.
+        let let_go_by = Instant::now() + RELEASE;
+        let mut shared = shared;
+        let db = loop {
+            match Arc::try_unwrap(shared) {
+                Ok(only) => break Some(only.db),
+                Err(back) if Instant::now() < let_go_by => {
+                    shared = back;
+                    thread::sleep(Duration::from_millis(1));
                 }
-            };
-            let Ok(peer) = stream.peer_addr() else {
-                continue;
-            };
-            if !self.shared.allow.allows(peer.ip()) {
-                eprintln!("oakdb: refused {peer}: not on the allowlist");
-                let message = format!("address {} is not allowed", peer.ip());
-                self.refuse(stream, code::NOT_ALLOWED, message);
+                Err(_) => break None,
+            }
+        };
+        report.checkpoint = db.map(|db| db.close());
+        match &report.checkpoint {
+            Some(Ok(())) => eprintln!("oakdb: checkpointed and closed"),
+            Some(Err(e)) => eprintln!(
+                "oakdb: the final checkpoint failed: {e}; the next start replays the WAL, \
+                 and every answered commit is in it"
+            ),
+            None => eprintln!(
+                "oakdb: the database is still in use; ending without the final checkpoint"
+            ),
+        }
+        report.took = at.elapsed();
+        report
+    }
+}
+
+/// Takes connections until the shutdown starts. Each one gets the flag
+/// looked at first, so the connection that woke this thread takes no seat.
+fn accept<F: Fs + 'static>(
+    listener: &TcpListener,
+    shared: &Arc<Shared<F>>,
+    lingering: &Arc<AtomicUsize>,
+) where
+    Db<F>: Send + Sync,
+{
+    while shared.stop.at.get().is_none() {
+        let (stream, peer) = match listener.accept() {
+            Ok(conn) => conn,
+            Err(e) => {
+                if shared.stop.at.get().is_some() {
+                    break;
+                }
+                // Out of descriptors and the like: wait instead of
+                // spinning.
+                eprintln!("oakdb: accepting a connection failed: {e}");
+                thread::sleep(Duration::from_millis(10));
                 continue;
             }
-            let Some(slot) = Slot::take(&self.shared) else {
-                let max = self.shared.max_connections;
-                eprintln!("oakdb: refused {peer}: {max} connections already");
-                let message = format!("too many connections (max {max})");
-                self.refuse(stream, code::TOO_MANY_CONNECTIONS, message);
-                continue;
-            };
-            let spawned = thread::Builder::new()
-                .name(format!("oakdb {peer}"))
-                .stack_size(CONNECTION_STACK)
-                .spawn(move || {
-                    eprintln!("oakdb: {peer} connected");
-                    serve_guarded(peer, &stream, || serve(&slot.shared, &stream, peer));
-                    eprintln!("oakdb: {peer} disconnected");
-                    drop(slot);
-                });
-            // On failure the closure is dropped, which frees the slot and
-            // closes the socket.
-            if let Err(e) = spawned {
-                eprintln!("oakdb: no thread for {peer}: {e}");
-            }
+        };
+        if shared.stop.at.get().is_some() {
+            refuse(
+                lingering,
+                stream,
+                code::SHUTTING_DOWN,
+                SHUTTING_DOWN_MESSAGE.into(),
+            );
+            break;
+        }
+        if !shared.allow.allows(peer.ip()) {
+            eprintln!("oakdb: refused {peer}: not on the allowlist");
+            let message = format!("address {} is not allowed", peer.ip());
+            refuse(lingering, stream, code::NOT_ALLOWED, message);
+            continue;
+        }
+        let Some(slot) = Slot::take(shared) else {
+            let max = shared.max_connections;
+            eprintln!("oakdb: refused {peer}: {max} connections already");
+            let message = format!("too many connections (max {max})");
+            refuse(lingering, stream, code::TOO_MANY_CONNECTIONS, message);
+            continue;
+        };
+        let spawned = thread::Builder::new()
+            .name(format!("oakdb {peer}"))
+            .stack_size(CONNECTION_STACK)
+            .spawn(move || {
+                eprintln!("oakdb: {peer} connected");
+                serve_guarded(peer, &stream, || serve(&slot.shared, &stream, peer));
+                eprintln!("oakdb: {peer} disconnected");
+                drop(slot);
+            });
+        // On failure the closure is dropped, which frees the slot and
+        // closes the socket.
+        if let Err(e) = spawned {
+            eprintln!("oakdb: no thread for {peer}: {e}");
         }
     }
+}
 
-    /// Sends an error to a client turned away at the door, and closes once
-    /// it has had a moment to read it. The waiting happens on a small
-    /// thread of its own, so the accepting thread never waits; past
-    /// [`MAX_LINGERING`] of them the socket closes at once, after reading
-    /// off what has already arrived.
-    fn refuse(&self, stream: TcpStream, code: u8, message: String) {
-        let _ = stream.set_write_timeout(Some(LINGER));
-        let mut writer = &stream;
-        let _ = write_frame(&mut writer, &error_frame(code, message));
-        let _ = stream.shutdown(Shutdown::Write);
-        if let Some(turn) = Lingering::take(&self.lingering) {
-            // If no thread can be had, the closure is dropped and the
-            // socket closes at once.
-            let _ = thread::Builder::new()
-                .name("oakdb refusal".into())
-                .stack_size(LINGER_STACK)
-                .spawn(move || {
-                    linger(&stream);
-                    drop(turn);
-                });
-        } else if stream.set_nonblocking(true).is_ok() {
-            let mut sink = [0u8; 4096];
-            while matches!((&stream).read(&mut sink), Ok(n) if n > 0) {}
+/// Sends `0x49` to every client already waiting in the system's queue, so
+/// they learn why instead of seeing the connection reset when the listener
+/// closes. Returns how many there were.
+fn turn_away_waiting(listener: &TcpListener, lingering: &Arc<AtomicUsize>) -> usize {
+    if listener.set_nonblocking(true).is_err() {
+        return 0;
+    }
+    let mut count = 0;
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                // On macOS a socket accepted from a nonblocking listener is
+                // nonblocking too, and lingering on it would not wait
+                // (design 0028 Q9). Linux does not pass it on.
+                let _ = stream.set_nonblocking(false);
+                refuse(
+                    lingering,
+                    stream,
+                    code::SHUTTING_DOWN,
+                    SHUTTING_DOWN_MESSAGE.into(),
+                );
+                count += 1;
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            // `WouldBlock`: nobody else is waiting.
+            Err(_) => return count,
         }
+    }
+}
+
+/// Sends an error to a client turned away at the door, and closes once
+/// it has had a moment to read it. The waiting happens on a small thread
+/// of its own, so the accepting thread never waits; past
+/// [`MAX_LINGERING`] of them the socket closes at once, after reading off
+/// what has already arrived.
+fn refuse(lingering: &Arc<AtomicUsize>, stream: TcpStream, code: u8, message: String) {
+    let _ = stream.set_write_timeout(Some(LINGER));
+    let mut writer = &stream;
+    let _ = write_frame(&mut writer, &error_frame(code, message));
+    let _ = stream.shutdown(net::Shutdown::Write);
+    if let Some(turn) = Lingering::take(lingering) {
+        // If no thread can be had, the closure is dropped and the socket
+        // closes at once.
+        let _ = thread::Builder::new()
+            .name("oakdb refusal".into())
+            .stack_size(LINGER_STACK)
+            .spawn(move || {
+                linger(&stream);
+                drop(turn);
+            });
+    } else if stream.set_nonblocking(true).is_ok() {
+        let mut sink = [0u8; 4096];
+        while matches!((&stream).read(&mut sink), Ok(n) if n > 0) {}
     }
 }
 
@@ -375,7 +731,7 @@ fn send(stream: &TcpStream, response: &Response) -> io::Result<()> {
 /// [`LINGER`], so the close does not reset the connection and throw away
 /// the error it was just sent.
 fn linger(stream: &TcpStream) {
-    let _ = stream.shutdown(Shutdown::Write);
+    let _ = stream.shutdown(net::Shutdown::Write);
     let deadline = Instant::now() + LINGER;
     let _ = stream.set_read_timeout(Some(LINGER));
     // Small enough for the LINGER_STACK thread this runs on: a buffer the
@@ -412,8 +768,10 @@ fn timed_out(e: &io::Error) -> bool {
     )
 }
 
-/// The socket's read and write timeouts, set only when they change, so a
-/// connection that keeps one limit makes no system call per statement.
+/// The socket's read and write timeouts, set only when they change. The
+/// wait for a frame's first byte and the reads of its rest both wake every
+/// [`TICK`], so a statement usually sets no option at all; the write
+/// timeout is set only when the limit changes.
 struct Timeouts<'s> {
     stream: &'s TcpStream,
     read: Option<Duration>,
@@ -452,17 +810,40 @@ enum Wait {
     Closed,
     /// The idle limit passed first.
     Idle,
+    /// The server is shutting down, and this connection is to close now.
+    ShuttingDown,
 }
 
 /// Runs one connection to its end.
 fn serve<F: Fs>(shared: &Shared<F>, stream: &TcpStream, peer: SocketAddr) -> io::Result<()> {
     stream.set_nodelay(true)?;
     let mut reader = BufReader::new(stream);
+    let mut timeouts = Timeouts {
+        stream,
+        read: None,
+        write: None,
+    };
 
-    // The handshake.
-    let frame = match read_frame(&mut reader) {
+    // The handshake, waited for as any frame is, so a shutdown reaches a
+    // client that has not said HELLO yet too.
+    match wait_for_frame(
+        shared,
+        &mut reader,
+        &mut timeouts,
+        None,
+        &mut None,
+        peer,
+        false,
+    )? {
+        Wait::Ready => {}
+        Wait::Closed => return Ok(()),
+        Wait::Idle | Wait::ShuttingDown => return shut(shared, stream, None),
+    }
+    let mut rest = Rest::new(shared, &mut reader, &mut timeouts, None, false);
+    let frame = match read_frame(&mut rest) {
         Ok(Some(frame)) => frame,
         Ok(None) => return Ok(()),
+        Err(FrameError::Io(_)) if rest.shut => return shut(shared, stream, None),
         Err(e) => return frame_failed(stream, e),
     };
     let refused = match Request::decode(frame) {
@@ -476,19 +857,18 @@ fn serve<F: Fs>(shared: &Shared<F>, stream: &TcpStream, peer: SocketAddr) -> io:
     if let Some(message) = refused {
         return send_error(stream, code::HANDSHAKE, message).map(|_| ());
     }
+    if shared.shutting_down(false) {
+        return shut(shared, stream, None);
+    }
     send(stream, &Response::Ready { version: VERSION })?;
 
     // Dropped however this function ends, unwinding included: that rolls
     // an open transaction back (design 0025 Q1).
     let mut session = Session::new(&shared.db);
     let mut open: Option<Open> = None;
-    let mut timeouts = Timeouts {
-        stream,
-        read: None,
-        write: None,
-    };
     loop {
-        let idle = if session.in_transaction() {
+        let in_transaction = session.in_transaction();
+        let idle = if in_transaction {
             shared.idle_in_transaction
         } else {
             shared.idle
@@ -496,16 +876,28 @@ fn serve<F: Fs>(shared: &Shared<F>, stream: &TcpStream, peer: SocketAddr) -> io:
         if let Err(e) = timeouts.write(idle) {
             return Err(rolled_back_on_error(session, e));
         }
-        match wait_for_frame(shared, &mut reader, &mut timeouts, idle, &mut open, peer)? {
+        let waited = wait_for_frame(
+            shared,
+            &mut reader,
+            &mut timeouts,
+            idle,
+            &mut open,
+            peer,
+            in_transaction,
+        )?;
+        match waited {
             Wait::Ready => {}
             Wait::Closed => return Ok(()),
             Wait::Idle => return idled(stream, session, idle, peer),
+            Wait::ShuttingDown => return shut(shared, stream, Some(session)),
         }
-        // Halfway through a frame, each read gets the same limit.
-        timeouts.read(idle)?;
-        let frame = match read_frame(&mut reader) {
+        // Halfway through a frame, each read gets the same limit, and the
+        // shutdown reaches it too (review S1).
+        let mut rest = Rest::new(shared, &mut reader, &mut timeouts, idle, in_transaction);
+        let frame = match read_frame(&mut rest) {
             Ok(Some(frame)) => frame,
             Ok(None) => return Ok(()),
+            Err(FrameError::Io(_)) if rest.shut => return shut(shared, stream, Some(session)),
             Err(FrameError::Io(e)) if timed_out(&e) => {
                 return idled(stream, session, idle, peer);
             }
@@ -541,8 +933,12 @@ fn serve<F: Fs>(shared: &Shared<F>, stream: &TcpStream, peer: SocketAddr) -> io:
 /// Waits for the first byte of the next frame, at most `idle`. Only this
 /// wait counts as idle: running a statement, its commit's sync included,
 /// does not (design 0025 Q5). It wakes early to log the open
-/// transaction's age once that passes the warning limit, and waits on;
-/// `fill_buf` takes no byte, so waking loses nothing.
+/// transaction's age once that passes the warning limit, and every
+/// [`TICK`] to look at the shutdown flag (design 0028 Q5), and waits on;
+/// `fill_buf` takes no byte, so waking loses nothing. The flag is looked
+/// at before anything already sent is read: once a connection is to
+/// close, a statement sent after its last answer is not run.
+#[allow(clippy::too_many_arguments)]
 fn wait_for_frame<F: Fs>(
     shared: &Shared<F>,
     reader: &mut BufReader<&TcpStream>,
@@ -550,11 +946,15 @@ fn wait_for_frame<F: Fs>(
     idle: Option<Duration>,
     open: &mut Option<Open>,
     peer: SocketAddr,
+    in_transaction: bool,
 ) -> io::Result<Wait> {
     use std::io::BufRead;
     let started = Instant::now();
     let deadline = idle.map(|idle| started + idle);
     loop {
+        if shared.shutting_down(in_transaction) {
+            return Ok(Wait::ShuttingDown);
+        }
         let warn_at = match (&*open, shared.long_transaction) {
             (Some(o), Some(after)) if !o.warned => Some(o.since + after),
             _ => None,
@@ -563,12 +963,17 @@ fn wait_for_frame<F: Fs>(
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         };
-        // A timeout of zero is refused, so at least a millisecond.
+        // A timeout of zero is refused, so at least a millisecond. With
+        // nothing due before the next tick the timeout stays TICK, so
+        // waiting on sets no option again.
         let now = Instant::now();
-        timeouts.read(wake.map(|w| {
-            w.saturating_duration_since(now)
-                .max(Duration::from_millis(1))
-        }))?;
+        let timeout = match wake {
+            Some(w) if w < now + TICK => w
+                .saturating_duration_since(now)
+                .max(Duration::from_millis(1)),
+            _ => TICK,
+        };
+        timeouts.read(Some(timeout))?;
         match reader.fill_buf() {
             Ok([]) => return Ok(Wait::Closed),
             Ok(_) => return Ok(Wait::Ready),
@@ -580,6 +985,83 @@ fn wait_for_frame<F: Fs>(
                 }
             }
             Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Reads the rest of a frame whose first byte is here. Each read waits at
+/// most `idle`, as before; it wakes every [`TICK`] to look at the shutdown
+/// flag, and once the connection is to close it gives a frame already on
+/// its way one more tick and then gives up, with [`Rest::shut`] set
+/// (review S1). Without that, a client that sent one byte and stopped held
+/// the shutdown for the grace and the margin, and ended it without the
+/// final checkpoint. A read that times out has read nothing, so waking
+/// loses no byte.
+struct Rest<'a, 'r, 's, F: Fs> {
+    shared: &'a Shared<F>,
+    reader: &'a mut BufReader<&'r TcpStream>,
+    timeouts: &'a mut Timeouts<'s>,
+    idle: Option<Duration>,
+    in_transaction: bool,
+    /// Whether the read gave up because the server is shutting down.
+    shut: bool,
+}
+
+impl<'a, 'r, 's, F: Fs> Rest<'a, 'r, 's, F> {
+    fn new(
+        shared: &'a Shared<F>,
+        reader: &'a mut BufReader<&'r TcpStream>,
+        timeouts: &'a mut Timeouts<'s>,
+        idle: Option<Duration>,
+        in_transaction: bool,
+    ) -> Self {
+        Rest {
+            shared,
+            reader,
+            timeouts,
+            idle,
+            in_transaction,
+            shut: false,
+        }
+    }
+}
+
+impl<F: Fs> Read for Rest<'_, '_, '_, F> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let idle_until = self.idle.map(|idle| Instant::now() + idle);
+        loop {
+            let now = Instant::now();
+            let stop_at = self
+                .shared
+                .closes_at(self.in_transaction)
+                .map(|at| at + TICK);
+            if stop_at.is_some_and(|at| now >= at) {
+                self.shut = true;
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    SHUTTING_DOWN_MESSAGE,
+                ));
+            }
+            if idle_until.is_some_and(|at| now >= at) {
+                return Err(io::ErrorKind::TimedOut.into());
+            }
+            let wake = match (idle_until, stop_at) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+            // As in `wait_for_frame`: at least a millisecond, and TICK when
+            // nothing is due sooner, so a statement sets no option again.
+            let timeout = match wake {
+                Some(w) if w < now + TICK => w
+                    .saturating_duration_since(now)
+                    .max(Duration::from_millis(1)),
+                _ => TICK,
+            };
+            self.timeouts.read(Some(timeout))?;
+            match self.reader.read(buf) {
+                Err(e) if e.kind() == io::ErrorKind::Interrupted || timed_out(&e) => {}
+                done => return done,
+            }
         }
     }
 }
@@ -657,6 +1139,24 @@ fn idled<F: Fs>(
     send_error(stream, code, message).map(|_| ())
 }
 
+/// The server is shutting down: rolls back what the connection held, tells
+/// it so with `0x49`, and closes (design 0028 Q3, Q6). Every statement it
+/// ran has been answered already.
+fn shut<F: Fs>(
+    shared: &Shared<F>,
+    stream: &TcpStream,
+    session: Option<Session<'_, F>>,
+) -> io::Result<()> {
+    if session.as_ref().is_some_and(Session::in_transaction) {
+        shared.rolled_back.fetch_add(1, Ordering::AcqRel);
+    }
+    // Rolled back before the client hears of it.
+    drop(session);
+    shared.closed.fetch_add(1, Ordering::AcqRel);
+    let _ = stream.set_write_timeout(Some(LINGER));
+    send_error(stream, code::SHUTTING_DOWN, SHUTTING_DOWN_MESSAGE.into()).map(|_| ())
+}
+
 /// Runs one statement on the connection's session and makes its response.
 fn run<F: Fs>(shared: &Shared<F>, session: &mut Session<'_, F>, sql: &str) -> Response {
     #[cfg(test)]
@@ -703,6 +1203,10 @@ mod tests {
             idle_in_transaction: None,
             idle: None,
             long_transaction: None,
+            stop: Arc::default(),
+            grace: Duration::ZERO,
+            closed: AtomicUsize::new(0),
+            rolled_back: AtomicUsize::new(0),
         });
         oakdb_sql::execute(&shared.db, "CREATE TABLE t (id INTEGER PRIMARY KEY)").unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -743,6 +1247,36 @@ mod tests {
                 rows: vec![]
             }
         );
+    }
+
+    #[test]
+    fn the_last_connection_ending_just_before_the_margin_still_gets_the_checkpoint() {
+        // Review S2: the database is let go of a moment after the last seat
+        // is given back. When that happens at the very end of the grace and
+        // margin, the close still needs a moment of its own.
+        use oakdb::fs::sim::SimFs;
+
+        let db = Db::open_with(SimFs::new(), "/oak").unwrap();
+        let config = Config::default().with(|c| {
+            c.port = 0;
+            c.shutdown_grace = Duration::ZERO;
+        });
+        let server = Server::bind(db, config).unwrap();
+        // The shutdown started a grace and a margin ago: the deadline is
+        // now, and nobody is seated.
+        let started = Instant::now()
+            .checked_sub(SHUTDOWN_MARGIN)
+            .expect("the clock goes back that far");
+        server.shared.stop.at.set(started).unwrap();
+        // Held as a connection thread holds it after giving its seat back.
+        let held = Arc::clone(&server.shared);
+        let letting_go = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            drop(held);
+        });
+        let report = server.run();
+        letting_go.join().unwrap();
+        assert!(report.is_clean(), "{report:?}");
     }
 
     // A panic on a connection's thread used to come from a planted disk

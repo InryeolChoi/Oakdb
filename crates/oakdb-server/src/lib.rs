@@ -8,3 +8,5 @@ pub mod protocol;
 #[doc(hidden)]
 pub mod rlimit;
 pub mod server;
+#[cfg(unix)]
+pub mod signal;
