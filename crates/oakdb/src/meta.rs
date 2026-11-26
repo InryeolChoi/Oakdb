@@ -143,8 +143,8 @@ fn u64_at(bytes: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap())
 }
 
-/// A meta page that claims a different page size, for tests elsewhere.
-#[cfg(test)]
+/// A meta page that claims a different page size, for `db`'s tests.
+#[cfg(all(test, not(loom)))]
 pub(crate) fn encode_for_page_size(slot: &Slot, page_size: u32) -> Vec<u8> {
     encode_with_page_size(slot, page_size)
 }

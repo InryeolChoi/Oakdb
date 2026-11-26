@@ -10,6 +10,14 @@
 //! commit thread waiting on it when the database is dropped would look
 //! stuck forever. Here dropping the database closes the queue, which loom
 //! follows.
+//!
+//! One thing `mpsc` did that this does not (PR #79 review P2): if the
+//! commit thread died, a send to `mpsc` failed and the requester panicked.
+//! Here the request waits in a queue no one takes from, holding its own
+//! answer's sender, so the requester waits forever. Left as it is: the
+//! commit thread catches every panic in its work (`Committer::guarded`)
+//! and answers, so nothing in the engine ends it before the database is
+//! dropped.
 
 use std::collections::VecDeque;
 
