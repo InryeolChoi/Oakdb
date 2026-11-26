@@ -1,0 +1,19 @@
+[package]
+name = "oakdb-bench"
+version = "0.1.0"
+description = "Benchmarks of Oakdb against SQLite: commits a second from many threads (issue #30)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+oakdb = { path = "../oakdb", features = ["bench-knobs"] }
+oakdb-sql = { path = "../oakdb-sql" }
+# The same SQLite on both OSes, built from its C source (design 0026 Q6):
+# the system's differs in version and build options.
+rusqlite = { version = "0.42.0", features = ["bundled"] }
+
+[dev-dependencies]
+tempfile = "3"

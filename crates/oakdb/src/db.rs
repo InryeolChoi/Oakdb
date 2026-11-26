@@ -49,6 +49,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, PoisonError};
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use crate::checkpoint;
 use crate::checksum;
@@ -81,6 +82,11 @@ pub const COMMIT_THREAD: &str = "oakdb-commit";
 /// beyond it go in the next batch, in the order they came.
 pub const MAX_BATCH: usize = 128;
 
+/// How many buckets [`Stats::batch_sizes`] has: batches of 1, 2-3, 4-7,
+/// ..., 64-127, and [`MAX_BATCH`] (128) or more (issue #30, design 0026
+/// Q1).
+pub const BATCH_SIZE_BUCKETS: usize = 8;
+
 /// What the commit thread did since the database was opened, from
 /// [`Db::stats`] (issue #28, design 0021). Several commits sharing one sync
 /// show as `wal_syncs < commits`. A batch holds the commits that passed and
@@ -107,6 +113,16 @@ pub struct Stats {
     /// The most commits one batch held, conflicting ones included, as
     /// [`MAX_BATCH`] counts them.
     pub largest_batch: u64,
+    // What the benchmark reads to explain its numbers (issue #30, design
+    // 0026 Q1).
+    /// How many batches held each number of commits, conflicting ones
+    /// included: bucket `i` counts batches of `2^i` to `2^(i+1) - 1`
+    /// commits, and the last one every batch of 128 or more. They add up
+    /// to `batches`.
+    pub batch_sizes: [u64; BATCH_SIZE_BUCKETS],
+    /// Nanoseconds the commit thread spent writing batches to the WAL and
+    /// syncing them, almost all of it in the sync.
+    pub wal_write_nanos: u64,
     /// Commits answered [`Error::OutcomeUnknown`]: those that passed the
     /// conflict check in the batch whose write or sync failed.
     pub in_doubt: u64,
@@ -156,6 +172,8 @@ struct Counters {
     batches: AtomicU64,
     wal_syncs: AtomicU64,
     largest_batch: AtomicU64,
+    batch_sizes: [AtomicU64; BATCH_SIZE_BUCKETS],
+    wal_write_nanos: AtomicU64,
     in_doubt: AtomicU64,
 }
 
@@ -168,6 +186,11 @@ impl Counters {
             batches: self.batches.load(Ordering::Relaxed),
             wal_syncs: self.wal_syncs.load(Ordering::Relaxed),
             largest_batch: self.largest_batch.load(Ordering::Relaxed),
+            batch_sizes: self
+                .batch_sizes
+                .each_ref()
+                .map(|count| count.load(Ordering::Relaxed)),
+            wal_write_nanos: self.wal_write_nanos.load(Ordering::Relaxed),
             in_doubt: self.in_doubt.load(Ordering::Relaxed),
         }
     }
@@ -194,6 +217,9 @@ struct Committer<File: FsFile> {
     /// The latest committed tree, the same as `shared`'s: kept here too so
     /// building the next commit takes no lock.
     tree: Arc<Tree>,
+    /// The most commits one batch takes: [`MAX_BATCH`], unless the
+    /// database was opened with another for a benchmark.
+    max_batch: usize,
 }
 
 /// What commits change, under one lock, so a transaction's snapshot and
@@ -222,17 +248,30 @@ impl<F: Fs> Db<F> {
     /// Opens the database in directory `path`, doing all file access through
     /// `fs`.
     pub fn open_with(fs: F, path: impl AsRef<Path>) -> Result<Self> {
-        Self::open_planted(fs, path.as_ref(), None)
+        Self::open_planted(fs, path.as_ref(), None, MAX_BATCH)
+    }
+
+    /// Opens the database as [`Db::open_with`] does, with batches of at
+    /// most `max_batch` commits instead of [`MAX_BATCH`]: 1 turns group
+    /// commit off, for a benchmark to compare (issue #30, design 0026 Q5).
+    ///
+    /// # Panics
+    ///
+    /// If `max_batch` is 0: a batch holds at least one commit.
+    #[cfg(feature = "bench-knobs")]
+    pub fn open_with_max_batch(fs: F, path: impl AsRef<Path>, max_batch: usize) -> Result<Self> {
+        assert!(max_batch > 0, "a batch holds at least one commit");
+        Self::open_planted(fs, path.as_ref(), None, max_batch)
     }
 
     /// Opens the database as [`Db::open_with`] does, with `bug` planted in
     /// it, for a test to see the history checker find it (issue #29).
     #[cfg(feature = "planted-bugs")]
     pub fn open_with_bug(fs: F, path: impl AsRef<Path>, bug: PlantedBug) -> Result<Self> {
-        Self::open_planted(fs, path.as_ref(), Some(bug))
+        Self::open_planted(fs, path.as_ref(), Some(bug), MAX_BATCH)
     }
 
-    fn open_planted(fs: F, dir: &Path, bug: Option<PlantedBug>) -> Result<Self> {
+    fn open_planted(fs: F, dir: &Path, bug: Option<PlantedBug>, max_batch: usize) -> Result<Self> {
         fs.create_dir_all(dir)?;
         let file = fs.open(&dir.join(DATA_FILE))?;
         file.try_lock().map_err(|e| match e.kind() {
@@ -351,6 +390,7 @@ impl<F: Fs> Db<F> {
             file,
             wal,
             tree,
+            max_batch,
         };
         let requests = Arc::new(Queue::new());
         let queue = Arc::clone(&requests);
@@ -541,7 +581,8 @@ impl<File: FsFile> Committer<File> {
     /// dropped. Commits go in batches (issue #28, design 0021): see
     /// [`commit_queue::serve`].
     fn run(mut self, requests: &Queue<Request>) {
-        commit_queue::serve(&mut self, requests, MAX_BATCH);
+        let max_batch = self.max_batch;
+        commit_queue::serve(&mut self, requests, max_batch);
     }
 
     /// Runs `work`, the request being answered. If it panics, a bug, it
@@ -590,6 +631,7 @@ impl<File: FsFile> Committer<File> {
         counters
             .largest_batch
             .fetch_max(batch.len() as u64, Ordering::Relaxed);
+        bump(&counters.batch_sizes[batch_size_bucket(batch.len())], 1);
         let (verdicts, next) = self.judge(batch);
         let mut passed = Vec::new();
         let mut later = Vec::new();
@@ -703,7 +745,13 @@ impl<File: FsFile> Committer<File> {
         if !next.has_dirty() && next.meta() == self.tree.meta() {
             return Ok(());
         }
-        append(&mut self.wal, next).map_err(|e| {
+        let started = Instant::now();
+        let appended = append(&mut self.wal, next);
+        bump(
+            &self.shared.counters.wal_write_nanos,
+            u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+        );
+        appended.map_err(|e| {
             // Appending only fails writing or syncing, so whatever it is,
             // the outcome is unknown. The tree is not swapped and the WAL
             // tail stays where it was, but neither is used again: the
@@ -819,6 +867,11 @@ fn answer_later(batch: &mut [Waiting], later: Vec<(usize, Error)>) {
 /// Adds `n` to `counter`, one of [`Counters`].
 fn bump(counter: &AtomicU64, n: u64) {
     counter.fetch_add(n, Ordering::Relaxed);
+}
+
+/// The bucket of [`Stats::batch_sizes`] a batch of `len` commits counts in.
+fn batch_size_bucket(len: usize) -> usize {
+    (len.max(1).ilog2() as usize).min(BATCH_SIZE_BUCKETS - 1)
 }
 
 /// The message a panic was raised with, if it was text.

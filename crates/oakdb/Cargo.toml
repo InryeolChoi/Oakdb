@@ -21,6 +21,10 @@ loom = "0.7"
 # history checker find them (design 0024 V6). Off by default; even when on,
 # a database has none unless it is opened with one.
 planted-bugs = []
+# Knobs a benchmark turns that no user needs (issue #30, design 0026 Q5):
+# `Db::open_with_max_batch`, to turn group commit off. Off by default; even
+# when on, a database opened the usual way has batches of `MAX_BATCH`.
+bench-knobs = []
 
 [dev-dependencies]
 oakdb-history = { path = "../oakdb-history" }

@@ -15,7 +15,9 @@ use std::time::{Duration, Instant};
 
 use oakdb::fs::sim::{HeldSyncs, SimFs, TornSector};
 use oakdb::fs::{Fs, FsFile};
-use oakdb::{Db, Error, Stats, Txn, CHECKPOINT_AFTER, COMMIT_THREAD, MAX_BATCH, WAL_FILE};
+use oakdb::{
+    Db, Error, Stats, Txn, BATCH_SIZE_BUCKETS, CHECKPOINT_AFTER, COMMIT_THREAD, MAX_BATCH, WAL_FILE,
+};
 
 /// How long a test waits for something that must happen before failing.
 const WAIT: Duration = Duration::from_secs(10);
@@ -174,6 +176,79 @@ fn a_batch_holds_at_most_max_batch_commits() {
     // The first, a full batch, and the two left over.
     assert_eq!(after.batches - before.batches, 3, "{after:?}");
     assert_eq!(after.wal_syncs - before.wal_syncs, 3, "{after:?}");
+}
+
+/// Which bucket of `Stats::batch_sizes` a batch of `len` commits counts
+/// in: 1, 2-3, 4-7, ..., 64-127, 128 and more.
+fn bucket(len: u64) -> usize {
+    usize::try_from(len.ilog2())
+        .unwrap()
+        .min(BATCH_SIZE_BUCKETS - 1)
+}
+
+#[test]
+fn each_batch_counts_once_in_the_bucket_of_its_size() {
+    // A batch of one, then one of five, then the most a batch holds.
+    let fs = SimFs::new();
+    let db = open(&fs);
+    let before = db.stats();
+    let held = fs.hold_syncs();
+    thread::scope(|s| {
+        let db = &db;
+        let first = hold_first(s, db, &held, b"a", b"1");
+        let waiting: Vec<_> = (0..5u8)
+            .map(|i| send(s, db, writing(db, &[vec![b'k', i]], b"v")))
+            .collect();
+        held.let_waiting_go();
+        first.join().unwrap().unwrap();
+        held.wait_for_sync();
+        let n = u32::try_from(MAX_BATCH).unwrap();
+        let start = db.stats().received;
+        let full: Vec<_> = (0..n)
+            .map(|i| {
+                let txn = writing(db, &[i.to_be_bytes().to_vec()], b"v");
+                s.spawn(move || txn.commit())
+            })
+            .collect();
+        wait_received(db, start + u64::from(n));
+        held.release();
+        for commit in waiting.into_iter().chain(full) {
+            commit.join().unwrap().unwrap();
+        }
+    });
+    let after = db.stats();
+    let mut grew = [0u64; BATCH_SIZE_BUCKETS];
+    for (at, (a, b)) in after.batch_sizes.iter().zip(before.batch_sizes).enumerate() {
+        grew[at] = a - b;
+    }
+    let mut want = [0u64; BATCH_SIZE_BUCKETS];
+    for len in [1, 5, MAX_BATCH as u64] {
+        want[bucket(len)] += 1;
+    }
+    assert_eq!(grew, want, "{after:?}");
+    assert_eq!(after.batch_sizes.iter().sum::<u64>(), after.batches);
+    assert!(
+        after.wal_write_nanos > before.wal_write_nanos,
+        "writing the WAL took no time: {after:?}"
+    );
+}
+
+#[test]
+fn the_buckets_split_at_powers_of_two() {
+    assert_eq!(BATCH_SIZE_BUCKETS, 8);
+    let edges = [
+        (1, 0),
+        (2, 1),
+        (3, 1),
+        (4, 2),
+        (7, 2),
+        (8, 3),
+        (127, 6),
+        (128, 7),
+    ];
+    for (len, at) in edges {
+        assert_eq!(bucket(len), at, "batch of {len}");
+    }
 }
 
 #[test]
@@ -532,6 +607,13 @@ impl Rng {
 
 #[test]
 fn power_cuts_among_threads_keep_every_acknowledged_commit() {
+    power_cuts_among_threads(open);
+}
+
+/// Four threads commit while the power is cut at a random op, for 24 seeds;
+/// opening again must find every acknowledged commit, each commit whole or
+/// not at all. The databases come from `open`.
+fn power_cuts_among_threads(open: impl Fn(&SimFs) -> Db<SimFs>) {
     // The threads' order is up to the scheduler, so which commits share a
     // batch is too; the judge does not depend on it.
     let mut rng = Rng(28);
@@ -584,4 +666,50 @@ fn power_cuts_among_threads_keep_every_acknowledged_commit() {
             panic!("seed {seed}: {e}");
         }
     }
+}
+
+/// Group commit turned off, for the benchmark's "off" line (issue #30,
+/// design 0026 Q5): a database whose batches hold one commit each.
+#[cfg(feature = "bench-knobs")]
+fn open_one_at_a_time(fs: &SimFs) -> Db<SimFs> {
+    Db::open_with_max_batch(fs.clone(), "/oak", 1).unwrap()
+}
+
+#[cfg(feature = "bench-knobs")]
+#[test]
+fn with_batches_of_one_every_commit_has_its_own_sync() {
+    let fs = SimFs::new();
+    let db = open_one_at_a_time(&fs);
+    let before = db.stats();
+    let held = fs.hold_syncs();
+    thread::scope(|s| {
+        let db = &db;
+        let first = hold_first(s, db, &held, b"a", b"1");
+        let waiting: Vec<_> = (0..5u8)
+            .map(|i| send(s, db, writing(db, &[vec![b'k', i]], b"v")))
+            .collect();
+        held.release();
+        first.join().unwrap().unwrap();
+        for commit in waiting {
+            commit.join().unwrap().unwrap();
+        }
+    });
+    let after = db.stats();
+    // Five waited behind the first, yet each went on its own.
+    assert_eq!(delta(after, before), (6, 6, 6, 0), "{after:?}");
+    assert_eq!(after.largest_batch, 1);
+    assert_eq!(after.batch_sizes[0] - before.batch_sizes[0], 6);
+}
+
+#[cfg(feature = "bench-knobs")]
+#[test]
+fn with_batches_of_one_power_cuts_keep_every_acknowledged_commit() {
+    power_cuts_among_threads(open_one_at_a_time);
+}
+
+#[cfg(feature = "bench-knobs")]
+#[test]
+#[should_panic(expected = "at least one")]
+fn a_batch_cannot_hold_no_commit() {
+    let _ = Db::open_with_max_batch(SimFs::new(), "/oak", 0);
 }
