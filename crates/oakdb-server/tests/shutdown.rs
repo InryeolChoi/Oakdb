@@ -145,6 +145,15 @@ fn wal_len(fs: &SimFs) -> u64 {
         .unwrap()
 }
 
+/// On macOS loopback finishes the handshake asynchronously: `connect`
+/// can return before the server's side is in the accept queue, and on a
+/// busy machine the sweep then finds nobody, so closing the listener
+/// resets the client (a connection after the door closed). A moment lets
+/// the clients settle in the queue first.
+fn settle_in_the_queue() {
+    thread::sleep(Duration::from_millis(100));
+}
+
 fn eventually(what: &str, mut done: impl FnMut() -> bool) {
     let deadline = Instant::now() + TIMEOUT;
     while !done() {
@@ -224,6 +233,7 @@ fn clients_waiting_at_the_door_get_0x49_not_a_reset() {
             s
         })
         .collect();
+    settle_in_the_queue();
     let handle = server.shutdown_handle();
     handle.shutdown();
     let report = server.run();
@@ -540,6 +550,7 @@ fn a_client_waiting_at_the_door_may_go_on_sending_after_its_0x49_without_a_reset
     let mut waiting = TcpStream::connect(server.local_addr()).unwrap();
     waiting.set_read_timeout(Some(TIMEOUT)).unwrap();
     write_frame(&mut waiting, &Request::Hello { version: VERSION }.encode()).unwrap();
+    settle_in_the_queue();
     let handle = server.shutdown_handle();
     handle.shutdown();
     let run = thread::spawn(move || server.run());
